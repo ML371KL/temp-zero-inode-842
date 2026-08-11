@@ -1,0 +1,165 @@
+name: Фолбэк-сборщик (когда VPS молчит)
+
+# Второй писатель, который почти всегда не пишет.
+#
+# Основной конвейер живёт на VPS (systemd-таймеры moex-radar-*). Здесь — страховка от
+# того единственного отказа, который VPS сам про себя сообщить не может: машина умерла,
+# сеть отвалилась, таймер выключен после ручного вмешательства. Разрешение конфликта
+# двух писателей — не в этом файле, а в лизе (docs/CONTRACT.md §5): прогон ниже
+# опрашивает `lease.json` и молча выходит, если хартбит VPS свежий. Урок соседней
+# панели: 5 августа Actions и VPS отработали в одну минуту и записали в один журнал —
+# с тех пор право на запись всегда у кого-то одного, а не у обоих сразу.
+#
+# Проверка возраста витрины ниже дублирует лиз намеренно. Лиз — гарантия
+# корректности, эта проверка — экономия: раннер, который поднялся, поставил Python
+# и прочитал лиз, стоит минуту тарифа, а раннер, который вышел на третьей секунде,
+# стоит той же минуты, но не занимает очередь и не шумит в журнале.
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Запустить даже если витрина свежая (лиз всё равно проверится)"
+        type: boolean
+        default: false
+  schedule:
+    # Каждые два часа, но только в рабочем окне (07:00–21:00 UTC = 10:00–00:00 МСК,
+    # будни) — ровно тогда, когда на VPS работают таймеры. Ночью и в выходные витрина
+    # СТАРАЯ ЗАКОННО: биржа закрыта, конвейер не тикает, и запуск фолбэка увидел бы
+    # «протухло» там, где всё в порядке, — забрал бы лиз у живого VPS и заставил его
+    # перехватывать перо на утреннем такте.
+    - cron: "23 7-21/2 * * 1-5"
+
+permissions:
+  contents: read
+
+concurrency:
+  # Одна очередь на всех писателей репозитория. Отменять идущую запись нельзя: прогон,
+  # убитый посередине публикации, оставит в бакете половину истории.
+  group: moex-radar-writer
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Решить, нужен ли этот прогон
+        id: gate
+        env:
+          # Порог держим не ниже TTL лиза (5400 с = 90 мин, docs/CONTRACT.md §5):
+          # иначе воркфлоу будет регулярно говорить «пора», а пайплайн — «VPS жив,
+          # не пишу», и каждый такой круг стоит минуты тарифа. Значение по умолчанию
+          # совпадает с STALE_AFTER_MINUTES — возрастом, на котором краснеет фронт.
+          MAX_AGE_MIN: ${{ vars.FALLBACK_MAX_AGE_MIN || '150' }}
+          FORCE: ${{ inputs.force }}
+          HAVE_KEYS: ${{ secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != '' }}
+        run: |
+          set -euo pipefail
+
+          # Молчаливый фолбэк без ключей — худший вид отказа: он выглядит как зелёный
+          # прогон и как работающая страховка, а страховки нет. Красный прогон здесь
+          # честнее.
+          if [ "$HAVE_KEYS" != "true" ]; then
+            echo "::error::нет секретов R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY — писать нечем"
+            exit 1
+          fi
+
+          if [ "$FORCE" = "true" ]; then
+            echo "ручной запуск с force: проверку возраста пропускаю"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # HEAD, а не GET: нужен один заголовок, а не 250 КБ витрины. Заголовок
+          # last-modified ставит functions/data/[[path]].js по времени выгрузки объекта
+          # в R2 — это и есть возраст публикации.
+          headers="$RUNNER_TEMP/head.txt"
+          code=$(curl -sS -I -o "$headers" -w '%{http_code}' \
+                   --max-time 20 --retry 2 --retry-delay 3 \
+                   https://tzi-842.pages.dev/data/data.json || echo 000)
+          echo "код ответа витрины: $code"
+
+          if [ "$code" != "200" ]; then
+            # 503 — объект ещё не публиковался; 000 — край не ответил. И то, и другое —
+            # повод работать, а не повод молчать.
+            echo "витрина не отдала объект — прогон нужен"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          lm=$(grep -i '^last-modified:' "$headers" | tail -1 | cut -d' ' -f2- | tr -d '\r')
+          if [ -z "$lm" ]; then
+            echo "::warning::в ответе нет last-modified — считаю витрину протухшей"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          age_min=$(( ( $(date -u +%s) - $(date -u -d "$lm" +%s) ) / 60 ))
+          echo "витрина опубликована $lm, возраст $age_min мин (порог $MAX_AGE_MIN)"
+          if [ "$age_min" -lt "$MAX_AGE_MIN" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "VPS публикует — фолбэк не нужен"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.gate.outputs.run == 'true'
+
+      - uses: actions/setup-python@v5
+        if: steps.gate.outputs.run == 'true'
+        with:
+          # Ровно та же версия, что на VPS. Пайплайн — только стандартная библиотека,
+          # ставить нечего: `cache: pip` тут был бы кэшем пустоты.
+          python-version: "3.12"
+
+      - name: Собрать и опубликовать
+        if: steps.gate.outputs.run == 'true'
+        env:
+          R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ vars.R2_BUCKET || 'moex-radar' }}
+          # Состояние у раннера пустое, и это осознанная цена. Зеркало raw/ в бакете
+          # сегодня одностороннее (publish.py его пишет, читать обратно некому), поэтому
+          # прогон собирает ряды с источников заново — медленнее VPS, но без чужого
+          # кэша, который отстал на неделю и выглядит как свежее состояние.
+          # Кэш Actions сюда по той же причине не подключён.
+          STATE_DIR: ${{ runner.temp }}/moex-radar-state
+          # Роль писателя задаём явно. Пайплайн умеет угадать её по GITHUB_ACTIONS
+          # (pipeline/lib/lease.py), но право единственной записи не то, что стоит
+          # оставлять на догадку рантайма. Идентификатор — различимый: по нему в аварии
+          # видно, какой именно прогон взял перо и когда.
+          RADAR_WRITER: gha
+          RADAR_WRITER_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$STATE_DIR"
+          # Публиковать или выйти — решает лиз внутри пайплайна, а не этот шаг. Режим
+          # daily, а не intraday: если фолбэк вообще понадобился, нужна полная картина
+          # (композит, состояния, мониторы), а не витринный тик.
+          python pipeline/run.py --mode daily
+
+      - name: Показать, что теперь лежит на витрине
+        # always(): что лежит на витрине после ПАДЕНИЯ прогона — самое интересное.
+        if: always() && steps.gate.outputs.run == 'true'
+        run: |
+          set -uo pipefail
+          curl -sS -D - -o "$RUNNER_TEMP/data.json" \
+            --max-time 30 https://tzi-842.pages.dev/data/data.json | grep -i \
+            -e '^HTTP/' -e '^last-modified' -e '^etag' || true
+          python - <<'PY' || true
+          import json, os
+          path = os.path.join(os.environ["RUNNER_TEMP"], "data.json")
+          try:
+              with open(path, encoding="utf-8") as fh:
+                  payload = json.load(fh)
+          except (OSError, ValueError) as exc:
+              print(f"витрину прочитать не удалось: {exc}")
+          else:
+              for key in ("generated_at", "run_mode", "asof_trading_day"):
+                  print(f"{key}: {payload.get(key)}")
+          PY

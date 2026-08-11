@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="windows-1251"?>
+<ValCurs ID="R01235" DateRange1="03.08.2026" DateRange2="11.08.2026" name="Курсы валют, руб.">
+<Record Date="04.08.2026" Id="R01235"><Nominal>1</Nominal><Value>92,4517</Value><VunitRate>92,4517</VunitRate></Record>
+<Record Date="05.08.2026" Id="R01235"><Nominal>1</Nominal><Value>92,1043</Value><VunitRate>92,1043</VunitRate></Record>
+<Record Date="06.08.2026" Id="R01235"><Nominal>1</Nominal><Value>91,8862</Value><VunitRate>91,8862</VunitRate></Record>
+<Record Date="07.08.2026" Id="R01235"><Nominal>1</Nominal><Value>91,5530</Value><VunitRate>91,5530</VunitRate></Record>
+<Record Date="08.08.2026" Id="R01235"><Nominal>1</Nominal><Value>91,7204</Value><VunitRate>91,7204</VunitRate></Record>
+<Record Date="11.08.2026" Id="R01235"><Nominal>1</Nominal><Value>91,3388</Value><VunitRate>91,3388</VunitRate></Record>
+</ValCurs>

@@ -1,0 +1,147 @@
+"""HTTP-клиент на стандартной библиотеке: ретраи, троттлинг по хосту, gzip.
+
+Почему свой клиент, а не requests: пайплайн обязан подниматься на голой машине
+без venv (docs/CONTRACT.md §0) — и на VPS, и в GitHub Actions, и на ноутбуке.
+
+Грабли соседнего проекта (841, Bybit): лимиты источников считаются НА IP, а весь
+пайплайн ходит с одного адреса VPS. Поэтому пауза между запросами держится
+глобально на процесс и привязана к ХОСТУ, а не к вызывающему модулю: иначе три
+фетчера в одном прогоне дают тройной поток к iss.moex.com и ловят 403/429 на
+ровном месте.
+
+Вторые грабли: 4xx (кроме 429) ретраить бессмысленно — неверный тикер не станет
+верным с третьей попытки, а три попытки × 45 бумаг = минута впустую на каждом
+прогоне. Ретраим только сетевые сбои, таймауты, 429 и 5xx.
+"""
+
+import gzip
+import json
+import random
+import ssl
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from http.client import HTTPException
+from urllib.parse import urlsplit
+
+USER_AGENT = "moex-radar/1.0 (dashboard pipeline; python-urllib)"
+DEFAULT_TIMEOUT = 30.0
+DEFAULT_RETRIES = 3
+BACKOFF_BASE = 1.0  # 1с, 2с, 4с — экспонента с джиттером
+
+# Минимальный интервал между запросами к одному хосту, секунды.
+# ISS терпит ~8 rps с одного адреса (проверено на истории 2900 дней zcyc),
+# сайт ЦБ отдаёт HTML медленно и на частые запросы отвечает 429 — ему пауза больше.
+HOST_MIN_INTERVAL = {
+    "iss.moex.com": 0.12,
+    "www.cbr.ru": 0.7,
+    "cbr.ru": 0.7,
+    "fred.stlouisfed.org": 0.5,
+}
+DEFAULT_MIN_INTERVAL = 0.25
+
+_slot_lock = threading.Lock()
+_next_slot = {}  # host -> момент (time.monotonic), раньше которого стучаться нельзя
+
+
+class FetchError(RuntimeError):
+    """Единственное исключение слоя загрузки: провал источника, не провал прогона.
+
+    Вызывающий (run.py) ловит его, ставит тайлу status=stale/error и идёт дальше
+    (docs/CONTRACT.md §0, §7).
+    """
+
+    def __init__(self, message, url=None, status=None, cause=None):
+        super().__init__(message)
+        self.url = url
+        self.status = status
+        self.cause = cause
+
+
+def _log(message):
+    """Хук логирования: агрегатор может подменить http.LOG своей функцией."""
+    print(f"[http] {message}", file=sys.stderr)
+
+
+LOG = _log
+
+
+def set_min_interval(host, seconds):
+    """Подкрутить троттлинг для хоста (например, когда источник начал огрызаться)."""
+    HOST_MIN_INTERVAL[host] = float(seconds)
+
+
+def _reserve(host):
+    """Бронирует ближайший разрешённый момент запроса и возвращает, сколько ждать.
+
+    Слот именно бронируется под локом (а не «посмотрели время — поспали»), иначе
+    два потока просыпаются одновременно и оба считают, что интервал выдержан.
+    """
+    interval = HOST_MIN_INTERVAL.get(host, DEFAULT_MIN_INTERVAL)
+    with _slot_lock:
+        now = time.monotonic()
+        slot = max(now, _next_slot.get(host, 0.0))
+        _next_slot[host] = slot + interval
+    return slot - time.monotonic()
+
+
+def get_bytes(url, timeout=DEFAULT_TIMEOUT, retries=DEFAULT_RETRIES,
+              headers=None, accept_gzip=True):
+    """Скачать тело ответа. Кидает FetchError, если не вышло за `retries` попыток."""
+    host = urlsplit(url).netloc
+    hdrs = {"User-Agent": USER_AGENT, "Accept": "*/*"}
+    if accept_gzip:
+        hdrs["Accept-Encoding"] = "gzip"
+    if headers:
+        hdrs.update(headers)
+
+    last_err = None
+    for attempt in range(1, max(1, retries) + 1):
+        wait = _reserve(host)
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            req = urllib.request.Request(url, headers=hdrs)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                raw = resp.read()
+                enc = (resp.headers.get("Content-Encoding") or "").lower()
+            if "gzip" in enc:
+                raw = gzip.decompress(raw)
+            return raw
+        except urllib.error.HTTPError as e:
+            last_err = e
+            if 400 <= e.code < 500 and e.code != 429:
+                raise FetchError(f"HTTP {e.code} на {url}", url=url, status=e.code,
+                                 cause=e) from e
+            LOG(f"HTTP {e.code}, попытка {attempt}/{retries}: {url}")
+        except (urllib.error.URLError, TimeoutError, ConnectionError, ssl.SSLError,
+                HTTPException, gzip.BadGzipFile, OSError) as e:
+            last_err = e
+            LOG(f"{type(e).__name__}: {e}; попытка {attempt}/{retries}: {url}")
+        if attempt < max(1, retries):
+            time.sleep(BACKOFF_BASE * (2 ** (attempt - 1)) + random.uniform(0, 0.3))
+
+    status = getattr(last_err, "code", None)
+    raise FetchError(f"не удалось скачать {url}: {type(last_err).__name__}: {last_err}",
+                     url=url, status=status, cause=last_err)
+
+
+def get_text(url, encoding="utf-8", **kw):
+    """Текст ответа. encoding задаётся явно: XML ЦБ приходит в windows-1251."""
+    raw = get_bytes(url, **kw)
+    try:
+        return raw.decode(encoding, "replace")
+    except LookupError as e:  # неизвестная кодировка — это ошибка кода, а не сети
+        raise FetchError(f"неизвестная кодировка {encoding!r} для {url}",
+                         url=url, cause=e) from e
+
+
+def get_json(url, encoding="utf-8", **kw):
+    """JSON ответа. Битый JSON — тоже отказ источника, а не крах прогона."""
+    text = get_text(url, encoding=encoding, **kw)
+    try:
+        return json.loads(text)
+    except ValueError as e:
+        raise FetchError(f"не JSON в ответе {url}: {e}", url=url, cause=e) from e

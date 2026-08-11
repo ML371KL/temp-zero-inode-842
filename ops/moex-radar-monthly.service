@@ -1,0 +1,42 @@
+[Unit]
+Description=MOEX Radar · опрос месячных и декадных источников (ОРФР, Минфин, Росстат, ЦБ)
+Documentation=https://github.com/ML371KL/temp-zero-inode-842/blob/main/docs/ARCHITECTURE.md
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=3600
+StartLimitBurst=3
+
+[Service]
+# Type=exec, а не oneshot: с oneshot systemd отказывается принимать Restart=on-failure.
+Type=exec
+User=dash
+Group=dash
+WorkingDirectory=/srv/dash/repo-842
+EnvironmentFile=/usr/local/etc/moex-radar/env
+Environment=PYTHONUNBUFFERED=1
+# Запускается КАЖДЫЙ день, а решение «сегодня или не сегодня» принимает конвейер по
+# окнам опроса из pipeline/lib/registry.py (poll_window). Календарь публикаций ЦБ и
+# Минфина плавает на несколько дней, и «до появления» — единственный способ поймать
+# релиз в день выхода, не угадывая дату в юните.
+ExecStart=/usr/local/sbin/moex-radar monthly
+Restart=on-failure
+RestartSec=300
+# Дольше остальных: здесь PDF ЦБ, страницы Минфина и Росстата — самые медленные и самые
+# капризные источники набора.
+RuntimeMaxSec=1800
+SyslogIdentifier=moex-radar-monthly
+
+StateDirectory=moex-radar
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+ReadWritePaths=/srv/dash/repo-842
+
+MemoryHigh=512M
+MemoryMax=1G
+Nice=10
+
+# '-+' обязательно: '-' — падение мостика не красит прогон, '+' — под ProtectSystem
+# мостик иначе не запишет маркер дедупа.
+ExecStopPost=-+/usr/local/sbin/dash-alert %n

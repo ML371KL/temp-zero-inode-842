@@ -1,0 +1,119 @@
+name: Проверки
+
+# Что здесь проверяется и почему именно это.
+#
+# Панель считает числа, по которым принимают решения, и публикует их без ревью. Значит,
+# между правкой и читателем должно стоять хоть что-то, что ловит два самых дешёвых вида
+# смерти: файл, который не разбирается (опечатка уезжает в прод и валит прогон на VPS
+# через 15 минут, в тишине), и инвариант, который перестал выполняться. Полноценных
+# гарантий тут нет и быть не может — их даёт тестовый набор в `tests/`, а не этот файл.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: moex-radar-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Та же версия, что на VPS и в фолбэк-прогоне. Пайплайн — стандартная
+          # библиотека, ставить нечего.
+          python-version: "3.12"
+
+      - name: Разбор всех модулей
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(git ls-files '*.py')
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::в репозитории нет ни одного .py — чекаут пустой?"
+            exit 1
+          fi
+          printf 'модулей: %s\n' "${#files[@]}"
+          python -m py_compile "${files[@]}"
+
+      - name: Пайплайн остался на стандартной библиотеке
+        run: |
+          set -euo pipefail
+          # Жёсткое требование проекта, а не вкусовщина: конвейер обязан запускаться на
+          # любой машине без venv — на VPS системным python3, на раннере сразу после
+          # setup-python, без шага установки. Первый же `import pandas` превращает
+          # фолбэк-прогон в неработающую страховку, и узнаётся это в тот день, когда
+          # VPS уже молчит.
+          # Пути git-а сопоставляются без FNM_PATHNAME: `*` перешагивает через слеши,
+          # то есть одна маска покрывает и pipeline/run.py, и pipeline/fetch/iss.py.
+          if git ls-files 'pipeline/*.py' \
+             | xargs -r grep -nE '^[[:space:]]*(import|from)[[:space:]]+(pandas|numpy|scipy|requests|yaml|bs4|lxml|matplotlib|dateutil|httpx|aiohttp)\b'; then
+            echo "::error::в pipeline/ появилась внешняя зависимость (см. строки выше)"
+            exit 1
+          fi
+          echo "внешних зависимостей нет"
+
+      - name: В тестах нет «сегодня минус N»
+        run: |
+          set -euo pipefail
+          # Тест, отсчитывающий даты от текущего дня, зелен ровно до того дня, когда
+          # перестаёт быть зелёным, — и краснеет не от поломки кода, а от календаря.
+          # Соседняя панель на этом сидела месяцами: её набор становился зелёным только
+          # по субботам. Отсюда правило: фикстуры замороженные, даты фиксированные.
+          # Осознанное исключение помечается в строке комментарием `ci: allow-now`.
+          if git ls-files 'tests/*.py' \
+             | xargs -r grep -nE '(datetime\.now|datetime\.utcnow|date\.today|time\.time)[[:space:]]*\(' \
+             | grep -v 'ci: allow-now'; then
+            echo "::error::тест опирается на текущее время (см. строки выше)"
+            exit 1
+          fi
+          echo "тесты не смотрят на часы"
+
+      - name: Тесты
+        run: |
+          set -euo pipefail
+          if [ ! -d tests ]; then
+            echo "::error::каталога tests/ нет — инварианты схемы обязаны жить в репозитории"
+            exit 1
+          fi
+          # -t . : корень репозитория как top-level, иначе `import pipeline...` из тестов
+          # не находит пакет. PYTHONPATH тем же значением — для тестов, которые
+          # запускают модули отдельным процессом.
+          export PYTHONPATH="$PWD"
+          python -m unittest discover -s tests -t . -v 2>&1 | tee "$RUNNER_TEMP/tests.log"
+          # Пустой набор `unittest` считает успехом. Для нас это не успех, а тишина:
+          # так выглядит и «тестов ещё не написали», и «файлы перестали находиться
+          # по маске test_*.py».
+          if grep -q '^Ran 0 tests' "$RUNNER_TEMP/tests.log"; then
+            echo "::error::обнаружено ноль тестов"
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v4
+        with:
+          # `node --check` разбирает .js сначала как CommonJS и лишь потом как модуль —
+          # определение по синтаксису включено по умолчанию с 22.7. На более старом
+          # node каждый файл с `export` падал бы здесь синтаксической ошибкой, которой
+          # на краю Cloudflare не существует.
+          node-version: "24"
+
+      - name: Разбор фронта и функций
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(git ls-files '*.js' '*.mjs')
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "::error::в репозитории нет ни одного .js"
+            exit 1
+          fi
+          for file in "${files[@]}"; do
+            printf '  %s\n' "$file"
+            node --check "$file"
+          done

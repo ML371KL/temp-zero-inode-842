@@ -1,0 +1,41 @@
+[Unit]
+Description=MOEX Radar · витринный такт (свежие котировки, композит не пересчитывается)
+Documentation=https://github.com/ML371KL/temp-zero-inode-842/blob/main/docs/ARCHITECTURE.md
+Wants=network-online.target
+After=network-online.target
+# Такт повторяется каждые 15 минут, и это уже перезапуск. Две попытки за окно — потолок,
+# после которого честнее дождаться следующего такта, чем молотить по лежащему ISS.
+StartLimitIntervalSec=900
+StartLimitBurst=2
+
+[Service]
+# Type=exec, а не oneshot: systemd отказывается загружать oneshot с Restart= отличным
+# от no, а один повтор через минуту снимает половину сетевых морганий.
+Type=exec
+User=dash
+Group=dash
+WorkingDirectory=/srv/dash/repo-842
+EnvironmentFile=/usr/local/etc/moex-radar/env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/local/sbin/moex-radar intraday
+Restart=on-failure
+RestartSec=60
+# 240 с ожидания замка + 300 с собственного дедлайна такта. Такт, переживший свой
+# интервал, не имеет смысла: следующий уже стоит в очереди с более свежими данными.
+RuntimeMaxSec=600
+SyslogIdentifier=moex-radar-intraday
+
+StateDirectory=moex-radar
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+ReadWritePaths=/srv/dash/repo-842
+
+MemoryHigh=384M
+MemoryMax=768M
+Nice=10
+
+# '-+' обязательно: '-' — падение мостика не красит прогон, '+' — под ProtectSystem
+# мостик иначе не запишет маркер дедупа.
+ExecStopPost=-+/usr/local/sbin/dash-alert %n

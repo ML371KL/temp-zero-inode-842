@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<!-- viewport-fit=cover: телефон с вырезом не должен резать шапку-вердикт -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0b0e13">
+<meta name="description" content="MOEX Radar: машина состояний и композит-ядро по индексу МосБиржи">
+<title>MOEX Radar</title>
+<!-- Только свои файлы: ни шрифтов, ни CDN, ни инлайн-скриптов — страница обязана
+     пережить строгий CSP (default-src 'self'). -->
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="styles.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<a class="skip-link" href="#main">Перейти к содержимому</a>
+
+<header class="topbar">
+  <div class="wrap topbar__inner">
+    <div class="topbar__brand">
+      <img class="topbar__logo" src="favicon.svg" width="24" height="24" alt="">
+      <h1 class="topbar__title">MOEX&nbsp;Radar</h1>
+    </div>
+    <button id="btn-refresh" class="btn" type="button">Обновить</button>
+  </div>
+  <div class="wrap">
+    <!-- Возраст данных живёт отдельно от основного дерева: он тикает каждые 15 секунд
+         и не должен провоцировать перерисовку всей страницы (иначе съедет скролл). -->
+    <p id="age" class="age">Загрузка…</p>
+  </div>
+</header>
+
+<div class="wrap">
+  <div id="banner" class="banner" role="status" aria-live="polite" hidden></div>
+</div>
+
+<main id="main" class="wrap" aria-busy="true">
+  <p class="empty">Загрузка данных…</p>
+</main>
+
+<noscript>
+  <div class="wrap">
+    <p class="empty">Панель считается в браузере из <code>/data/data.json</code>. Без JavaScript показывать нечего.</p>
+  </div>
+</noscript>
+
+<footer class="wrap foot">
+  <p id="foot-line" class="foot__line"></p>
+  <p class="foot__note">
+    Слои 1–2 (ядро и машина состояний) — валидированные числа; слой 3 (мониторы) — наблюдение
+    без предиктивных претензий. Время московское.
+  </p>
+</footer>
+
+</body>
+</html>

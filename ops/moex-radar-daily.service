@@ -1,0 +1,59 @@
+[Unit]
+Description=MOEX Radar · суточный прогон (закрытия, композит, состояния, публикация)
+Documentation=https://github.com/ML371KL/temp-zero-inode-842/blob/main/docs/ARCHITECTURE.md
+# Сеть именно online, а не просто up: конвейер первым делом идёт в ISS и cbr.ru, и
+# запуск до поднятия маршрутов дал бы прогон, где все источники «недоступны».
+Wants=network-online.target
+After=network-online.target
+# Ограничитель живёт в [Unit] — в [Service] его больше нет. Три попытки за полчаса:
+# отказ источника лечится повтором, отказ кода — нет, и молотить им сутки незачем.
+StartLimitIntervalSec=1800
+StartLimitBurst=3
+
+[Service]
+# Type=exec, а не oneshot, ровно по одной причине: systemd ОТКАЗЫВАЕТСЯ загружать
+# oneshot-юнит с Restart= отличным от no («Refusing»), а перезапуск здесь нужен —
+# половина отказов суточного прогона это моргнувший источник, который через две
+# минуты отвечает.
+Type=exec
+User=dash
+Group=dash
+WorkingDirectory=/srv/dash/repo-842
+EnvironmentFile=/usr/local/etc/moex-radar/env
+# Без этого журнал наполняется только в конце прогона: питон буферизует stdout, когда
+# он не терминал, и в аварии видно результат вместо того, на чём всё встало.
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/local/sbin/moex-radar daily
+Restart=on-failure
+RestartSec=120
+# Потолок времени для Type=exec задаётся RuntimeMaxSec, а не TimeoutStartSec: старт
+# такого юнита считается завершённым сразу после exec, и TimeoutStartSec не ограничил
+# бы ничего. Выше собственного дедлайна скрипта (900 с + ожидание замка), чтобы в
+# журнале осталась его строка о причине, а не только запись systemd об убийстве.
+RuntimeMaxSec=1500
+SyslogIdentifier=moex-radar-daily
+
+# /var/lib/moex-radar: создаётся и отдаётся пользователю самим systemd, и ProtectSystem
+# ниже про него уже знает.
+StateDirectory=moex-radar
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+# Репозиторий пишется: обвязка делает git fetch/reset перед каждым прогоном.
+ReadWritePaths=/srv/dash/repo-842
+
+# Машина общая: на ней живут конвейер IBKR и сессии Claude Code, и однажды глобальный
+# OOM-killer уже забрал вместе с ними sshd — снаружи это выглядело как смерть сервера.
+# Лимиты здесь не про экономию, а про то, чтобы отказ конвейера оставался отказом
+# конвейера. Nice — из той же логики: сбор данных не важнее интерактивной сессии.
+MemoryHigh=512M
+MemoryMax=1G
+Nice=5
+
+# Мостик тревог соседнего проекта. ExecStopPost, а не OnFailure: он выполняется ВСЕГДА,
+# поэтому из одного хука приходят обе новости — и что прогон упал, и что он снова
+# проходит; с одним лишь OnFailure молчание двусмысленно.
+# '-' — отсутствие или отказ мостика не должен красить прогон; '+' — иначе под
+# ProtectSystem=strict мостик не запишет маркер дедупа и канал захлебнётся повторами.
+ExecStopPost=-+/usr/local/sbin/dash-alert %n

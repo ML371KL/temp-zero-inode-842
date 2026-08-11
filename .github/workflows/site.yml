@@ -1,0 +1,96 @@
+name: Публикация сайта в Cloudflare Pages
+
+# Сайт публикуется ТОЛЬКО при изменении его кода. Данные едут отдельно и в другое
+# место: конвейер на VPS кладёт `data.json` и `history/*` прямо в бакет R2, а страница
+# забирает их через functions/data/[[path]].js. Пока данные ехали публикацией, каждый
+# такт стоил сборки — у соседней панели это было около сотни в сутки при бесплатном
+# потолке Cloudflare Pages в 500 сборок в месяц; здесь тактов ещё больше (интрадей
+# каждые 15 минут), и публикация данных через Pages не поместилась бы в лимит вовсе.
+#
+# Отсюда же второе следствие: в `web/` не должно быть ни одного файла с именем из
+# белого списка functions/data/[[path]].js. Статика и функция соревновались бы за один
+# путь, и какая версия ответит — зависело бы от порядка, которого мы не контролируем.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - "functions/**"
+      - "lib/**"
+      - "wrangler.toml"
+      - ".github/workflows/site.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # Две сборки подряд Pages не выполняет параллельно: старшая отменяется, и сайт
+  # замирает на середине. Очередь из одной публикации, без отмены идущей.
+  group: moex-radar-site
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Проверить, что статика не перекрывает пути функции
+        run: |
+          set -euo pipefail
+          collision=0
+          for path in data.json history/daily.json history/monitors.json; do
+            if [ -e "web/data/$path" ]; then
+              echo "::error::web/data/$path перекрывает путь функции /data/$path"
+              collision=1
+            fi
+          done
+          [ "$collision" = 0 ]
+
+      - name: Опубликовать
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          # Версия зафиксирована точечно: публикация сайта не должна однажды утром
+          # начать вести себя иначе сама по себе.
+          #
+          # Каталог статики (`web`) и биндинг R2 берутся из wrangler.toml — передать
+          # каталог ещё и здесь нельзя, wrangler на это отвечает ошибкой.
+          npx --yes wrangler@4.119.0 pages deploy \
+            --project-name tzi-842 \
+            --branch main \
+            --commit-dirty=true
+
+      - name: Проверить, что опубликованное отвечает
+        run: |
+          set -euo pipefail
+          # С повторами, а не однократным curl: публикация доезжает до края не
+          # мгновенно, и однократная проверка краснела бы просто от медленной сети.
+          base=https://tzi-842.pages.dev
+          for attempt in 1 2 3 4 5 6; do
+            page=$(curl -s -o /dev/null -w '%{http_code}' "$base/" || true)
+            # 503 здесь — законный ответ: функция жива, а конвейер ещё не публиковал
+            # объект (первый деплой, пересозданный бакет). Незаконен ровно один ответ —
+            # 200 с вёрсткой вместо JSON, и его ловит проверка ниже.
+            data=$(curl -s -o "$RUNNER_TEMP/data.head" -w '%{http_code}' \
+                     -H 'accept: application/json' "$base/data/data.json" || true)
+            # Главная проверка деплоя функций: несуществующий объект обязан отвечать
+            # честным 404 с JSON. Pages на путь без обработчика отдаёт 200 и HTML
+            # главной страницы — если сюда вернулось 200, значит функция не доехала,
+            # и всякий, кто разбирает /data/* как JSON, сломается на вёрстке.
+            missing=$(curl -s -o /dev/null -w '%{http_code}' "$base/data/nope.json" || true)
+            echo "попытка $attempt: страница $page, данные $data, несуществующее $missing"
+            if [ "$page" = "200" ] && { [ "$data" = "200" ] || [ "$data" = "503" ]; } \
+               && [ "$missing" = "404" ]; then
+              head -c 200 "$RUNNER_TEMP/data.head" || true
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+          echo "::error::опубликованный сайт отвечает не так, как обязан"
+          exit 1
