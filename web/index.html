@@ -1,58 +1,69 @@
 <!doctype html>
-<html lang="ru">
+<html lang="ru" data-theme="">
 <head>
 <meta charset="utf-8">
-<!-- viewport-fit=cover: телефон с вырезом не должен резать шапку-вердикт -->
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="color-scheme" content="dark">
-<meta name="theme-color" content="#0b0e13">
-<meta name="description" content="MOEX Radar: машина состояний и композит-ядро по индексу МосБиржи">
-<title>MOEX Radar</title>
-<!-- Только свои файлы: ни шрифтов, ни CDN, ни инлайн-скриптов — страница обязана
-     пережить строгий CSP (default-src 'self'). -->
+<title>MOEX Radar — состояние российского рынка</title>
+<meta name="description" content="Прогнозная панель по индексу МосБиржи: композит ядра, машина состояний, мониторы потоков и макро.">
+<meta name="color-scheme" content="light dark">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="styles.css">
-<script src="app.js" defer></script>
+<script>
+  // Тему ставим ДО первой отрисовки: иначе на секунду мигает светлая, пока грузится
+  // app.js, и это заметнее всего ночью — ровно тогда, когда панель и открывают.
+  try {
+    var t = localStorage.getItem('moex-radar-theme');
+    if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+  } catch (e) { /* приватный режим — молча остаёмся на системной теме */ }
+</script>
 </head>
 <body>
-<a class="skip-link" href="#main">Перейти к содержимому</a>
+<a class="skip" href="#main">К содержимому</a>
 
-<header class="topbar">
-  <div class="wrap topbar__inner">
-    <div class="topbar__brand">
-      <img class="topbar__logo" src="favicon.svg" width="24" height="24" alt="">
-      <h1 class="topbar__title">MOEX&nbsp;Radar</h1>
+<header class="top">
+  <div class="top__in">
+    <div class="brand">
+      <span class="brand__name">MOEX&nbsp;Radar</span>
+      <span class="brand__sub" id="asof">загрузка…</span>
     </div>
-    <button id="btn-refresh" class="btn" type="button">Обновить</button>
-  </div>
-  <div class="wrap">
-    <!-- Возраст данных живёт отдельно от основного дерева: он тикает каждые 15 секунд
-         и не должен провоцировать перерисовку всей страницы (иначе съедет скролл). -->
-    <p id="age" class="age">Загрузка…</p>
+    <span class="top__spacer"></span>
+    <div class="top__tools">
+      <span class="age" id="age"></span>
+      <button class="pill" id="table-toggle" type="button" aria-pressed="false"
+              aria-label="Показать те же ряды таблицей"
+              title="Показать те же ряды таблицей">
+        <svg class="pill__ico" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4">
+          <rect x="1.8" y="2.6" width="12.4" height="10.8" rx="1.6"/>
+          <path d="M1.8 6.2h12.4M6.4 6.2v7.2"/>
+        </svg>
+        <span class="pill__label">Таблица</span>
+      </button>
+      <button class="pill" id="theme-toggle" type="button" aria-label="Сменить тему оформления" title="Тема оформления">
+        <svg class="pill__ico" id="theme-ico" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4">
+          <circle cx="8" cy="8" r="3.2"/>
+          <path d="M8 .9v1.8M8 13.3v1.8M15.1 8h-1.8M2.7 8H.9M13 3l-1.3 1.3M4.3 11.7 3 13M13 13l-1.3-1.3M4.3 4.3 3 3"/>
+        </svg>
+        <span class="pill__label" id="theme-label">Тема</span>
+      </button>
+    </div>
   </div>
 </header>
 
-<div class="wrap">
-  <div id="banner" class="banner" role="status" aria-live="polite" hidden></div>
-</div>
+<main class="wrap" id="main">
+  <div id="banners"></div>
+  <div id="app">
+    <p class="empty" id="boot">Загружаем данные панели…</p>
+  </div>
 
-<main id="main" class="wrap" aria-busy="true">
-  <p class="empty">Загрузка данных…</p>
+  <footer class="foot">
+    <p><strong>Как читать.</strong> Ядро — медленный композит, задаёт наклон на месяц-квартал.
+      Машина состояний — ворота риска: она не предсказывает, а говорит, каким сигналам сейчас верить.
+      Мониторы предиктивных претензий не имеют, у каждого стоит тир доказательности.</p>
+    <p id="foot-meta"></p>
+  </footer>
 </main>
 
-<noscript>
-  <div class="wrap">
-    <p class="empty">Панель считается в браузере из <code>/data/data.json</code>. Без JavaScript показывать нечего.</p>
-  </div>
-</noscript>
-
-<footer class="wrap foot">
-  <p id="foot-line" class="foot__line"></p>
-  <p class="foot__note">
-    Слои 1–2 (ядро и машина состояний) — валидированные числа; слой 3 (мониторы) — наблюдение
-    без предиктивных претензий. Время московское.
-  </p>
-</footer>
-
+<script src="charts.js"></script>
+<script src="app.js"></script>
 </body>
 </html>

@@ -1,268 +1,473 @@
-/* MOEX Radar — тёмная тема, mobile-first (пользователь смотрит с телефона).
-   Системные шрифты: внешние подключать нельзя (CSP + лишний RTT на мобильном канале).
-   Все цвета собраны в :root — те же значения продублированы в PAL внутри app.js,
-   потому что SVG рисуется атрибутами fill/stroke; при смене темы править ОБА места. */
+/* MOEX Radar — дизайн-система панели.
+ *
+ * ПРИНЦИП: цвет носит смысл, а не украшает. Идентичность (три компонента ядра) —
+ * категориальные слоты; полярность (композит, потоки) — диверджент синий↔красный
+ * с серой серединой; состояние (ячейка, статус источника) — статусная палитра,
+ * всегда с иконкой и подписью, никогда цветом в одиночку. Всё остальное — чернила.
+ *
+ * Палитра не подобрана на глаз: слоты и пары прогнаны валидатором в ОБЕИХ темах
+ * (categorical all-pairs: CVD ΔE 9.2 светлая / 9.4 тёмная при пороге 8; обычное
+ * зрение 24.0 / 20.9 при полу 15; диверджент-пара 29.0 / 19.2). Тёмная тема —
+ * отдельно подобранные шаги под тёмную поверхность, а не инверсия светлой.
+ *
+ * Числа: пропорциональные цифры везде, кроме таблиц и осей, где колонки обязаны
+ * выравниваться — там tabular-nums. Моноширинный шрифт на крупных числах выглядит
+ * дёшево и растягивает их (это и было главной бедой прежней вёрстки).
+ */
 
 :root {
-  color-scheme: dark;
-  --bg: #0b0e13;
-  --panel: #131821;
-  --panel2: #171d28;
-  --line: #242c3a;
-  --fg: #e6ebf2;
-  --muted: #8b97a8;
-  --dim: #5f6b7d;
-  --pos: #35c07a;
-  --neg: #e5484d;
-  --warn: #f0a03c;
-  --info: #5b9dff;
-  --slate: #46536b;
-  --r: 12px;
-  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
-          Arial, "Noto Sans", sans-serif;
-  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  color-scheme: light;
+
+  /* поверхности */
+  --plane: #f4f4f1;
+  --surface: #fcfcfb;
+  --surface-2: #f7f7f4;
+  --inset: #f0efec;
+
+  /* чернила */
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --ink-3: #898781;
+
+  /* линии */
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --hair: rgba(11, 11, 11, .10);
+  --hair-strong: rgba(11, 11, 11, .16);
+
+  /* категориальные слоты — идентичность компонентов ядра */
+  --s1: #2a78d6;
+  --s2: #eb6834;
+  --s3: #1baf7a;
+
+  /* диверджент — полярность */
+  --pos: #2a78d6;
+  --neg: #e34948;
+  --mid: #e6e5e1;
+  --pos-soft: rgba(42, 120, 214, .14);
+  --neg-soft: rgba(227, 73, 72, .14);
+
+  /* статус — состояние, всегда с подписью */
+  --good: #0ca30c;
+  --warn: #fab219;
+  --serious: #ec835a;
+  --crit: #d03b3b;
+  --good-ink: #006300;
+
+  --shadow: 0 1px 2px rgba(11, 11, 11, .04), 0 12px 32px -20px rgba(11, 11, 11, .28);
+  --radius: 14px;
+  --radius-sm: 9px;
+
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
 }
 
-*, *::before, *::after { box-sizing: border-box; }
+/* Тёмная тема объявлена дважды намеренно: медиазапрос ловит настройку системы,
+ * а скоуп data-theme — переключатель на странице, и он обязан побеждать в обе
+ * стороны (:not() пускает светлую метку выиграть у системной тёмной). */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --plane: #0d0d0d;
+    --surface: #1a1a19;
+    --surface-2: #201f1e;
+    --inset: #232322;
+    --ink: #ffffff;
+    --ink-2: #c3c2b7;
+    --ink-3: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --hair: rgba(255, 255, 255, .10);
+    --hair-strong: rgba(255, 255, 255, .18);
+    --s1: #3987e5;
+    --s2: #d95926;
+    --s3: #199e70;
+    --pos: #3987e5;
+    --neg: #e66767;
+    --mid: #383835;
+    --pos-soft: rgba(57, 135, 229, .18);
+    --neg-soft: rgba(230, 103, 103, .18);
+    --good-ink: #0ca30c;
+    --shadow: none;
+  }
+}
 
-/* Свои display:flex/grid перебивают браузерное [hidden]{display:none} — свёрнутый хвост
-   журнала иначе остаётся на экране. Правило должно стоять до правил компонентов. */
-[hidden] { display: none !important; }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --plane: #0d0d0d;
+  --surface: #1a1a19;
+  --surface-2: #201f1e;
+  --inset: #232322;
+  --ink: #ffffff;
+  --ink-2: #c3c2b7;
+  --ink-3: #898781;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --hair: rgba(255, 255, 255, .10);
+  --hair-strong: rgba(255, 255, 255, .18);
+  --s1: #3987e5;
+  --s2: #d95926;
+  --s3: #199e70;
+  --pos: #3987e5;
+  --neg: #e66767;
+  --mid: #383835;
+  --pos-soft: rgba(57, 135, 229, .18);
+  --neg-soft: rgba(230, 103, 103, .18);
+  --good-ink: #0ca30c;
+  --shadow: none;
+}
+
+* { box-sizing: border-box; }
 
 html, body { margin: 0; padding: 0; }
 
 body {
-  background: var(--bg);
-  color: var(--fg);
+  background: var(--plane);
+  color: var(--ink);
   font-family: var(--font);
   font-size: 15px;
-  line-height: 1.45;
-  -webkit-text-size-adjust: 100%;
-  /* Мобильный Safari любит горизонтальный «резиновый» сдвиг, если что-то вылезло за экран */
-  overflow-x: hidden;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
-h1, h2, h3, h4, p, ul, ol { margin: 0; }
-ul { list-style: none; padding: 0; }
-code { font-family: var(--mono); font-size: .92em; }
+h1, h2, h3, p, ul, ol, figure { margin: 0; }
+ul, ol { padding: 0; list-style: none; }
+button { font: inherit; color: inherit; }
 
-.wrap { max-width: 1080px; margin: 0 auto; padding: 0 12px; }
-
-.skip-link {
-  position: absolute; left: -9999px; top: 0;
-  background: var(--panel); color: var(--fg); padding: 8px 12px; border-radius: 0 0 8px 0;
+.skip {
+  position: absolute; left: -9999px; top: 0; z-index: 50;
+  background: var(--surface); color: var(--ink); padding: 10px 14px;
+  border-radius: 0 0 var(--radius-sm) 0; border: 1px solid var(--hair);
 }
-.skip-link:focus { left: 0; z-index: 10; }
+.skip:focus { left: 0; }
 
-a { color: var(--info); }
-
-:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
-
-/* ------------------------------------------------------------------ шапка */
-.topbar {
-  border-bottom: 1px solid var(--line);
-  padding: 10px 0 8px;
-  background: linear-gradient(180deg, #0e131b 0%, var(--bg) 100%);
+:where(a, button, [tabindex]):focus-visible {
+  outline: 2px solid var(--s1);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
-.topbar__inner { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.topbar__brand { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.topbar__logo { display: block; }
-.topbar__title { font-size: 17px; font-weight: 700; letter-spacing: .01em; white-space: nowrap; }
-.age { color: var(--muted); font-size: 12px; margin-top: 4px; }
-.age.is-stale { color: var(--warn); }
 
-.btn {
-  font: inherit; font-size: 13px;
-  color: var(--fg); background: var(--panel2);
-  border: 1px solid var(--line); border-radius: 9px;
-  padding: 8px 12px; min-height: 38px;  /* палец, а не курсор */
-  cursor: pointer;
+.wrap {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 0 20px 72px;
 }
-.btn:active { background: #1e2532; }
-.btn[disabled] { opacity: .5; cursor: default; }
 
-/* ---------------------------------------------------------------- плашки */
+/* ─────────────────────────────────────────────────────────── шапка */
+
+.top {
+  position: sticky; top: 0; z-index: 20;
+  background: color-mix(in srgb, var(--plane) 86%, transparent);
+  backdrop-filter: saturate(1.4) blur(10px);
+  border-bottom: 1px solid var(--hair);
+}
+.top__in {
+  max-width: 1180px; margin: 0 auto; padding: 12px 20px;
+  display: flex; align-items: center; gap: 16px;
+}
+.brand { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
+.brand__name { font-size: 16px; font-weight: 640; letter-spacing: -.01em; }
+.brand__sub { font-size: 12.5px; color: var(--ink-3); white-space: nowrap; }
+.top__spacer { flex: 1 1 auto; }
+.top__tools { display: flex; align-items: center; gap: 8px; min-width: 0; }
+
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 32px; padding: 0 12px;
+  background: var(--surface); border: 1px solid var(--hair);
+  border-radius: 999px; font-size: 13px; color: var(--ink-2);
+  cursor: pointer; white-space: nowrap;
+  transition: background .12s ease, border-color .12s ease, color .12s ease;
+}
+.pill:hover { border-color: var(--hair-strong); color: var(--ink); }
+.pill[aria-pressed="true"] { background: var(--inset); color: var(--ink); border-color: var(--hair-strong); }
+.pill__ico { width: 15px; height: 15px; display: block; flex: none; }
+
+.age {
+  font-size: 12.5px; color: var(--ink-3); white-space: nowrap;
+  /* Строка возраста обязана уметь сжиматься: без min-width:0 flex-элемент с
+   * nowrap не ужимается ниже своего текста и выдавливает кнопки за край экрана
+   * (на 390px кнопки просто уезжали из видимой области). */
+  min-width: 0; overflow: hidden; text-overflow: ellipsis;
+}
+.age--stale { color: var(--serious); font-weight: 560; }
+
+/* ─────────────────────────────────────────────────────── уведомления */
+
 .banner {
-  margin: 10px 0 0; padding: 10px 12px;
-  border: 1px solid; border-radius: 10px; font-size: 14px;
+  display: flex; gap: 12px; align-items: flex-start;
+  margin: 16px 0 0; padding: 14px 16px;
+  border: 1px solid var(--hair); border-left: 3px solid var(--axis);
+  border-radius: var(--radius-sm); background: var(--surface);
+  font-size: 14px;
 }
-.banner__title { font-weight: 700; display: block; }
-.banner--warn { background: rgba(240, 160, 60, .12); border-color: #7a5a22; color: #ffd79a; }
-.banner--err  { background: rgba(229, 72, 77, .12);  border-color: #7a2b2e; color: #ffb3b5; }
-.banner--big { font-size: 15px; padding: 14px; }
+.banner--warn { border-left-color: var(--warn); }
+.banner--err { border-left-color: var(--crit); }
+.banner__ico { flex: none; width: 18px; height: 18px; margin-top: 1px; }
+.banner b { font-weight: 620; }
 
-/* --------------------------------------------------------------- каркас */
-.section { margin: 20px 0; }
+/* ────────────────────────────────────────────────────────── секции */
+
+.section { margin-top: 40px; }
+.section__head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
 .section__title {
-  font-size: 12px; letter-spacing: .09em; text-transform: uppercase;
-  color: var(--muted); margin: 0 0 8px; font-weight: 700;
+  font-size: 12px; font-weight: 680; letter-spacing: .09em;
+  text-transform: uppercase; color: var(--ink-3);
 }
-.section__sub { font-size: 12px; color: var(--dim); margin: -4px 0 8px; }
+.section__sub { font-size: 13px; color: var(--ink-3); }
 
 .card {
-  background: var(--panel); border: 1px solid var(--line);
-  border-radius: var(--r); padding: 12px;
+  background: var(--surface);
+  border: 1px solid var(--hair);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 20px;
 }
-.card + .card { margin-top: 10px; }
-.card__title { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
-.card > .btn { margin-top: 10px; }
-.card__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.card__head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+.card__title { font-size: 15px; font-weight: 600; letter-spacing: -.005em; }
+.card__note { font-size: 12.5px; color: var(--ink-3); }
+.card__foot { margin-top: 14px; font-size: 12.5px; color: var(--ink-3); }
 
-.grid { display: grid; gap: 10px; grid-template-columns: 1fr; }
+.grid { display: grid; gap: 16px; }
 
-.empty { color: var(--dim); font-size: 13px; padding: 8px 0; }
-.empty--chart {
-  display: flex; align-items: center; justify-content: center;
-  min-height: 44px; border: 1px dashed var(--line); border-radius: 8px;
+/* ───────────────────────────────────────────────────────── вердикт */
+
+.hero {
+  margin-top: 24px;
+  background: var(--surface);
+  border: 1px solid var(--hair);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+.hero__grid { display: grid; gap: 0; }
+@media (min-width: 900px) { .hero__grid { grid-template-columns: 1.15fr 1fr; } }
+
+.hero__cell { padding: 24px; }
+.hero__gauge {
+  padding: 24px;
+  border-top: 1px solid var(--hair);
+}
+@media (min-width: 900px) {
+  .hero__gauge { border-top: 0; border-left: 1px solid var(--hair); }
 }
 
-.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
-.tone--pos { color: var(--pos); }
-.tone--neg { color: var(--neg); }
-.tone--warn { color: var(--warn); }
-.tone--mut { color: var(--muted); }
-
-/* ------------------------------------------------------- шапка-вердикт */
-.verdict { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 12px; }
-.chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.chip {
-  display: flex; flex-direction: column; gap: 1px;
-  padding: 6px 9px; border-radius: 10px;
-  background: var(--panel2); border: 1px solid var(--line); border-left-width: 3px;
-  min-width: 0;
+.kicker {
+  font-size: 11px; font-weight: 680; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--ink-3); margin-bottom: 12px;
 }
-.chip__k { font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
-.chip__v { font-size: 14px; font-weight: 600; white-space: nowrap; }
-.chip__since { font-size: 10px; color: var(--dim); }
-.chip--pos { border-left-color: var(--pos); }
-.chip--neg { border-left-color: var(--neg); }
-.chip--warn { border-left-color: var(--warn); }
-.chip--mut { border-left-color: var(--slate); }
 
-.verdict__label { font-size: 23px; font-weight: 700; line-height: 1.15; margin-top: 12px; }
-.verdict__code { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.bits { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 18px; }
+.bit {
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 6px 11px 6px 9px;
+  background: var(--surface-2); border: 1px solid var(--hair);
+  border-radius: 999px; font-size: 13px;
+}
+.bit__dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--ink-3); }
+.bit--on .bit__dot { background: var(--crit); }
+.bit--off .bit__dot { background: var(--good); }
+.bit--neutral .bit__dot { background: var(--ink-3); }
+.bit__k { color: var(--ink-3); }
+.bit__v { font-weight: 580; }
+.bit__since { color: var(--ink-3); font-size: 12px; }
 
-.stats { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px; }
-.stat__k { font-size: 11px; color: var(--muted); }
-.stat__v { font-size: 17px; font-weight: 600; }
+.cellname {
+  display: flex; align-items: center; gap: 10px;
+  font-size: clamp(26px, 4.2vw, 38px); font-weight: 660;
+  letter-spacing: -.022em; line-height: 1.1; margin-bottom: 4px;
+}
+.cellname__ico { width: 26px; height: 26px; flex: none; }
+.cellcode { font-size: 13px; color: var(--ink-3); margin-bottom: 18px; }
+
+.stats { display: flex; flex-wrap: wrap; gap: 24px; }
+.stat__k { font-size: 11px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3); }
+.stat__v { font-size: 21px; font-weight: 620; letter-spacing: -.015em; margin-top: 2px; }
+.stat__hint { font-size: 12px; color: var(--ink-3); }
 
 .rule {
-  margin-top: 12px; padding: 9px 11px;
-  border-left: 3px solid var(--info); border-radius: 0 8px 8px 0;
-  background: rgba(91, 157, 255, .08); font-size: 14px;
+  padding: 18px 24px;
+  border-top: 1px solid var(--hair);
+  background: var(--surface-2);
+  display: flex; gap: 12px; align-items: flex-start;
 }
-.rule__k { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .07em; color: var(--info); }
-
-.gauge-box { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
-.gauge-box__head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-.gauge-box__val { font-size: 22px; font-weight: 700; }
-.gauge-box__lbl { font-size: 14px; color: var(--muted); text-align: right; }
-
-/* --------------------------------------------------------------- ядро */
-.comp__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
-.comp__label { font-size: 14px; font-weight: 600; }
-.comp__z { font-size: 26px; font-weight: 700; line-height: 1.1; margin-top: 4px; }
-.comp__raw { font-size: 13px; color: var(--muted); }
-.comp__spark { margin: 8px 0 4px; }
-.comp__mech { font-size: 12px; color: var(--muted); }
-.comp__meta { font-size: 11px; color: var(--dim); }
-
-.health { display: flex; flex-wrap: wrap; gap: 16px; align-items: baseline; }
-
-/* ---------------------------------------------------- машина состояний */
-.legend { display: grid; gap: 5px; margin-top: 8px; }
-.legend__row {
-  display: grid; grid-template-columns: 12px 1fr auto; gap: 8px; align-items: center;
-  font-size: 12px; padding: 3px 4px; border-radius: 6px;
+.rule__ico { width: 18px; height: 18px; flex: none; margin-top: 2px; color: var(--ink-3); }
+.rule__k {
+  font-size: 11px; font-weight: 680; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--ink-3); margin-bottom: 4px;
 }
-.legend__row.is-current { background: rgba(91, 157, 255, .10); outline: 1px solid #2c4a78; }
-.legend__sw { width: 12px; height: 12px; border-radius: 3px; }
-.legend__stat { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.rule__t { font-size: 15px; line-height: 1.55; }
 
-.list__item { padding: 8px 0; border-top: 1px solid var(--line); }
-.list__item:first-child { border-top: 0; padding-top: 0; }
-.list__row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-.list__name { font-size: 14px; font-weight: 600; }
-.list__why { font-size: 12px; color: var(--muted); margin-top: 2px; }
-.list__text { font-size: 13px; }
+.gaugeval { display: flex; align-items: baseline; gap: 10px; margin-bottom: 2px; }
+.gaugeval__n { font-size: clamp(34px, 5.2vw, 46px); font-weight: 660; letter-spacing: -.03em; line-height: 1; }
+.gaugeval__l { font-size: 14px; color: var(--ink-2); }
+.gauge__meta { font-size: 12.5px; color: var(--ink-3); margin-top: 10px; }
+.gauge__trail { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--hair); }
+.gauge__trail .stat__k { margin-bottom: 4px; }
 
-/* ---------------------------------------------------------- мониторы */
-.tile { background: var(--panel); border: 1px solid var(--line); border-radius: var(--r); padding: 11px; }
-.tile--dead { opacity: .58; }
-.tile--stale { border-color: #6c5222; }
-.tile__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
-.tile__title { font-size: 13px; color: var(--muted); font-weight: 600; }
-.tile__headline { font-size: 16px; font-weight: 600; margin-top: 4px; overflow-wrap: anywhere; }
-.tile__note { font-size: 12px; color: var(--muted); margin-top: 5px; }
-.tile__meta { font-size: 11px; color: var(--dim); margin-top: 6px; display: flex; gap: 8px; flex-wrap: wrap; }
-.tile__chart { margin-top: 8px; }
-.tile__range { font-size: 10px; color: var(--dim); font-family: var(--mono); }
+/* ──────────────────────────────────────────────────────────── ядро */
 
-.badges { display: flex; gap: 5px; align-items: center; flex-shrink: 0; }
-.badge {
-  display: inline-block; font: inherit; font-size: 10px; line-height: 1.5;
-  padding: 2px 6px; border-radius: 6px;
-  border: 1px solid var(--line); color: var(--muted); background: transparent;
-  white-space: nowrap;
+.comps { display: grid; gap: 16px; }
+@media (min-width: 760px) { .comps { grid-template-columns: repeat(3, 1fr); } }
+
+.comp { display: flex; flex-direction: column; gap: 12px; }
+.comp__top { display: flex; align-items: flex-start; gap: 10px; }
+.comp__mark { width: 10px; height: 10px; border-radius: 3px; flex: none; margin-top: 5px; }
+.comp__label { font-size: 14.5px; font-weight: 580; line-height: 1.3; }
+.comp__z { display: flex; align-items: baseline; gap: 8px; }
+.comp__zn { font-size: 30px; font-weight: 640; letter-spacing: -.025em; line-height: 1; }
+.comp__raw { font-size: 13px; color: var(--ink-2); }
+.comp__mech { font-size: 12.5px; color: var(--ink-3); line-height: 1.45; }
+.comp__foot { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--ink-3); }
+
+.tier {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 2px 8px; border-radius: 999px;
+  border: 1px solid var(--hair); background: var(--surface-2);
+  font-size: 11px; font-weight: 600; letter-spacing: .02em; color: var(--ink-2);
+  cursor: help;
 }
-button.badge { cursor: pointer; min-height: 22px; }
-.badge--A { color: #8fe3b6; border-color: #2b5f45; }
-.badge--B { color: #cfd8e6; border-color: #3a4860; }
-.badge--monitor { color: var(--muted); }
-.badge--dead { color: #e59a9a; border-color: #5c2f2f; }
-.badge--stale { color: #ffd79a; border-color: #6c5222; }
-.badge--missing { color: var(--dim); }
-.badge--error { color: #ffb3b5; border-color: #7a2b2e; }
+.tier--A { border-color: color-mix(in srgb, var(--good) 40%, var(--hair)); color: var(--good-ink); }
+.tier--B { border-color: color-mix(in srgb, var(--s1) 34%, var(--hair)); color: var(--s1); }
+.tier--monitor { color: var(--ink-3); }
+.tier--dead { color: var(--ink-3); text-decoration: line-through; text-decoration-thickness: 1px; }
 
-.tier-note { display: none; font-size: 11px; color: var(--muted); margin-top: 6px; }
-.tier-note.is-open { display: block; }
+.health { display: flex; flex-wrap: wrap; gap: 24px; align-items: center; }
 
-.sources { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
-.src {
-  display: flex; align-items: center; gap: 6px;
-  font-size: 11px; color: var(--muted);
-  border: 1px solid var(--line); border-radius: 8px; padding: 4px 7px;
+/* ───────────────────────────────────────────────── машина состояний */
+
+.legend { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 12px; }
+.legend__i { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-2); }
+.legend__sw { width: 14px; height: 10px; border-radius: 3px; flex: none; }
+
+/* align-items: start — иначе более короткая карточка растягивается до высоты
+ * соседней и внизу зияет пустота в половину экрана. */
+.two { display: grid; gap: 16px; align-items: start; }
+@media (min-width: 900px) { .two { grid-template-columns: 1fr 1fr; } }
+
+.dist { padding: 14px 0; border-top: 1px solid var(--hair); }
+.dist:first-child { border-top: 0; padding-top: 0; }
+.dist__row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.dist__k { font-size: 14px; font-weight: 560; }
+.dist__v { font-size: 14px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.dist__t { font-size: 12.5px; color: var(--ink-3); margin-top: 6px; line-height: 1.45; }
+
+.sig { padding: 14px 0; border-top: 1px solid var(--hair); }
+.sig:first-child { border-top: 0; padding-top: 0; }
+.sig__row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.sig__k { font-size: 14px; font-weight: 560; }
+.sig__z { font-size: 14px; font-variant-numeric: tabular-nums; }
+.sig__verdict { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; margin-top: 5px; }
+.sig__why { font-size: 12.5px; color: var(--ink-3); margin-top: 4px; line-height: 1.45; }
+.sig__ico { width: 13px; height: 13px; flex: none; }
+
+.tone-pos { color: var(--pos); }
+.tone-neg { color: var(--neg); }
+.tone-mut { color: var(--ink-3); }
+
+/* ──────────────────────────────────────────────────────── мониторы */
+
+.tiles { display: grid; gap: 16px; align-items: start; grid-template-columns: repeat(auto-fill, minmax(268px, 1fr)); }
+.tile { display: flex; flex-direction: column; gap: 10px; }
+.tile--dead { opacity: .72; }
+.tile__head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.tile__title { font-size: 14px; font-weight: 580; line-height: 1.3; }
+.tile__head-r { display: flex; align-items: center; gap: 6px; flex: none; }
+.tile__headline { font-size: 14px; line-height: 1.45; }
+.tile__num { font-size: 26px; font-weight: 640; letter-spacing: -.02em; line-height: 1.1; }
+.tile__sub { font-size: 12.5px; color: var(--ink-3); line-height: 1.45; }
+.tile__foot { margin-top: auto; padding-top: 4px; display: flex; justify-content: space-between; gap: 10px; font-size: 11.5px; color: var(--ink-3); }
+
+.dot-status { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.dot-status--ok { background: var(--good); }
+.dot-status--stale { background: var(--warn); }
+.dot-status--error { background: var(--crit); }
+.dot-status--missing { background: var(--ink-3); }
+
+/* ───────────────────────────────────────────────────────── журнал */
+
+.evt { display: flex; gap: 12px; padding: 12px 0; border-top: 1px solid var(--hair); font-size: 13.5px; }
+.evt:first-child { border-top: 0; }
+.evt__ts { color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 12.5px; }
+.evt__t { line-height: 1.45; }
+
+/* ────────────────────────────────────────────────── таблица (a11y) */
+
+.tablewrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table.data { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+table.data caption { text-align: left; font-size: 12.5px; color: var(--ink-3); padding-bottom: 10px; }
+table.data th, table.data td { padding: 8px 12px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--hair); }
+table.data th:first-child, table.data td:first-child { text-align: left; }
+table.data thead th { font-weight: 600; color: var(--ink-3); font-size: 11.5px; letter-spacing: .05em; text-transform: uppercase; }
+table.data tbody tr:last-child td { border-bottom: 0; }
+
+/* ────────────────────────────────────────────────────────── графики */
+
+.fig { display: block; width: 100%; overflow: visible; }
+.fig text { font-family: var(--font); fill: var(--ink-3); }
+.fig .tick { font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.fig .gridline { stroke: var(--grid); stroke-width: 1; shape-rendering: crispEdges; }
+.fig .axisline { stroke: var(--axis); stroke-width: 1; shape-rendering: crispEdges; }
+.fig .series { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.fig .marker { stroke: var(--surface); stroke-width: 2; }
+.fig .hit { fill: transparent; cursor: crosshair; }
+.fig .cross { stroke: var(--ink-3); stroke-width: 1; stroke-dasharray: none; opacity: .5; }
+
+.chart { position: relative; }
+.tip {
+  position: absolute; z-index: 10; pointer-events: none;
+  background: var(--surface); border: 1px solid var(--hair-strong);
+  border-radius: var(--radius-sm); box-shadow: 0 8px 28px -12px rgba(0, 0, 0, .45);
+  padding: 9px 11px; font-size: 12.5px; line-height: 1.45; min-width: 116px;
+  opacity: 0; transform: translate(-50%, -112%); transition: opacity .1s ease;
 }
-.src__dot { width: 7px; height: 7px; border-radius: 50%; background: var(--slate); flex: none; }
+.tip[data-show="1"] { opacity: 1; }
+.tip__k { color: var(--ink-3); font-size: 11.5px; }
+.tip__v { font-weight: 600; font-variant-numeric: tabular-nums; }
+.tip__r { display: flex; gap: 8px; justify-content: space-between; }
 
-/* ---------------------------------------------------------- журнал */
-.event { display: grid; grid-template-columns: auto 1fr; gap: 8px; padding: 7px 0; border-top: 1px solid var(--line); }
-.event:first-child { border-top: 0; }
-.event__ts { font-size: 11px; color: var(--dim); font-family: var(--mono); white-space: nowrap; padding-top: 2px; }
-.event__text { font-size: 13px; }
-.event--warn .event__text { color: #ffd79a; }
-.event__kind { font-size: 10px; color: var(--muted); }
-
-/* ---------------------------------------------------------- графики */
-.chart { display: block; width: 100%; height: auto; }
-/* Спарклайн и гейдж рисуются в фиксированном viewBox: без потолка ширины они на десктопе
-   растягиваются вместе с подписями. Широкие ленты подгоняют viewBox под экран сами. */
-.chart--spark { max-width: 220px; }
-.chart--gauge { max-width: 420px; }
-.chart-cap { font-size: 11px; color: var(--dim); margin-top: 3px; }
-
-/* ---------------------------------------------------------- подвал */
-.foot { margin: 24px 0 28px; color: var(--dim); font-size: 11px; }
-.foot__line { font-family: var(--mono); }
-.foot__note { margin-top: 4px; max-width: 60ch; }
-
-/* --------------------------------------------------------- адаптив */
-/* База рассчитана на 360px; ниже — только расширения. */
-@media (min-width: 560px) {
-  .grid--2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .grid--mon { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .verdict__label { font-size: 27px; }
+.sr {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
 }
-@media (min-width: 860px) {
-  body { font-size: 15px; }
-  .grid--3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .grid--mon { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .wrap { padding: 0 16px; }
+
+.foot {
+  margin-top: 48px; padding-top: 20px; border-top: 1px solid var(--hair);
+  font-size: 12.5px; color: var(--ink-3); line-height: 1.6;
 }
-@media (max-width: 359px) {
-  .verdict__label { font-size: 20px; }
-  .comp__z { font-size: 22px; }
-}
+.foot a { color: var(--s1); text-decoration: none; }
+.foot a:hover { text-decoration: underline; }
+
+.empty { font-size: 13px; color: var(--ink-3); padding: 6px 0; }
+
 @media (prefers-reduced-motion: reduce) {
-  * { animation: none !important; transition: none !important; }
+  * { transition: none !important; animation: none !important; }
+}
+
+
+/* ─────────────────────────────────────────────────────────── телефон
+ *
+ * Шапка была единственным источником горизонтальной прокрутки: бренд, дата,
+ * возраст и две кнопки с подписями лежат в одной строке с nowrap и вместе
+ * требуют ~410px. Страница становилась шире экрана целиком, и на 375px у всех
+ * карточек срезался правый край. Поэтому на узких экранах у кнопок остаются
+ * иконки (подписи уходят к скринридеру через aria-label), дата исчезает —
+ * она и так есть в строке возраста, — а перенос текста разрешён где угодно:
+ * длинный заголовок тайла не должен уметь распирать сетку.
+ */
+@media (max-width: 620px) {
+  .top__in { gap: 10px; padding: 10px 16px; }
+  .brand__sub { display: none; }
+  .pill__label { display: none; }
+  .pill { padding: 0 10px; }
+  .wrap { padding: 0 16px 56px; }
+  .card, .hero__cell, .hero__gauge { padding: 16px; }
+  .rule { padding: 16px; }
+  .stats { gap: 16px 20px; }
+  .section { margin-top: 32px; }
+}
+
+body { overflow-x: hidden; }
+.tile__title, .tile__sub, .card__title, .rule__t, .comp__mech, .sig__why, .dist__t {
+  overflow-wrap: anywhere;
 }

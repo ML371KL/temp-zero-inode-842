@@ -1,1060 +1,710 @@
-/* MOEX Radar — фронт панели.
+/* MOEX Radar — сборка страницы из data.json (docs/CONTRACT.md §3).
  *
- * Ванильный JS без сборщика и без единого внешнего ресурса: страница обязана работать
- * под строгим CSP (default-src 'self'), поэтому здесь нет ни инлайн-обработчиков в разметке,
- * ни атрибутов style="" — динамические стили ставятся через CSSOM (его CSP не трогает).
+ * Ничего не выдумываем: на экран попадает только то, что положил конвейер. Пустое
+ * поле рисуется честным «нет данных», а не прочерком, за которым не видно разницы
+ * между «источник молчит» и «значение равно нулю».
  *
- * Разметка строится через createElement/textContent, а не innerHTML: в data.json приходят
- * тексты из внешних источников (заголовки ОРФР, заметки парсеров) — их нельзя вставлять как HTML.
- *
- * Всё, что видно на экране, приходит из /data/data.json (схема — docs/CONTRACT.md §3).
- * Статикой зашиты только подписи осей, пороги шкалы гейджа и расшифровки тиров —
- * это оформление, а не данные.
+ * Цвет нигде не работает в одиночку: у состояния ячейки, статуса источника и
+ * вердикта сигнала рядом с цветом всегда стоят иконка и словесная подпись — это
+ * требование доступности и заодно защита от чтения панели в оттенках серого.
  */
 (function () {
   'use strict';
 
-  // ------------------------------------------------------------- константы
+  var C = window.Charts;
+  var h = C.h, isNum = C.isNum, fmtNum = C.fmtNum, fmtDay = C.fmtDay, fmtMon = C.fmtMon, tok = C.tok;
+
   var DATA_URL = '/data/data.json';
-  var REFRESH_MS = 60000;   // автообновление раз в минуту: пайплайн публикует не чаще
-  var AGE_TICK_MS = 15000;  // возраст данных пересчитываем локально, без обращения к сети
-  var MSK_MS = 3 * 3600 * 1000;
+  var REFRESH_MS = 60000;
 
-  // Палитра дублирует styles.css (SVG красится атрибутами, а не классами).
-  var PAL = {
-    fg: '#e6ebf2', muted: '#8b97a8', dim: '#5f6b7d', line: '#242c3a', grid: '#1c2431',
-    pos: '#35c07a', neg: '#e5484d', warn: '#f0a03c', info: '#5b9dff', slate: '#46536b'
-  };
-
-  // Зеркало TIER_NOTES из pipeline/lib/constants.py. Держать синхронно руками:
-  // тянуть словарь в data.json ради четырёх строк — лишние байты в горячем объекте.
-  var TIER_NOTES = {
-    A: 'Валидировано: значимо на истории и переживает поправки',
-    B: 'Направление подтверждено, сила умеренная/режимная',
-    monitor: 'Мониторинг: предиктивность не доказана (мало истории или событий)',
-    dead: 'Как предиктор акций опровергнуто — контекст, не сигнал'
-  };
-  var TIER_LABEL = { A: 'тир A', B: 'тир B', monitor: 'монитор', dead: 'опровергнут' };
-
-  // Границы зон гейджа — зеркало CORE_LABELS. Это шкала рисунка; подпись под стрелкой
-  // всегда берётся из verdict.core_label, чтобы фронт не спорил с пайплайном.
-  var GAUGE_ZONES = [
-    { from: -3, to: -1, color: PAL.neg, alpha: 0.75 },
-    { from: -1, to: -0.3, color: PAL.neg, alpha: 0.32 },
-    { from: -0.3, to: 0.3, color: PAL.slate, alpha: 0.85 },
-    { from: 0.3, to: 1, color: PAL.pos, alpha: 0.32 },
-    { from: 1, to: 3, color: PAL.pos, alpha: 0.75 }
+  // Хвосты, которые конвейер добавляет к заметке тайла по тиру. На экране их несёт
+  // бейдж (в подсказке), поэтому из текста заметки срезаем: пятнадцать одинаковых
+  // абзацев про «предиктивность не доказана» — это шум, в котором тонет то самое
+  // предложение, ради которого заметка и написана.
+  var TIER_TAILS = [
+    'Мониторинг: предиктивность не доказана (мало истории или событий)',
+    'Направление подтверждено, сила умеренная/режимная',
+    'Валидировано: значимо на истории и переживает поправки',
+    'Как предиктор акций опровергнуто — контекст, не сигнал'
   ];
-  var GAUGE_TICKS = [-3, -1, 0, 1, 3];
+  function trimNote(note) {
+    if (!note) return '';
+    var out = String(note);
+    TIER_TAILS.forEach(function (tail) {
+      var i = out.indexOf(tail);
+      if (i >= 0) out = out.slice(0, i);
+    });
+    return out.replace(/[\s.;·]+$/, '').trim();
+  }
 
-  // Оси машины состояний: 1 = «включено». vol=1 не «плохо», а «шип» — красить янтарём,
-  // покупаемость шипа определяется облигационным флагом (REGIME.md §2).
-  var AXES = [
-    { key: 'trend', label: 'Тренд', on: 'бык', off: 'медведь', onTone: 'pos', offTone: 'neg' },
-    { key: 'vol', label: 'Волатильность', on: 'стресс', off: 'спокойно', onTone: 'warn', offTone: 'pos' },
-    { key: 'bond', label: 'Облигации', on: 'стресс', off: 'ок', onTone: 'neg', offTone: 'pos' }
-  ];
-  var RATE_PHASE = {
-    '-1': { text: 'смягчение', tone: 'pos' },
-    '0': { text: 'пауза', tone: 'mut' },
-    '1': { text: 'ужесточение', tone: 'neg' }
+  var TIER_NOTE = {
+    A: 'Тир A — валидировано: значимо на истории и переживает поправки на множественность.',
+    B: 'Тир B — направление подтверждено, сила умеренная или режимная.',
+    monitor: 'Мониторинг — предиктивность не доказана (мало истории или событий). Наблюдаем, не торгуем.',
+    dead: 'Как предиктор рынка акций опровергнуто. Оставлено для контекста.'
   };
-  var CELL_WORDS = { bull: 'бык', bear: 'медведь', calm: 'спокойно', stress: 'стресс', ok: 'ок' };
-  var DIST_LABEL = {
-    trend: 'Тренд (MA200)', vol: 'Волатильность', bond: 'Облигационный флаг',
-    rate: 'Ставка', rate_phase: 'Фаза ставки'
-  };
-  var STATUS_LABEL = { ok: 'свежо', stale: 'протухло', missing: 'нет данных', error: 'ошибка источника' };
-  var HEALTH_LABEL = { ok: 'в норме', warn: 'слабеет', dead: 'модель мертва' };
-  var EVENT_KIND = {
-    state_change: 'состояние', core_flip: 'ядро', cb: 'ЦБ', source: 'источник',
-    buy_window_open: 'окно входа', lease: 'публикация'
-  };
-  var MONTHS = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
-    'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
-  var MONTHS_NOM = ['январь', 'февраль', 'март', 'апрель', 'май', 'июнь',
-    'июль', 'август', 'сентябрь', 'октябрь', 'ноябрь', 'декабрь'];
 
-  var EVENTS_VISIBLE = 25;   // журнал длинный, на телефоне разворачиваем по кнопке
+  /* ────────────────────────────────────────────────────────── иконки */
 
-  // --------------------------------------------------------------- формат
-  var nfCache = {};
-  function nf(digits, signed) {
-    var key = digits + (signed ? 's' : '');
-    if (!nfCache[key]) {
-      nfCache[key] = new Intl.NumberFormat('ru-RU', {
-        minimumFractionDigits: digits, maximumFractionDigits: digits,
-        signDisplay: signed ? 'exceptZero' : 'auto'
-      });
-    }
-    return nfCache[key];
-  }
-  function isNum(v) { return typeof v === 'number' && isFinite(v); }
-  function num(v, digits, signed) {
-    if (!isNum(v)) return '—';
-    // Intl отдаёт дефис-минус, а тексты пайплайна (правило дня, заголовки тайлов) написаны
-    // типографским минусом. Разнобой в одной строке заметен — приводим к U+2212.
-    return nf(digits == null ? 2 : digits, !!signed).format(v).replace(/-/g, '−');
-  }
-  function pct(v, digits, signed) {
-    if (!isNum(v)) return '—';
-    return num(v, digits == null ? 2 : digits, signed !== false) + '%';
-  }
-  // Разрядность «по величине»: мониторы отдают и миллиарды рублей, и доли процента.
-  function smart(v) {
-    if (!isNum(v)) return '—';
-    var a = Math.abs(v);
-    return num(v, a >= 1000 ? 0 : a >= 100 ? 1 : a >= 1 ? 2 : 3, false);
-  }
-  function tone(v) { return !isNum(v) || v === 0 ? '' : (v > 0 ? ' tone--pos' : ' tone--neg'); }
-
-  function pad2(n) { return n < 10 ? '0' + n : String(n); }
-  function parseTs(s) {
-    if (typeof s !== 'string') return null;
-    var t = Date.parse(s);
-    return isFinite(t) ? t : null;
-  }
-  // Внутри всё в UTC, показываем МСК. Сдвигаем метку и читаем UTC-геттерами —
-  // так результат не зависит от часового пояса телефона (пользователь бывает в Малайзии).
-  function mskParts(ts) {
-    var d = new Date(ts + MSK_MS);
-    return {
-      d: d.getUTCDate(), m: d.getUTCMonth(), y: d.getUTCFullYear(),
-      hh: d.getUTCHours(), mm: d.getUTCMinutes()
+  function ico(name, cls) {
+    var paths = {
+      good: 'M2.5 8.4l3.3 3.3 7.7-7.7',
+      warn: 'M8 1.8l6.4 11.4H1.6zM8 6.2v3.4M8 11.3v.1',
+      crit: 'M4 4l8 8M12 4l-8 8',
+      flat: 'M3 8h10',
+      up: 'M8 12.5V3.5M4 7l4-3.5L12 7',
+      down: 'M8 3.5v9M4 9l4 3.5L12 9',
+      info: 'M8 7.2v4.4M8 4.6v.1',
+      clock: 'M8 4.2V8l2.6 1.6',
+      lock: 'M4.6 7V5.4a3.4 3.4 0 016.8 0V7M3.6 7h8.8v6H3.6z'
     };
-  }
-  function fmtMsk(ts) {
-    var p = mskParts(ts);
-    return pad2(p.d) + '.' + pad2(p.m + 1) + '.' + p.y + ' ' + pad2(p.hh) + ':' + pad2(p.mm);
-  }
-  function fmtMskShort(ts) {
-    var p = mskParts(ts);
-    return pad2(p.d) + '.' + pad2(p.m + 1) + ' ' + pad2(p.hh) + ':' + pad2(p.mm);
-  }
-  // Календарные строки («2026-08-11», «2026-07») — это даты, а не моменты: часовой сдвиг к ним
-  // не применяется, иначе месячный тайл переедет на день назад.
-  function fmtDay(s) {
-    if (typeof s !== 'string') return '—';
-    var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
-    if (m) return m[3] + '.' + m[2] + '.' + m[1];
-    var mo = /^(\d{4})-(\d{2})$/.exec(s);
-    if (mo) return (MONTHS_NOM[Number(mo[2]) - 1] || mo[2]) + ' ' + mo[1];
-    return s;
-  }
-  function fmtDayShort(s) {
-    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s));
-    if (!m) return fmtDay(s);
-    return Number(m[3]) + ' ' + (MONTHS[Number(m[2]) - 1] || '') + ' ' + m[1];
-  }
-  function fmtAge(ms) {
-    if (!isFinite(ms)) return '—';
-    var min = Math.max(0, Math.round(ms / 60000));
-    if (min < 60) return min + ' мин';
-    var h = Math.floor(min / 60), rest = min % 60;
-    if (h < 48) return h + ' ч ' + rest + ' мин';
-    var d = Math.floor(h / 24);
-    return d + ' дн ' + (h % 24) + ' ч';
+    var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 16 16');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '1.8');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    svg.setAttribute('aria-hidden', 'true');
+    if (cls) svg.setAttribute('class', cls);
+    if (name === 'info' || name === 'clock') {
+      var circ = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      circ.setAttribute('cx', '8'); circ.setAttribute('cy', '8'); circ.setAttribute('r', '6.2');
+      svg.appendChild(circ);
+    }
+    var p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    p.setAttribute('d', paths[name] || paths.info);
+    svg.appendChild(p);
+    return svg;
   }
 
-  // ------------------------------------------------------------------ DOM
-  function el(tag, attrs, kids) {
-    var n = document.createElement(tag), k;
-    if (attrs) {
-      for (k in attrs) {
-        if (!Object.prototype.hasOwnProperty.call(attrs, k)) continue;
-        var v = attrs[k];
-        if (v == null || v === false) continue;
-        if (k === 'class') n.className = v;
-        else if (k === 'text') n.textContent = String(v);
-        else n.setAttribute(k, v === true ? '' : String(v));
-      }
-    }
-    append(n, kids);
-    return n;
-  }
-  function append(node, kids) {
-    if (kids == null || kids === false) return;
-    if (Array.isArray(kids)) {
-      for (var i = 0; i < kids.length; i++) append(node, kids[i]);
-      return;
-    }
-    node.appendChild(typeof kids === 'object' ? kids : document.createTextNode(String(kids)));
-  }
-  var NS = 'http://www.w3.org/2000/svg';
-  function sv(tag, attrs, kids) {
-    var n = document.createElementNS(NS, tag), k;
-    if (attrs) {
-      for (k in attrs) {
-        if (!Object.prototype.hasOwnProperty.call(attrs, k)) continue;
-        var v = attrs[k];
-        if (v == null || v === false) continue;
-        if (k === 'text') { n.textContent = String(v); continue; }
-        n.setAttribute(k, String(v));
-      }
-    }
-    if (kids) append(n, kids);
-    return n;
-  }
-  function svgFrame(w, h, cls) {
-    // aria-hidden: график всегда сопровождается теми же числами текстом, второй раз
-    // озвучивать скринридеру нечего.
-    return sv('svg', {
-      'class': cls || 'chart', viewBox: '0 0 ' + w + ' ' + h,
-      width: '100%', 'aria-hidden': 'true', focusable: 'false'
-    });
-  }
-  function emptyChart(text) { return el('div', { 'class': 'empty empty--chart', text: text }); }
-  // Ширина viewBox широких графиков подгоняется под реальную ширину экрана, чтобы масштаб
-  // был ~1:1. Иначе на десктопе SVG растягивается и подписи осей раздуваются до 20+ px.
-  function fullChartW() {
-    var w = window.innerWidth || 360;
-    return Math.max(320, Math.min(1040, Math.round(w - 44)));
-  }
-  function section(title, sub, kids) {
-    return el('section', { 'class': 'section' }, [
-      el('h2', { 'class': 'section__title', text: title }),
-      sub ? el('p', { 'class': 'section__sub', text: sub }) : null,
-      kids
-    ]);
-  }
+  /* ──────────────────────────────────────────────────────────── тема */
 
-  // Бейдж тира: расшифровка прячется за нажатием — на телефоне title не показывается,
-  // а класть четыре строки под каждый тайл — визуальный шум.
-  function tierBadge(tier) {
-    var known = Object.prototype.hasOwnProperty.call(TIER_NOTES, tier);
-    if (!known) return { btn: el('span', { 'class': 'badge', text: String(tier || '—') }), note: null };
-    var note = el('p', { 'class': 'tier-note', text: TIER_NOTES[tier] });
-    var btn = el('button', {
-      'class': 'badge badge--' + tier, type: 'button', 'aria-expanded': 'false',
-      title: TIER_NOTES[tier], text: TIER_LABEL[tier]
-    });
+  var THEMES = ['auto', 'light', 'dark'];
+  var THEME_LABEL = { auto: 'Как в системе', light: 'Светлая', dark: 'Тёмная' };
+
+  function currentTheme() {
+    // ?theme=light|dark задаёт тему для конкретной ссылки: удобно и для того,
+    // чтобы поделиться панелью в нужном виде, и для съёмки страницы роботом.
+    var q = (location.search.match(/[?&]theme=(light|dark|auto)/) || [])[1];
+    if (q) return q;
+    try { return localStorage.getItem('moex-radar-theme') || 'auto'; } catch (e) { return 'auto'; }
+  }
+  function applyTheme(t) {
+    document.documentElement.dataset.theme = (t === 'auto' ? '' : t);
+    try { localStorage.setItem('moex-radar-theme', t); } catch (e) { /* приватный режим */ }
+    var label = document.getElementById('theme-label');
+    if (label) label.textContent = THEME_LABEL[t];
+    var btn = document.getElementById('theme-toggle');
+    if (btn) btn.setAttribute('title', 'Тема: ' + THEME_LABEL[t] + ' — нажмите, чтобы сменить');
+    // Графики читают цвета из CSS-переменных в момент отрисовки, поэтому при смене
+    // темы их нужно перерисовать — иначе линии останутся в палитре прежней темы.
+    if (window.__lastPayload) render(window.__lastPayload);
+  }
+  function initTheme() {
+    var t = currentTheme();
+    applyTheme(t);
+    var btn = document.getElementById('theme-toggle');
+    if (!btn) return;
     btn.addEventListener('click', function () {
-      var open = note.classList.toggle('is-open');
-      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      applyTheme(THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length]);
     });
-    if (tier === 'dead') { note.classList.add('is-open'); btn.setAttribute('aria-expanded', 'true'); }
-    return { btn: btn, note: note };
   }
 
-  // ------------------------------------------------------------ ряды/точки
-  function toPts(pairs) {
-    var out = [], i, p, v, t, useIndex = false;
-    if (!Array.isArray(pairs)) return out;
-    for (i = 0; i < pairs.length; i++) {
-      p = pairs[i];
-      if (!Array.isArray(p) || p.length < 2) continue;
-      v = Number(p[1]);
-      if (!isFinite(v)) continue;              // пропуск источника рисовать нечем
-      t = parseTs(p[0]);
-      if (t == null) useIndex = true;
-      out.push({ t: t, v: v, d: p[0], i: out.length });
-    }
-    // Если хоть одна дата не разобралась — переходим на равномерную ось по индексу,
-    // иначе смешение шкал даёт кашу.
-    if (useIndex) for (i = 0; i < out.length; i++) out[i].t = i;
-    else out.sort(function (a, b) { return a.t - b.t; });
-    return out;
-  }
-  // Прореживание для длинных лент (2004+): в каждой корзине оставляем минимум и максимум,
-  // поэтому экстремумы и переходы через ноль не исчезают с картинки.
-  function decimate(pts, maxN) {
-    if (pts.length <= maxN) return pts;
-    var step = pts.length / maxN, out = [], i, j, a, b, mn, mx;
-    for (i = 0; i < maxN; i++) {
-      a = Math.floor(i * step); b = Math.min(pts.length, Math.floor((i + 1) * step));
-      if (b <= a) continue;
-      mn = pts[a]; mx = pts[a];
-      for (j = a; j < b; j++) {
-        if (pts[j].v < mn.v) mn = pts[j];
-        if (pts[j].v > mx.v) mx = pts[j];
-      }
-      if (mn === mx) out.push(mn);
-      else if (mn.t <= mx.t) { out.push(mn); out.push(mx); }
-      else { out.push(mx); out.push(mn); }
-    }
-    return out;
-  }
-  function extent(pts) {
-    var lo = Infinity, hi = -Infinity, i;
-    for (i = 0; i < pts.length; i++) { if (pts[i].v < lo) lo = pts[i].v; if (pts[i].v > hi) hi = pts[i].v; }
-    if (!isFinite(lo)) { lo = 0; hi = 1; }
-    if (lo === hi) { lo -= 1; hi += 1; }
-    return [lo, hi];
-  }
-  function yearTicks(t0, t1, maxTicks) {
-    var y0 = new Date(t0).getUTCFullYear(), y1 = new Date(t1).getUTCFullYear();
-    var stepY = Math.max(1, Math.ceil((y1 - y0 + 1) / maxTicks)), out = [], y, t;
-    for (y = Math.ceil(y0 / stepY) * stepY; y <= y1; y += stepY) {
-      t = Date.UTC(y, 0, 1);
-      if (t >= t0 && t <= t1) out.push({ t: t, label: String(y) });
-    }
-    return out;
+  /* ─────────────────────────────────────────────────── общие кусочки */
+
+  function tier(t) {
+    if (!t) return null;
+    var map = { A: 'A', B: 'B', monitor: 'монитор', dead: 'опровергнуто' };
+    return h('span', {
+      'class': 'tier tier--' + t, title: TIER_NOTE[t] || '',
+      text: map[t] || t
+    });
   }
 
-  // ------------------------------------------------------------- графики
-  // Спарклайн z-скора за 2 года. Ноль подчёркнут: у z-скора он и есть точка отсчёта.
-  function sparkline(pairs) {
-    var pts = decimate(toPts(pairs), 200);
-    if (pts.length < 2) return emptyChart('нет данных за период');
-    var W = 220, H = 46, pad = 3;
-    var ex = extent(pts), lo = Math.min(ex[0], 0), hi = Math.max(ex[1], 0);
-    var t0 = pts[0].t, t1 = pts[pts.length - 1].t;
-    var xs = function (t) { return t1 === t0 ? pad : pad + (W - 2 * pad) * (t - t0) / (t1 - t0); };
-    var ys = function (v) { return pad + (H - 2 * pad) * (hi - v) / (hi - lo); };
-    var svg = svgFrame(W, H, 'chart chart--spark'), i, d = '';
-    for (i = 0; i < pts.length; i++) d += (i ? 'L' : 'M') + xs(pts[i].t).toFixed(1) + ' ' + ys(pts[i].v).toFixed(1);
-    if (lo < 0 && hi > 0) {
-      svg.appendChild(sv('line', {
-        x1: 0, x2: W, y1: ys(0), y2: ys(0), stroke: PAL.line, 'stroke-width': 1,
-        'stroke-dasharray': '3 3', 'vector-effect': 'non-scaling-stroke'
-      }));
-    }
-    var last = pts[pts.length - 1];
-    var col = last.v >= 0 ? PAL.pos : PAL.neg;
-    svg.appendChild(sv('path', {
-      d: d, fill: 'none', stroke: col, 'stroke-width': 1.6,
-      'stroke-linejoin': 'round', 'vector-effect': 'non-scaling-stroke'
-    }));
-    svg.appendChild(sv('circle', { cx: xs(last.t), cy: ys(last.v), r: 2.4, fill: col }));
-    return svg;
+  function statusDot(status) {
+    var label = { ok: 'свежие данные', stale: 'данные устарели', error: 'источник не ответил', missing: 'данных ещё нет' };
+    return h('span', {
+      'class': 'dot-status dot-status--' + (status || 'missing'),
+      title: label[status] || status, role: 'img', 'aria-label': label[status] || status
+    });
   }
 
-  // Лента композита с 2004: линия + заливка по знаку + отметки смен знака.
-  function coreRibbon(pairs) {
-    var all = toPts(pairs);
-    if (all.length < 2) return emptyChart('ещё не публиковалось');
-    var W = fullChartW(), H = 118, L = 20, R = 6, T = 8, B = 16;
-    var ex = extent(all);
-    var span = Math.max(1, Math.ceil(Math.max(Math.abs(ex[0]), Math.abs(ex[1])) * 10) / 10);
-    var t0 = all[0].t, t1 = all[all.length - 1].t;
-    var xs = function (t) { return t1 === t0 ? L : L + (W - L - R) * (t - t0) / (t1 - t0); };
-    var ys = function (v) { return T + (H - T - B) * (span - v) / (2 * span); };
-    var svg = svgFrame(W, H), i, g;
-
-    // Сетка: ноль жирнее, ±1 — «сильный сигнал» по договорённости валидации.
-    var levels = [span, 1, 0, -1, -span];
-    for (i = 0; i < levels.length; i++) {
-      var lv = levels[i];
-      if (Math.abs(lv) > span) continue;
-      svg.appendChild(sv('line', {
-        x1: L, x2: W - R, y1: ys(lv), y2: ys(lv),
-        stroke: lv === 0 ? PAL.line : PAL.grid, 'stroke-width': lv === 0 ? 1.2 : 1,
-        'vector-effect': 'non-scaling-stroke'
-      }));
-      svg.appendChild(sv('text', {
-        x: L - 3, y: ys(lv) + 3, 'text-anchor': 'end', fill: PAL.dim, 'font-size': 8,
-        text: (lv > 0 ? '+' : '') + num(lv, Math.abs(lv) % 1 ? 1 : 0)
-      }));
-    }
-
-    // Смены знака считаем по ПОЛНОМУ ряду (до прореживания), чтобы даты отметок были точными.
-    var crosses = [];
-    for (i = 1; i < all.length; i++) {
-      var a = all[i - 1], b = all[i];
-      if ((a.v >= 0) === (b.v >= 0)) continue;
-      var f = Math.abs(a.v) / (Math.abs(a.v) + Math.abs(b.v) || 1);
-      crosses.push({ t: a.t + (b.t - a.t) * f, to: b.v >= 0 ? 1 : -1, d: b.d });
-    }
-
-    var pts = decimate(all, 700);
-    // Заливка знаком: режем ряд в точках пересечения нуля и заливаем каждый кусок своим цветом.
-    var segs = [], cur = null;
-    for (i = 0; i < pts.length; i++) {
-      var p = pts[i], s = p.v >= 0 ? 1 : -1;
-      if (!cur) { cur = { s: s, pts: [p] }; continue; }
-      if (s === cur.s) { cur.pts.push(p); continue; }
-      var q = cur.pts[cur.pts.length - 1];
-      var fr = Math.abs(q.v) / (Math.abs(q.v) + Math.abs(p.v) || 1);
-      var cross = { t: q.t + (p.t - q.t) * fr, v: 0 };
-      cur.pts.push(cross); segs.push(cur);
-      cur = { s: s, pts: [cross, p] };
-    }
-    if (cur) segs.push(cur);
-    g = sv('g', null);
-    for (i = 0; i < segs.length; i++) {
-      var sg = segs[i];
-      if (sg.pts.length < 2) continue;
-      var dd = 'M' + xs(sg.pts[0].t).toFixed(1) + ' ' + ys(0).toFixed(1), j;
-      for (j = 0; j < sg.pts.length; j++) dd += 'L' + xs(sg.pts[j].t).toFixed(1) + ' ' + ys(sg.pts[j].v).toFixed(1);
-      dd += 'L' + xs(sg.pts[sg.pts.length - 1].t).toFixed(1) + ' ' + ys(0).toFixed(1) + 'Z';
-      g.appendChild(sv('path', { d: dd, fill: sg.s > 0 ? PAL.pos : PAL.neg, 'fill-opacity': 0.30 }));
-    }
-    svg.appendChild(g);
-
-    var d = '';
-    for (i = 0; i < pts.length; i++) d += (i ? 'L' : 'M') + xs(pts[i].t).toFixed(1) + ' ' + ys(pts[i].v).toFixed(1);
-    svg.appendChild(sv('path', {
-      d: d, fill: 'none', stroke: PAL.fg, 'stroke-width': 1, 'stroke-opacity': 0.75,
-      'stroke-linejoin': 'round', 'vector-effect': 'non-scaling-stroke'
-    }));
-
-    for (i = 0; i < crosses.length; i++) {
-      var c = crosses[i];
-      svg.appendChild(sv('circle', {
-        cx: xs(c.t), cy: ys(0), r: 1.9, fill: c.to > 0 ? PAL.pos : PAL.neg,
-        stroke: '#0b0e13', 'stroke-width': 0.6
-      }, [sv('title', { text: 'смена знака ' + fmtDay(c.d) })]));
-    }
-
-    var ticks = yearTicks(t0, t1, 6);
-    for (i = 0; i < ticks.length; i++) {
-      svg.appendChild(sv('text', {
-        x: xs(ticks[i].t), y: H - 4, 'text-anchor': 'middle', fill: PAL.dim,
-        'font-size': 8, text: ticks[i].label
-      }));
-    }
-    return svg;
+  function section(title, sub, kids) {
+    return h('section', { 'class': 'section' }, [
+      h('div', { 'class': 'section__head' }, [
+        h('h2', { 'class': 'section__title', text: title }),
+        sub ? h('span', { 'class': 'section__sub', text: sub }) : null
+      ])
+    ].concat(kids));
   }
 
-  // Цвет ячейки состояния. Логика REGIME.md §2: вола-шип при спокойных ОФЗ — окно входа,
-  // тройной стресс у медведя — токсичная ячейка. Остальное — оттенки фона.
-  function cellColor(code) {
-    var c = parseCell(code);
-    if (!c) return PAL.slate;
-    if (c.vol === 1 && c.bond === 0) return PAL.pos;
-    if (c.vol === 1 && c.bond === 1) return c.trend === 1 ? PAL.warn : PAL.neg;
-    if (c.bond === 1) return c.trend === 1 ? '#6b5b2e' : '#6b4230';
-    return c.trend === 1 ? '#2e7d5b' : PAL.slate;
-  }
-  function parseCell(code) {
-    if (typeof code !== 'string') return null;
-    var p = code.split('|');
-    if (p.length < 3) return null;
-    return {
-      trend: p[0].trim() === 'bull' ? 1 : 0,
-      vol: p[1].trim() === 'stress' ? 1 : 0,
-      bond: p[2].trim() === 'stress' ? 1 : 0
-    };
-  }
-  function cellWords(code) {
-    return String(code || '').split('|').map(function (w) {
-      w = w.trim(); return CELL_WORDS[w] || w;
-    }).join(' · ');
+  function stat(k, v, hint, cls) {
+    return h('div', null, [
+      h('div', { 'class': 'stat__k', text: k }),
+      h('div', { 'class': 'stat__v' + (cls ? ' ' + cls : ''), text: v }),
+      hint ? h('div', { 'class': 'stat__hint', text: hint }) : null
+    ]);
   }
 
-  // Лента ячеек: одинаковые подряд идущие коды склеиваются в отрезок — иначе на 2004+
-  // получаются тысячи прямоугольников.
-  function statesRibbon(series) {
-    var rows = Array.isArray(series) ? series : [];
-    var runs = [], i, t, code, last, diffs = [];
-    for (i = 0; i < rows.length; i++) {
-      var r = rows[i];
-      if (!Array.isArray(r) || r.length < 2) continue;
-      t = parseTs(r[0]);
-      if (t == null) continue;
-      code = String(r[1]);
-      last = runs.length ? runs[runs.length - 1] : null;
-      if (last) { diffs.push(t - last.t1); last.t1 = t; }
-      if (last && last.code === code) continue;
-      runs.push({ code: code, t0: t, t1: t, d0: r[0] });
-    }
-    if (!runs.length) return emptyChart('ещё не публиковалось');
-    // Последний отрезок обрывается на своей же дате — растягиваем на типичный шаг ряда,
-    // иначе текущее состояние на ленте не видно.
-    diffs.sort(function (a, b) { return a - b; });
-    var stepMs = diffs.length ? diffs[Math.floor(diffs.length / 2)] : 86400000;
-    runs[runs.length - 1].t1 += Math.max(stepMs, 1);
+  function toneOf(v) { return !isNum(v) ? 'tone-mut' : (v > 0 ? 'tone-pos' : (v < 0 ? 'tone-neg' : 'tone-mut')); }
 
-    var W = fullChartW(), H = 44, L = 2, R = 2, T = 4, barH = 24;
-    var t0 = runs[0].t0, t1 = runs[runs.length - 1].t1;
-    var xs = function (t) { return t1 === t0 ? L : L + (W - L - R) * (t - t0) / (t1 - t0); };
-    var svg = svgFrame(W, H);
-    for (i = 0; i < runs.length; i++) {
-      var x0 = xs(runs[i].t0), x1 = xs(runs[i].t1);
-      svg.appendChild(sv('rect', {
-        x: x0.toFixed(2), y: T, width: Math.max(0.6, x1 - x0).toFixed(2), height: barH,
-        fill: cellColor(runs[i].code)
-      }, [sv('title', { text: cellWords(runs[i].code) + ' — с ' + fmtDay(runs[i].d0) })]));
-    }
-    var ticks = yearTicks(t0, t1, 6);
-    for (i = 0; i < ticks.length; i++) {
-      svg.appendChild(sv('line', {
-        x1: xs(ticks[i].t), x2: xs(ticks[i].t), y1: T + barH, y2: T + barH + 3,
-        stroke: PAL.dim, 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke'
-      }));
-      svg.appendChild(sv('text', {
-        x: xs(ticks[i].t), y: H - 2, 'text-anchor': 'middle', fill: PAL.dim,
-        'font-size': 8, text: ticks[i].label
-      }));
-    }
-    return svg;
-  }
+  /* ─────────────────────────────────────────────────────── вердикт */
 
-  // Мини-график монитора: только форма ряда, без осей — числа даёт headline.
-  function miniChart(pairs) {
-    var pts = decimate(toPts(pairs), 160);
-    if (pts.length < 2) return null;
-    var W = 220, H = 54, pad = 3;
-    var ex = extent(pts), lo = ex[0], hi = ex[1];
-    var t0 = pts[0].t, t1 = pts[pts.length - 1].t;
-    var xs = function (t) { return t1 === t0 ? pad : pad + (W - 2 * pad) * (t - t0) / (t1 - t0); };
-    var ys = function (v) { return pad + (H - 2 * pad) * (hi - v) / (hi - lo); };
-    var svg = svgFrame(W, H), i, d = '', area;
-    for (i = 0; i < pts.length; i++) d += (i ? 'L' : 'M') + xs(pts[i].t).toFixed(1) + ' ' + ys(pts[i].v).toFixed(1);
-    area = d + 'L' + xs(pts[pts.length - 1].t).toFixed(1) + ' ' + (H - pad) +
-      'L' + xs(pts[0].t).toFixed(1) + ' ' + (H - pad) + 'Z';
-    if (lo < 0 && hi > 0) {
-      svg.appendChild(sv('line', {
-        x1: pad, x2: W - pad, y1: ys(0), y2: ys(0), stroke: PAL.line,
-        'stroke-width': 1, 'stroke-dasharray': '3 3', 'vector-effect': 'non-scaling-stroke'
-      }));
-    }
-    svg.appendChild(sv('path', { d: area, fill: PAL.info, 'fill-opacity': 0.12 }));
-    svg.appendChild(sv('path', {
-      d: d, fill: 'none', stroke: PAL.info, 'stroke-width': 1.4,
-      'stroke-linejoin': 'round', 'vector-effect': 'non-scaling-stroke'
-    }));
-    var last = pts[pts.length - 1];
-    svg.appendChild(sv('circle', { cx: xs(last.t), cy: ys(last.v), r: 2.2, fill: PAL.info }));
-    return { svg: svg, lo: lo, hi: hi, from: pts[0].d, to: last.d };
-  }
+  var BIT_LABEL = {
+    trend: { k: 'Тренд', on: 'бык', off: 'медведь' },
+    vol: { k: 'Волатильность', on: 'стресс', off: 'спокойно' },
+    bond: { k: 'Облигации', on: 'стресс', off: 'спокойно' }
+  };
+  var PHASE = { '-1': 'смягчение', '0': 'пауза', '1': 'ужесточение' };
 
-  // Гейдж композита −3…+3 со стрелкой.
-  function gauge(value) {
-    var W = 320, H = 62, L = 14, R = 14, y = 30, barH = 12;
-    var xs = function (v) { return L + (W - L - R) * (Math.max(-3, Math.min(3, v)) + 3) / 6; };
-    var svg = svgFrame(W, H, 'chart chart--gauge'), i;
-    for (i = 0; i < GAUGE_ZONES.length; i++) {
-      var z = GAUGE_ZONES[i];
-      svg.appendChild(sv('rect', {
-        x: xs(z.from), y: y, width: xs(z.to) - xs(z.from), height: barH,
-        fill: z.color, 'fill-opacity': z.alpha
-      }));
-    }
-    svg.appendChild(sv('rect', {
-      x: L, y: y, width: W - L - R, height: barH, fill: 'none',
-      stroke: PAL.line, 'stroke-width': 1, 'vector-effect': 'non-scaling-stroke'
-    }));
-    for (i = 0; i < GAUGE_TICKS.length; i++) {
-      var tv = GAUGE_TICKS[i];
-      svg.appendChild(sv('line', {
-        x1: xs(tv), x2: xs(tv), y1: y + barH, y2: y + barH + 3, stroke: PAL.dim,
-        'stroke-width': 1, 'vector-effect': 'non-scaling-stroke'
-      }));
-      svg.appendChild(sv('text', {
-        x: xs(tv), y: H - 2, 'text-anchor': 'middle', fill: PAL.dim, 'font-size': 8,
-        text: (tv > 0 ? '+' : '') + tv
-      }));
-    }
-    if (isNum(value)) {
-      var x = xs(value);
-      var col = value > 0.3 ? PAL.pos : value < -0.3 ? PAL.neg : PAL.fg;
-      svg.appendChild(sv('path', {
-        d: 'M' + x + ' ' + (y - 2) + 'L' + (x - 5) + ' ' + (y - 11) + 'L' + (x + 5) + ' ' + (y - 11) + 'Z',
-        fill: col
-      }));
-      svg.appendChild(sv('text', {
-        x: Math.max(L + 12, Math.min(W - R - 12, x)), y: y - 15, 'text-anchor': 'middle',
-        fill: col, 'font-size': 11, 'font-weight': 'bold', text: num(value, 2, true)
-      }));
-    }
-    return svg;
-  }
-
-  // ------------------------------------------------------- секция: вердикт
-  function renderVerdict(data) {
-    var v = data.verdict || {};
-    var st = data.states || {};
-    var cur = st.current || parseCell(v.cell_code) || {};
-    // CONTRACT §3 кладёт since внутрь current, а §4 (API compute_states) — рядом.
-    // Читаем оба места, чтобы подпись «с такого-то числа» не пропала при любом варианте.
-    var since = (st.current && st.current.since) || st.since || {};
-    var chips = [], i;
-
-    for (i = 0; i < AXES.length; i++) {
-      var ax = AXES[i], on = cur[ax.key] === 1, has = isNum(cur[ax.key]);
-      chips.push(el('div', { 'class': 'chip chip--' + (has ? (on ? ax.onTone : ax.offTone) : 'mut') }, [
-        el('span', { 'class': 'chip__k', text: ax.label }),
-        el('span', { 'class': 'chip__v', text: has ? (on ? ax.on : ax.off) : '—' }),
-        since[ax.key] ? el('span', { 'class': 'chip__since', text: 'с ' + fmtDay(since[ax.key]) }) : null
-      ]));
-    }
-    var rp = RATE_PHASE[String(cur.rate_phase)] || null;
-    chips.push(el('div', { 'class': 'chip chip--' + (rp ? rp.tone : 'mut') }, [
-      el('span', { 'class': 'chip__k', text: 'Фаза ставки' }),
-      el('span', { 'class': 'chip__v', text: rp ? rp.text : '—' })
+  function renderHero(d) {
+    var v = d.verdict || {}, st = (d.states || {}).current || {}, core = d.core || {};
+    var since = st.since || {};
+    var bits = ['trend', 'vol', 'bond'].map(function (key) {
+      var raw = st[key];
+      var on = raw === 1 || raw === true;
+      // Для тренда «единица» — это бык, то есть хорошо; для волы и облигаций
+      // единица означает стресс. Цвет ставим по СМЫСЛУ, а не по значению бита.
+      var good = key === 'trend' ? on : !on;
+      var word = key === 'trend' ? (on ? BIT_LABEL.trend.on : BIT_LABEL.trend.off)
+        : (on ? BIT_LABEL[key].on : BIT_LABEL[key].off);
+      return h('span', { 'class': 'bit bit--' + (good ? 'off' : 'on') }, [
+        h('span', { 'class': 'bit__dot' }),
+        h('span', { 'class': 'bit__k', text: BIT_LABEL[key].k }),
+        h('span', { 'class': 'bit__v', text: word }),
+        since[key] ? h('span', { 'class': 'bit__since', text: 'с ' + fmtDay(since[key]) }) : null
+      ]);
+    });
+    bits.push(h('span', { 'class': 'bit bit--neutral' }, [
+      h('span', { 'class': 'bit__dot' }),
+      h('span', { 'class': 'bit__k', text: 'Ставка' }),
+      h('span', { 'class': 'bit__v', text: PHASE[String(st.rate_phase)] || 'нет данных' })
     ]));
 
-    var cs = v.cell_stats || {};
-    var stats = el('div', { 'class': 'stats' }, [
-      el('div', null, [
-        el('div', { 'class': 'stat__k', text: 'Средний форвардный месяц' }),
-        el('div', { 'class': 'stat__v num' + tone(cs.mean_fwd1m_pct), text: pct(cs.mean_fwd1m_pct, 2, true) })
-      ]),
-      el('div', null, [
-        el('div', { 'class': 'stat__k', text: 'Доля плюсовых (hit)' }),
-        el('div', { 'class': 'stat__v num', text: isNum(cs.hit) ? num(cs.hit * 100, 0) + '%' : '—' })
-      ]),
-      el('div', null, [
-        el('div', { 'class': 'stat__k', text: 'Наблюдений' }),
-        el('div', { 'class': 'stat__v num', text: isNum(cs.n) ? num(cs.n, 0) : '—' })
+    var mean = (v.cell_stats || {}).mean_fwd1m_pct;
+    var quality = !isNum(mean) ? 'flat' : (mean <= -1.5 ? 'crit' : (mean < 0.3 ? 'warn' : 'good'));
+    var qColor = { crit: 'var(--crit)', warn: 'var(--warn)', good: 'var(--good)', flat: 'var(--ink-3)' }[quality];
+
+    var cellIco = ico(quality);
+    cellIco.setAttribute('class', 'cellname__ico');
+    cellIco.style.color = qColor;
+
+    var left = h('div', { 'class': 'hero__cell' }, [
+      h('div', { 'class': 'kicker', text: 'Состояние рынка' }),
+      h('div', { 'class': 'bits' }, bits),
+      h('div', { 'class': 'cellname' }, [cellIco, h('span', { text: v.cell_label || 'ячейка не определена' })]),
+      h('div', { 'class': 'cellcode', text: (v.cell_code || '').split('|').join(' · ') }),
+      h('div', { 'class': 'stats' }, [
+        stat('Средний форвардный месяц', isNum(mean) ? fmtNum(mean, 2, true) + '%' : '—',
+          'на истории 2004–2026', toneOf(mean)),
+        stat('Доля плюсовых', isNum((v.cell_stats || {}).hit) ? Math.round(v.cell_stats.hit * 100) + '%' : '—'),
+        stat('Наблюдений', isNum((v.cell_stats || {}).n) ? String(v.cell_stats.n) : '—', 'месяцев в ячейке')
       ])
     ]);
 
-    var coreVal = isNum(v.core_value) ? v.core_value : (data.core && data.core.value);
-    var gaugeBox = el('div', { 'class': 'gauge-box' }, [
-      el('div', { 'class': 'gauge-box__head' }, [
-        el('div', null, [
-          el('div', { 'class': 'stat__k', text: 'Композит ядра' }),
-          el('div', { 'class': 'gauge-box__val num' + tone(coreVal), text: num(coreVal, 2, true) })
-        ]),
-        el('div', { 'class': 'gauge-box__lbl', text: v.core_label || (data.core && data.core.label) || '' })
+    var right = h('div', { 'class': 'hero__gauge' }, [
+      h('div', { 'class': 'kicker', text: 'Композит ядра' }),
+      h('div', { 'class': 'gaugeval' }, [
+        h('span', { 'class': 'gaugeval__n ' + toneOf(core.value), text: fmtNum(core.value, 2, true) }),
+        h('span', { 'class': 'gaugeval__l', text: v.core_label || '' })
       ]),
-      gauge(coreVal)
-    ]);
-
-    return section('Вердикт', null, el('div', { 'class': 'verdict' }, [
-      el('div', { 'class': 'chips' }, chips),
-      el('div', { 'class': 'verdict__label', text: v.cell_label || (v.cell_code ? cellWords(v.cell_code) : 'ячейка не определена') }),
-      v.cell_code ? el('div', { 'class': 'verdict__code', text: cellWords(v.cell_code) }) : null,
-      stats,
-      v.rule ? el('div', { 'class': 'rule' }, [
-        el('span', { 'class': 'rule__k', text: 'Правило дня' }),
-        document.createTextNode(v.rule)
-      ]) : el('p', { 'class': 'empty', text: 'Правило дня не рассчитано' }),
-      gaugeBox
-    ]));
-  }
-
-  // ---------------------------------------------------------- секция: ядро
-  function renderCore(data) {
-    var core = data.core || {};
-    var comps = Array.isArray(core.components) ? core.components : [];
-    var cards = [], i;
-
-    for (i = 0; i < comps.length; i++) {
-      var c = comps[i] || {};
-      var badge = tierBadge(c.tier);
-      cards.push(el('article', { 'class': 'card' }, [
-        el('div', { 'class': 'comp__head' }, [
-          el('div', { 'class': 'comp__label', text: c.label || c.id || '—' }),
-          el('div', { 'class': 'badges' }, badge.btn)
-        ]),
-        badge.note,
-        el('div', { 'class': 'comp__z num' + tone(c.z), text: num(c.z, 2, true) }),
-        el('div', { 'class': 'comp__raw', text: c.raw_fmt || (isNum(c.raw) ? smart(c.raw) : '—') }),
-        el('div', { 'class': 'comp__spark' }, sparkline(c.spark)),
-        el('div', { 'class': 'chart-cap', text: 'z-скор за 2 года' }),
-        c.mechanism ? el('p', { 'class': 'comp__mech', text: c.mechanism }) : null,
-        isNum(c.weight) ? el('p', { 'class': 'comp__meta', text: 'вес в композите ' + num(c.weight * 100, 0) + '%' }) : null
-      ]));
-    }
-    if (!cards.length) cards.push(el('p', { 'class': 'empty', text: 'Компоненты ещё не публиковались' }));
-
-    var h = core.health || {};
-    var hTone = h.status === 'ok' ? 'tone--pos' : h.status === 'warn' ? 'tone--warn' : h.status === 'dead' ? 'tone--neg' : 'tone--mut';
-    var health = el('article', { 'class': 'card' }, [
-      el('div', { 'class': 'card__title', text: 'Здоровье модели' }),
-      el('div', { 'class': 'health' }, [
-        el('div', null, [
-          el('div', { 'class': 'stat__k', text: 'Скользящий IC, 24 мес' }),
-          el('div', { 'class': 'stat__v num' + tone(h.ic_24m), text: num(h.ic_24m, 2, true) })
-        ]),
-        el('div', null, [
-          el('div', { 'class': 'stat__k', text: 'Наблюдений' }),
-          el('div', { 'class': 'stat__v num', text: isNum(h.n) ? num(h.n, 0) : '—' })
-        ]),
-        el('div', null, [
-          el('div', { 'class': 'stat__k', text: 'Статус' }),
-          el('div', { 'class': 'stat__v ' + hTone, text: HEALTH_LABEL[h.status] || 'нет данных' })
-        ])
-      ]),
-      el('p', { 'class': 'comp__meta', text: (h.status === 'dead'
-        ? 'IC ушёл ниже нуля: это повод к ревизии состава ядра, а не к подгонке весов.'
-        : (h.status === 'warn'
-          ? 'IC около нуля: модель слабеет, но состав меняют только по итогам реколибровки — не по скользящему IC.'
-          : 'IC положительный. Состав ядра фиксирован: отбор по скользящей результативности проверялся и проиграл.')) })
-    ]);
-
-    var ribbon = el('article', { 'class': 'card' }, [
-      el('div', { 'class': 'card__head' }, [
-        el('div', { 'class': 'card__title', text: 'Композит с 2004 года' }),
-        core.sign_since ? el('span', { 'class': 'badge', text: 'знак с ' + fmtDay(core.sign_since) }) : null
-      ]),
-      coreRibbon(core.series),
-      el('p', { 'class': 'chart-cap', text: 'Заливка — знак композита; точки на нуле — смены знака.' })
-    ]);
-
-    return section('Ядро', 'Слой 1: медленный композит, меняет знак примерно дважды в год', [
-      el('div', { 'class': 'grid grid--3' }, cards),
-      ribbon,
-      health
-    ]);
-  }
-
-  // ----------------------------------------------- секция: машина состояний
-  function renderStates(data) {
-    var st = data.states || {};
-    var curCode = (data.verdict && data.verdict.cell_code) || null;
-    var cells = Array.isArray(st.cells) ? st.cells : [];
-    var legend = [], i;
-
-    for (i = 0; i < cells.length; i++) {
-      var c = cells[i] || {};
-      var sw = el('span', { 'class': 'legend__sw' });
-      // Цвет свотча ставим через CSSOM: в разметке style="" запрещён (CSP).
-      sw.style.background = cellColor(c.code);
-      legend.push(el('div', { 'class': 'legend__row' + (c.code === curCode ? ' is-current' : '') }, [
-        sw,
-        el('span', { text: cellWords(c.code) }),
-        el('span', {
-          'class': 'legend__stat',
-          text: pct(c.mean_fwd1m_pct, 2, true) + ' · hit ' +
-            (isNum(c.hit) ? num(c.hit * 100, 0) + '%' : '—') + ' · n ' + (isNum(c.n) ? num(c.n, 0) : '—')
+      C.polarityScale(core.value),
+      // Под шкалой — траектория за два года: одно значение не отвечает на вопрос
+      // «композит разворачивается или затухает», а место под шкалой всё равно пустует.
+      h('div', { 'class': 'gauge__trail' }, [
+        h('div', { 'class': 'stat__k', text: 'Композит за 24 месяца' }),
+        C.signedHistory((core.series || []).slice(-24), {
+          height: 84, label: 'композит', aria: 'Композит ядра за последние 24 месяца'
         })
-      ]));
-    }
-
-    var dists = Array.isArray(st.distances) ? st.distances : [];
-    var distItems = [];
-    for (i = 0; i < dists.length; i++) {
-      var d = dists[i] || {};
-      distItems.push(el('li', { 'class': 'list__item' }, [
-        el('div', { 'class': 'list__row' }, [
-          el('span', { 'class': 'list__name', text: DIST_LABEL[d.id] || d.id || '—' }),
-          el('span', {
-            'class': 'legend__stat num',
-            text: (isNum(d.value) ? num(d.value, 2, true) : '—') + ' → порог ' + (isNum(d.threshold) ? num(d.threshold, 2, true) : '—')
-          })
-        ]),
-        el('p', { 'class': 'list__text', text: d.text || '' }),
-        isNum(d.gap_pct) ? el('p', { 'class': 'list__why', text: 'до переключения ' + num(Math.abs(d.gap_pct), 2) + ' п.п.' }) : null
-      ]));
-    }
-    if (!distItems.length) distItems.push(el('li', { 'class': 'list__item empty', text: 'Расстояния ещё не рассчитаны' }));
-
-    var sigs = Array.isArray(st.active_signals) ? st.active_signals : [];
-    var sigItems = [];
-    for (i = 0; i < sigs.length; i++) {
-      var s = sigs[i] || {};
-      sigItems.push(el('li', { 'class': 'list__item' }, [
-        el('div', { 'class': 'list__row' }, [
-          el('span', { 'class': 'list__name', text: s.label || s.id || '—' }),
-          // Показываем именно z: вердикт считается по нему (sign x z), а сырое
-          // значение без своей истории вводит в заблуждение — спред −4,35 п.п.
-          // выглядит «против лонга», хотя для этого сигнала это максимум за годы.
-          el('span', { 'class': 'list__text num' + tone(isNum(s.z) ? s.z * (s.sign || 1) : null),
-                       text: isNum(s.z) ? 'z ' + num(s.z, 2, true) : num(s.value, 2, true) })
-        ]),
-        s.verdict ? el('p', { 'class': 'list__text', text: s.verdict
-          + (isNum(s.value) ? ' · сейчас ' + num(s.value, 2, true) : '') }) : null,
-        s.why ? el('p', { 'class': 'list__why', text: s.why }) : null
-      ]));
-    }
-    if (!sigItems.length) {
-      sigItems.push(el('li', { 'class': 'list__item empty', text: 'В текущей ячейке сигналы второго ряда не включены' }));
-    }
-
-    return section('Машина состояний', 'Слой 2: ворота риска. Три бита + фаза ставки', [
-      el('article', { 'class': 'card' }, [
-        el('div', { 'class': 'card__title', text: 'Ячейки с 2004 года' }),
-        statesRibbon(st.series),
-        legend.length ? el('div', { 'class': 'legend' }, legend)
-          : el('p', { 'class': 'empty', text: 'Статистика ячеек ещё не публиковалась' })
       ]),
-      el('article', { 'class': 'card' }, [
-        el('div', { 'class': 'card__title', text: 'Расстояния до переключения' }),
-        el('ul', { 'class': 'list' }, distItems)
-      ]),
-      el('article', { 'class': 'card' }, [
-        el('div', { 'class': 'card__title', text: 'Активные сигналы второго ряда' }),
-        el('ul', { 'class': 'list' }, sigItems)
+      h('div', { 'class': 'gauge__meta' }, [
+        h('span', { text: core.sign_since ? 'знак не менялся с ' + fmtDay(core.sign_since) : 'знак ещё не определялся' })
       ])
     ]);
-  }
 
-  // ------------------------------------------------------ секция: мониторы
-  function renderMonitors(data) {
-    var mons = Array.isArray(data.monitors) ? data.monitors : [];
-    var tiles = [], i;
-    var now = Date.now();
-
-    for (i = 0; i < mons.length; i++) {
-      var m = mons[i] || {};
-      var status = m.status || 'ok';
-      var badge = tierBadge(m.tier);
-      var cls = 'tile' + (m.tier === 'dead' ? ' tile--dead' : '') +
-        (status === 'stale' || status === 'error' ? ' tile--stale' : '');
-      var badges = [badge.btn];
-      if (status !== 'ok') {
-        badges.unshift(el('span', {
-          'class': 'badge badge--' + (status === 'missing' ? 'missing' : status === 'error' ? 'error' : 'stale'),
-          text: STATUS_LABEL[status] || status
-        }));
-      }
-      var mini = m.payload && m.payload.series ? miniChart(m.payload.series) : null;
-      var fetched = parseTs(m.fetched_at);
-      var meta = [];
-      if (m.asof) meta.push(el('span', { text: 'данные: ' + fmtDay(m.asof) }));
-      if (fetched != null) meta.push(el('span', { text: 'опрошено ' + fmtAge(now - fetched) + ' назад' }));
-
-      tiles.push(el('article', { 'class': cls }, [
-        el('div', { 'class': 'tile__head' }, [
-          el('div', { 'class': 'tile__title', text: m.title || m.id || '—' }),
-          el('div', { 'class': 'badges' }, badges)
-        ]),
-        el('div', { 'class': 'tile__headline', text: m.headline || 'ещё не публиковалось' }),
-        mini ? el('div', { 'class': 'tile__chart' }, [
-          mini.svg,
-          el('div', { 'class': 'tile__range', text: 'мин ' + smart(mini.lo) + ' · макс ' + smart(mini.hi) })
-        ]) : null,
-        m.note ? el('p', { 'class': 'tile__note', text: m.note }) : null,
-        badge.note,
-        meta.length ? el('div', { 'class': 'tile__meta' }, meta) : null
-      ]));
-    }
-    if (!tiles.length) tiles.push(el('p', { 'class': 'empty', text: 'Мониторы ещё не публиковались' }));
-
-    // Полоса источников: тайл может быть свежим, а его источник — протухшим (кэш).
-    var srcWrap = null, src = data.sources;
-    if (src && typeof src === 'object') {
-      var chips = [], keys = Object.keys(src);
-      for (i = 0; i < keys.length; i++) {
-        var s = src[keys[i]] || {};
-        var dot = el('span', { 'class': 'src__dot' });
-        dot.style.background = s.status === 'ok' ? PAL.pos : s.status === 'stale' ? PAL.warn
-          : s.status === 'error' ? PAL.neg : PAL.slate;
-        // Статус пишем словом, а не только цветом точки: на солнце и в ч/б цвет не читается.
-        chips.push(el('span', { 'class': 'src', title: STATUS_LABEL[s.status] || s.status || '' }, [
-          dot,
-          el('span', { text: keys[i] }),
-          el('span', { 'class': 'tile__range', text: s.asof ? fmtDay(s.asof) : '—' }),
-          s.status && s.status !== 'ok'
-            ? el('span', { 'class': 'tone--warn', text: STATUS_LABEL[s.status] || s.status })
-            : null
-        ]));
-      }
-      if (chips.length) {
-        srcWrap = el('article', { 'class': 'card' }, [
-          el('div', { 'class': 'card__title', text: 'Источники' }),
-          el('div', { 'class': 'sources' }, chips)
-        ]);
-      }
-    }
-
-    return section('Мониторы', 'Слой 3: наблюдение без предиктивных претензий', [
-      el('div', { 'class': 'grid grid--mon' }, tiles),
-      srcWrap
+    var ruleIco = ico('info', 'rule__ico');
+    return h('div', { 'class': 'hero' }, [
+      h('div', { 'class': 'hero__grid' }, [left, right]),
+      v.rule ? h('div', { 'class': 'rule' }, [
+        ruleIco,
+        h('div', null, [
+          h('div', { 'class': 'rule__k', text: 'Правило дня' }),
+          h('p', { 'class': 'rule__t', text: v.rule })
+        ])
+      ]) : null
     ]);
   }
 
-  // -------------------------------------------------------- секция: журнал
-  function renderEvents(data) {
-    var evs = Array.isArray(data.events) ? data.events.slice() : [];
-    // Журнал читается сверху вниз от свежего: порядок в файле не гарантирован контрактом.
-    evs.sort(function (a, b) { return (parseTs(b && b.ts) || 0) - (parseTs(a && a.ts) || 0); });
-    if (!evs.length) {
-      return section('Журнал событий', null, el('article', { 'class': 'card' },
-        el('p', { 'class': 'empty', text: 'Событий ещё не было' })));
-    }
-    var list = el('ul', { 'class': 'list' }), hidden = [], i;
-    for (i = 0; i < evs.length; i++) {
-      var e = evs[i] || {};
-      var ts = parseTs(e.ts);
-      var item = el('li', { 'class': 'event' + (e.severity === 'warn' ? ' event--warn' : '') }, [
-        el('span', { 'class': 'event__ts', text: ts != null ? fmtMskShort(ts) : '—' }),
-        el('span', null, [
-          el('span', { 'class': 'event__text', text: e.text || '' }),
-          e.kind ? el('div', { 'class': 'event__kind', text: EVENT_KIND[e.kind] || e.kind }) : null
+  /* ────────────────────────────────────────────────────────── ядро */
+
+  function renderCore(d) {
+    var core = d.core || {};
+    var comps = core.components || [];
+    var slots = ['var(--s1)', 'var(--s2)', 'var(--s3)'];
+
+    var cards = comps.map(function (c, i) {
+      var color = slots[i % slots.length];
+      var mark = h('span', { 'class': 'comp__mark' });
+      mark.style.background = color;
+      return h('article', { 'class': 'card comp' }, [
+        h('div', { 'class': 'comp__top' }, [
+          mark,
+          h('div', null, [
+            h('div', { 'class': 'comp__label', text: c.label || c.id }),
+            h('div', { 'class': 'comp__z' }, [
+              // Крупно — ВКЛАД в композит (знак × z), а не сырой z: у ноги с
+              // отрицательным знаком положительный z толкает композит ВНИЗ, и
+              // «+0,41» рядом с синим цветом читалось как противоречие.
+              h('span', {
+                'class': 'comp__zn ' + toneOf(isNum(c.z) ? c.z * (c.sign || 1) : null),
+                text: fmtNum(isNum(c.z) ? c.z * (c.sign || 1) : null, 2, true),
+                title: 'Вклад в композит: знак компонента × z-скор'
+              }),
+              h('span', { 'class': 'comp__raw', text: (isNum(c.z) ? 'z ' + fmtNum(c.z, 2, true) + ' · ' : '') + (c.raw_fmt || '') })
+            ])
+          ])
+        ]),
+        C.spark(c.spark, tok(i === 0 ? '--s1' : (i === 1 ? '--s2' : '--s3')),
+          { aria: 'z-скор «' + (c.label || c.id) + '» за два года' }),
+        h('p', { 'class': 'comp__mech', text: c.mechanism || '' }),
+        h('div', { 'class': 'comp__foot' }, [
+          tier(c.tier),
+          h('span', { text: 'вес ' + (isNum(c.weight) ? Math.round(c.weight * 100) + '%' : '—') }),
+          c.protected === false ? h('span', { title: 'Нога не переживает поправку на множественность — держим с оговоркой', text: '· не защищена' }) : null
         ])
       ]);
-      if (i >= EVENTS_VISIBLE) { item.hidden = true; hidden.push(item); }
-      list.appendChild(item);
-    }
-    var card = el('article', { 'class': 'card' }, list);
-    if (hidden.length) {
-      var btn = el('button', { 'class': 'btn', type: 'button', text: 'Показать ещё ' + hidden.length });
-      btn.addEventListener('click', function () {
-        for (var j = 0; j < hidden.length; j++) hidden[j].hidden = false;
-        btn.remove();
-      });
-      card.appendChild(btn);
-    }
-    return section('Журнал событий', null, card);
-  }
-
-  // --------------------------------------------------------------- рендер
-  var root = document.getElementById('main');
-  var ageEl = document.getElementById('age');
-  var bannerEl = document.getElementById('banner');
-  var footEl = document.getElementById('foot-line');
-  var refreshBtn = document.getElementById('btn-refresh');
-
-  var lastRaw = null;     // сырой текст ответа — по нему решаем, менялось ли что-то
-  var lastData = null;
-  var lastProblem = null; // {kind, ...} последней неудачной попытки
-  var lastTryAt = 0;
-  var busy = false;
-  var renderedW = 0;      // ширина, под которую построены графики
-
-  function renderAll(data) {
-    renderedW = fullChartW();
-    var frag = document.createDocumentFragment();
-    append(frag, [
-      renderVerdict(data),
-      renderCore(data),
-      renderStates(data),
-      renderMonitors(data),
-      renderEvents(data)
-    ]);
-    root.textContent = '';
-    root.appendChild(frag);
-    root.setAttribute('aria-busy', 'false');
-
-    var bits = [];
-    if (isNum(data.schema)) bits.push('схема ' + data.schema);
-    if (data.run_mode) bits.push('режим прогона: ' + data.run_mode);
-    if (data.asof_trading_day) bits.push('торговый день ' + fmtDayShort(data.asof_trading_day));
-    footEl.textContent = bits.join(' · ');
-  }
-
-  function showBlocking(title, text, detail) {
-    root.textContent = '';
-    root.appendChild(el('article', { 'class': 'card' }, [
-      el('div', { 'class': 'card__title', text: title }),
-      el('p', { 'class': 'empty', text: text }),
-      // Текст сервера показываем отдельной строкой и только как цитату: он приходит
-      // снаружи и своим заголовком экрана быть не должен.
-      detail ? el('p', { 'class': 'comp__meta', text: 'ответ сервера: ' + detail }) : null
-    ]));
-    root.setAttribute('aria-busy', 'false');
-    footEl.textContent = '';
-  }
-
-  function setBanner(kind, title, text) {
-    if (!kind) { bannerEl.hidden = true; bannerEl.textContent = ''; return; }
-    bannerEl.className = 'banner banner--' + kind + ' banner--big';
-    bannerEl.textContent = '';
-    bannerEl.appendChild(el('strong', { 'class': 'banner__title', text: title }));
-    bannerEl.appendChild(document.createTextNode(text));
-    bannerEl.hidden = false;
-  }
-
-  // Возраст данных и плашки — единственное, что обновляется без перерисовки дерева.
-  function updateFreshness() {
-    var now = Date.now();
-    if (!lastData) {
-      ageEl.textContent = lastProblem ? problemText(lastProblem) : 'Загрузка…';
-      ageEl.classList.remove('is-stale');
-      return;
-    }
-    var gen = parseTs(lastData.generated_at);
-    var limit = isNum(lastData.stale_after_minutes) ? lastData.stale_after_minutes : null;
-    var ageMs = gen != null ? now - gen : null;
-    var parts = [];
-    parts.push(gen != null ? 'данные от ' + fmtMsk(gen) + ' МСК' : 'время публикации неизвестно');
-    if (ageMs != null) parts.push(fmtAge(ageMs) + ' назад');
-    ageEl.textContent = parts.join(' · ');
-
-    var stale = ageMs != null && limit != null && ageMs > limit * 60000;
-    ageEl.classList.toggle('is-stale', stale);
-
-    if (lastProblem) {
-      setBanner(lastProblem.kind === 'notready' ? 'warn' : 'err',
-        'Обновление не удалось. ', problemText(lastProblem) + ' Показаны последние полученные данные.');
-    } else if (stale) {
-      setBanner('warn', 'Данные устарели: ' + fmtAge(ageMs) + '. ',
-        'Сборщик молчит дольше нормы (' + num(limit, 0) + ' мин). Последняя публикация — ' +
-        fmtMsk(gen) + ' МСК; цифры ниже относятся к ней, а не к текущему рынку.');
-    } else {
-      setBanner(null);
-    }
-  }
-
-  function problemText(p) {
-    if (!p) return '';
-    if (p.kind === 'notready') return p.message || 'Сборщик ещё не публиковал данные.';
-    if (p.kind === 'http') return 'Ответ сервера ' + p.status + '.';
-    if (p.kind === 'badjson') return 'Ответ не разобрался как JSON.';
-    return 'Сеть недоступна' + (p.message ? ' (' + p.message + ')' : '') + '.';
-  }
-
-  function fetchData() {
-    // Метка времени в запросе: Pages/браузер иначе отдают кэш, а нам нужна свежесть.
-    return fetch(DATA_URL + '?ts=' + Date.now(), {
-      cache: 'no-store', headers: { 'Accept': 'application/json' }
-    }).then(function (res) {
-      if (res.status === 503) {
-        // Фолбэк-текст функции читаем, но показываем как текст — доверять ему нельзя.
-        return res.text().then(function (t) {
-          var msg = null;
-          try { var j = JSON.parse(t); msg = j && (j.message || j.error); } catch (e) { msg = null; }
-          return { kind: 'notready', message: typeof msg === 'string' ? msg : null };
-        }, function () { return { kind: 'notready' }; });
-      }
-      if (!res.ok) return { kind: 'http', status: res.status };
-      return res.text().then(function (text) {
-        var json;
-        try { json = JSON.parse(text); } catch (e) { return { kind: 'badjson' }; }
-        if (!json || typeof json !== 'object') return { kind: 'badjson' };
-        return { kind: 'ok', text: text, data: json };
-      });
-    }, function (err) {
-      return { kind: 'neterr', message: err && err.message ? err.message : null };
     });
+
+    var hist = h('article', { 'class': 'card' }, [
+      h('div', { 'class': 'card__head' }, [
+        h('h3', { 'class': 'card__title', text: 'Композит с 2004 года' }),
+        h('span', { 'class': 'card__note', text: 'заливка — знак; точки на нуле — смены знака' })
+      ]),
+      C.signedHistory(core.series, { height: 200, label: 'композит', aria: 'Композит ядра' })
+    ]);
+
+    var hl = core.health || {};
+    var hlStatus = { ok: 'работает', warn: 'слабеет', dead: 'сломана' }[hl.status] || 'нет данных';
+    var hlIco = ico(hl.status === 'ok' ? 'good' : (hl.status === 'warn' ? 'warn' : (hl.status === 'dead' ? 'crit' : 'flat')));
+    hlIco.setAttribute('class', 'sig__ico');
+    hlIco.style.color = hl.status === 'ok' ? 'var(--good)' : (hl.status === 'warn' ? 'var(--warn)' : (hl.status === 'dead' ? 'var(--crit)' : 'var(--ink-3)'));
+
+    var health = h('article', { 'class': 'card' }, [
+      h('div', { 'class': 'card__head' }, [
+        h('h3', { 'class': 'card__title', text: 'Здоровье модели' }),
+        h('span', { 'class': 'card__note', text: 'скользящий ранговый IC за 24 месяца' })
+      ]),
+      h('div', { 'class': 'health' }, [
+        stat('IC 24 мес', fmtNum(hl.ic_24m, 2, true), null, toneOf(hl.ic_24m)),
+        stat('Наблюдений', isNum(hl.n) ? String(hl.n) : '—'),
+        h('div', null, [
+          h('div', { 'class': 'stat__k', text: 'Статус' }),
+          h('div', { 'class': 'sig__verdict', style: 'margin-top:2px' }, [hlIco, h('span', { text: hlStatus })])
+        ])
+      ]),
+      hl.series ? C.miniSeries(hl.series, {
+        height: 44, zero: true, digits: 2, label: 'IC',
+        color: tok('--ink-3'), aria: 'Скользящий IC модели по месяцам'
+      }) : null,
+      h('p', { 'class': 'card__foot', text: hl.status === 'dead'
+        ? 'IC ушёл ниже нуля: это повод к ревизии состава ядра, а не к подгонке весов.'
+        : (hl.status === 'warn'
+          ? 'IC около нуля: модель слабеет. Состав меняют только по итогам реколибровки — не по скользящему IC.'
+          : 'Состав ядра фиксирован: отбор по скользящей результативности проверялся на истории и проиграл.') })
+    ]);
+
+    return section('Ядро', 'Слой 1 · медленный композит, меняет знак примерно дважды в год', [
+      h('div', { 'class': 'comps', style: 'margin-bottom:16px' }, cards),
+      h('div', { 'class': 'grid', style: 'grid-template-columns:1fr' }, [hist, health])
+    ]);
+  }
+
+  /* ────────────────────────────────────────────── машина состояний */
+
+  function renderStates(d) {
+    var st = d.states || {};
+    var cells = st.cells || [];
+
+    var legendSteps = [
+      { c: 'var(--neg)', t: 'ниже −1,5%/мес' },
+      { c: 'color-mix(in srgb, var(--neg) 45%, var(--mid))', t: 'от −1,5% до 0' },
+      { c: 'var(--mid)', t: 'около нуля' },
+      { c: 'color-mix(in srgb, var(--pos) 45%, var(--mid))', t: 'от +0,8% до +1,8%' },
+      { c: 'var(--pos)', t: 'выше +1,8%/мес' }
+    ];
+    var legend = h('div', { 'class': 'legend' }, legendSteps.map(function (s) {
+      var sw = h('span', { 'class': 'legend__sw' });
+      sw.style.background = s.c;
+      return h('span', { 'class': 'legend__i' }, [sw, h('span', { text: s.t })]);
+    }));
+
+    var ribbon = h('article', { 'class': 'card' }, [
+      h('div', { 'class': 'card__head' }, [
+        h('h3', { 'class': 'card__title', text: 'Лента ячеек с 2004 года' }),
+        h('span', { 'class': 'card__note', text: 'цвет — средняя форвардная доходность ячейки; ▾ — сейчас' })
+      ]),
+      C.stateRibbon(st.series, cells),
+      legend
+    ]);
+
+    var dists = (st.distances || []).map(function (x) {
+      return h('div', { 'class': 'dist' }, [
+        h('div', { 'class': 'dist__row' }, [
+          h('span', { 'class': 'dist__k', text: x.label || x.id }),
+          h('span', { 'class': 'dist__v', text: fmtNum(x.value, 1, true) + ' → ' + fmtNum(x.threshold, 1, true) })
+        ]),
+        C.thresholdBar(x.value, x.threshold, { invert: x.id === 'bond' }),
+        h('p', { 'class': 'dist__t', text: x.text || '' })
+      ]);
+    });
+
+    var sigs = (st.active_signals || []).map(function (s) {
+      var pos = /за лонг/.test(s.verdict || '');
+      var neg = /против/.test(s.verdict || '');
+      var vIco = ico(pos ? 'up' : (neg ? 'down' : 'flat'), 'sig__ico');
+      vIco.style.color = pos ? 'var(--pos)' : (neg ? 'var(--neg)' : 'var(--ink-3)');
+      return h('div', { 'class': 'sig' }, [
+        h('div', { 'class': 'sig__row' }, [
+          h('span', { 'class': 'sig__k', text: s.label || s.id }),
+          h('span', {
+            'class': 'sig__z ' + toneOf(isNum(s.z) ? s.z * (s.sign || 1) : null),
+            title: 'Вклад в вердикт: знак сигнала × z-скор',
+            text: isNum(s.z) ? fmtNum(s.z * (s.sign || 1), 2, true) : '—' })
+        ]),
+        h('div', { 'class': 'sig__verdict' }, [
+          vIco, h('span', { text: s.verdict || 'нет данных' }),
+          isNum(s.value) ? h('span', { 'class': 'tone-mut',
+            text: '· z ' + fmtNum(s.z, 2, true) + ', сейчас ' + fmtNum(s.value, 2, true) }) : null
+        ]),
+        h('p', { 'class': 'sig__why', text: s.why || '' })
+      ]);
+    });
+
+    return section('Машина состояний', 'Слой 2 · ворота риска: какие сигналы включены в текущей ячейке', [
+      ribbon,
+      h('div', { 'class': 'two', style: 'margin-top:16px' }, [
+        h('article', { 'class': 'card' }, [
+          h('div', { 'class': 'card__head' }, [h('h3', { 'class': 'card__title', text: 'Расстояние до переключения' })]),
+          dists.length ? h('div', null, dists) : h('p', { 'class': 'empty', text: 'Расстояния ещё не рассчитаны' })
+        ]),
+        h('article', { 'class': 'card' }, [
+          h('div', { 'class': 'card__head' }, [
+            h('h3', { 'class': 'card__title', text: 'Активные сигналы второго ряда' }),
+            h('span', { 'class': 'card__note', text: 'вердикт считается по z-скору' })
+          ]),
+          sigs.length ? h('div', null, sigs)
+            : h('p', { 'class': 'empty', text: 'В текущей ячейке сигналы второго ряда не включены' })
+        ])
+      ])
+    ]);
+  }
+
+  /* ───────────────────────────────────────────────────── мониторы */
+
+  function tileBody(m) {
+    var p = m.payload || {};
+    var out = [];
+    function num(v, digits, unit, sign) {
+      return h('div', { 'class': 'tile__num ' + (sign ? toneOf(v) : ''), text: fmtNum(v, digits, sign) + (unit || '') });
+    }
+    switch (m.id) {
+      case 'orfr':
+        if (p.stack && p.months) {
+          var fiz = (p.stack.fiz || []);
+          out.push(C.flowBars(p.months, fiz, { label: 'физлица, нетто', unit: ' млрд', aria: 'Нетто-покупки акций физлицами' }));
+          out.push(h('div', { 'class': 'tile__sub', text: 'Столбики — физлица; управляющие и банки в подсказке ленты.' }));
+        }
+        break;
+      case 'lqdt':
+        out.push(num(p.aum, 0, ' млрд ₽'));
+        out.push(h('div', { 'class': 'tile__sub', text: p.rotation_started ? 'Ротация началась' : 'Большой ротации ещё не случалось' }));
+        break;
+      case 'deposit_spread':
+        out.push(num(p.spread_pp, 1, ' п.п.', true));
+        out.push(h('div', { 'class': 'tile__sub', text: 'Вклады ' + fmtNum(p.deposit_pct, 2, false) + '% против дивидендов ' + fmtNum(p.dy_trail_pct, 1, false) + '%' }));
+        if (p.series) out.push(C.miniSeries(p.series, { digits: 1, zero: true, label: 'спред', unit: ' п.п.', color: tok('--s1') }));
+        break;
+      case 'cb_meeting':
+        out.push(num(p.days_left, 0, ' дн.'));
+        out.push(h('div', { 'class': 'tile__sub', text: 'до заседания ' + fmtDay(p.next_meeting) + '; ключевая ' + fmtNum(p.key_rate, 2, false) + '%' +
+          (isNum(p.consensus) ? ', консенсус ' + fmtNum(p.consensus, 2, false) + '%' : ', консенсус не внесён') }));
+        break;
+      case 'polymarket':
+        out.push(num(p.prob_pct, 0, '%'));
+        out.push(h('div', { 'class': 'tile__sub', text: (isNum(p.chg_7d_pp) ? fmtNum(p.chg_7d_pp, 1, true) + ' п.п. за неделю. ' : '') + (p.question || '') }));
+        if (p.series) out.push(C.miniSeries(p.series, { digits: 0, unit: '%', label: 'вероятность', color: tok('--s2') }));
+        break;
+      case 'futoi':
+        out.push(num(p.z120, 2, '', true));
+        out.push(h('div', { 'class': 'tile__sub', text: 'z нетто-позиции физлиц за 120 дней; лонгов ' +
+          fmtNum(p.holders_long, 0, false) + ', шортов ' + fmtNum(p.holders_short, 0, false) }));
+        if (p.series) out.push(C.miniSeries(p.series, { digits: 2, zero: true, label: 'нетто/брутто', color: tok('--s3') }));
+        break;
+      case 'rub_barrel':
+        out.push(num(p.tax_barrel_rub, 0, ' ₽'));
+        out.push(h('div', { 'class': 'tile__sub', text: 'налоговая бочка против бюджетных ' +
+          fmtNum(p.budget_barrel_rub, 0, false) + ' ₽ — ' + fmtNum(p.gap_pct, 0, true) + '%' }));
+        break;
+      case 'breadth':
+        out.push(num(p.pct_above_ma200, 0, '%'));
+        out.push(h('div', { 'class': 'tile__sub', text: 'бумаг выше 200-дневной' +
+          (isNum(p.chg_21d_pp) ? '; ' + fmtNum(p.chg_21d_pp, 0, true) + ' п.п. за месяц' : '') }));
+        if (p.series) out.push(C.miniSeries(p.series, { digits: 0, unit: '%', label: 'ширина', color: tok('--s1') }));
+        break;
+      case 'hy_spread':
+        out.push(num(p.spread_pp, 1, ' п.п.'));
+        out.push(h('div', { 'class': 'tile__sub', text: 'ВДО ' + fmtNum(p.hy_yield, 1, false) + '% к ' + (p.base_label || 'ОФЗ') }));
+        if (p.series) out.push(C.miniSeries(p.series, { digits: 1, label: 'спред', unit: ' п.п.', color: tok('--s2') }));
+        break;
+      case 'rvi':
+        out.push(num(p.rvi, 1, ''));
+        out.push(h('div', { 'class': 'tile__sub', text: isNum(p.pct_3y) ? Math.round(p.pct_3y * 100) + '-й перцентиль за три года' : '' }));
+        if (p.series) out.push(C.miniSeries(p.series, { digits: 1, label: 'RVI', color: tok('--ink-3') }));
+        break;
+      case 'mcxsm':
+        out.push(num(p.rs_63d_pct, 1, '%', true));
+        out.push(h('div', { 'class': 'tile__sub', text: 'малые каппы против индекса за 63 дня' }));
+        if (p.series) out.push(C.miniSeries(p.series, { digits: 2, label: 'отношение', color: tok('--s3') }));
+        break;
+      case 'cpi_weekly':
+        out.push(num(p.last_pct, 2, '%', true));
+        out.push(h('div', { 'class': 'tile__sub', text: 'недельный принт; SAAR по 4 неделям ' + fmtNum(p.saar_4w_pct, 1, false) + '%' }));
+        break;
+      case 'ofz_auctions':
+        out.push(num(p.placed_bn, 1, ' млрд ₽'));
+        out.push(h('div', { 'class': 'tile__sub', text: p.failed ? 'аукцион ' + fmtDay(p.date) + ' не состоялся'
+          : 'спрос ' + fmtNum(p.demand_bn, 1, false) + ' млрд, bid-to-cover ' + fmtNum(p.bid_to_cover, 2, false) }));
+        break;
+      case 'sep_node':
+        out.push(h('div', { 'class': 'tile__headline', text: m.headline || '' }));
+        break;
+      default:
+        out.push(h('div', { 'class': 'tile__headline', text: m.headline || 'нет данных' }));
+    }
+    if (!out.length) out.push(h('div', { 'class': 'tile__headline', text: m.headline || 'нет данных' }));
+    return out;
+  }
+
+  function renderMonitors(d) {
+    var tiles = (d.monitors || []).map(function (m) {
+      var body = tileBody(m);
+      return h('article', { 'class': 'card tile' + (m.tier === 'dead' ? ' tile--dead' : '') }, [
+        h('div', { 'class': 'tile__head' }, [
+          h('h3', { 'class': 'tile__title', text: m.title || m.id }),
+          h('span', { 'class': 'tile__head-r' }, [tier(m.tier), statusDot(m.status)])
+        ])
+      ].concat(body, [
+        trimNote(m.note) ? h('p', { 'class': 'tile__sub', text: trimNote(m.note) }) : null,
+        h('div', { 'class': 'tile__foot' }, [
+          h('span', { text: m.asof ? 'данные: ' + (String(m.asof).length > 7 ? fmtDay(m.asof) : fmtMon(m.asof + '-01')) : 'данных нет' })
+        ])
+      ]));
+    });
+    return section('Мониторы', 'Слой 3 · наблюдение без предиктивных претензий', [
+      tiles.length ? h('div', { 'class': 'tiles' }, tiles) : h('p', { 'class': 'empty', text: 'Тайлы ещё не собраны' })
+    ]);
+  }
+
+  /* ──────────────────────────────────────────────────────── журнал */
+
+  function renderEvents(d) {
+    var evs = d.events || [];
+    if (!evs.length) return null;
+    return section('Журнал', 'события конвейера и переходы состояний', [
+      h('article', { 'class': 'card' }, evs.slice(0, 40).map(function (e) {
+        return h('div', { 'class': 'evt' }, [
+          h('span', { 'class': 'evt__ts', text: (e.ts || '').slice(5, 16).replace('T', ' ') }),
+          h('span', { 'class': 'evt__t', text: e.text || '' })
+        ]);
+      }))
+    ]);
+  }
+
+  /* ───────────────────────────────────────────── таблица (доступность) */
+
+  function renderTable(d) {
+    var core = d.core || {}, st = d.states || {};
+    var rows = [];
+    var series = core.series || [];
+    var stMap = {};
+    (st.series || []).forEach(function (r) { stMap[r[0]] = r[1]; });
+    for (var i = Math.max(0, series.length - 36); i < series.length; i++) {
+      rows.push([series[i][0], series[i][1], stMap[series[i][0]] || '—']);
+    }
+    rows.reverse();
+    var table = h('table', { 'class': 'data' }, [
+      h('caption', { text: 'Композит ядра и ячейка состояния помесячно, последние 36 месяцев. Полная история — в history/daily.json.' }),
+      h('thead', null, [h('tr', null, [
+        h('th', { scope: 'col', text: 'Месяц' }),
+        h('th', { scope: 'col', text: 'Композит' }),
+        h('th', { scope: 'col', text: 'Ячейка' })
+      ])]),
+      h('tbody', null, rows.map(function (r) {
+        return h('tr', null, [
+          h('th', { scope: 'row', text: fmtMon(r[0]) }),
+          h('td', { text: fmtNum(+r[1], 2, true) }),
+          h('td', { text: String(r[2]).split('|').join(' · ') })
+        ]);
+      }))
+    ]);
+    var comps = (core.components || []).map(function (c) {
+      return h('tr', null, [
+        h('th', { scope: 'row', text: c.label || c.id }),
+        h('td', { text: fmtNum(isNum(c.z) ? c.z * (c.sign || 1) : null, 2, true) }),
+        h('td', { text: (isNum(c.z) ? 'z ' + fmtNum(c.z, 2, true) + ' · ' : '') + (c.raw_fmt || '—') }),
+        h('td', { text: c.tier || '—' })
+      ]);
+    });
+    var compTable = h('table', { 'class': 'data' }, [
+      h('caption', { text: 'Компоненты ядра на текущую дату.' }),
+      h('thead', null, [h('tr', null, [
+        h('th', { scope: 'col', text: 'Компонент' }), h('th', { scope: 'col', text: 'Вклад' }),
+        h('th', { scope: 'col', text: 'Значение' }), h('th', { scope: 'col', text: 'Тир' })
+      ])]),
+      h('tbody', null, comps)
+    ]);
+    return section('Таблица', 'те же ряды числами — для чтения без цвета и для проверки', [
+      h('article', { 'class': 'card' }, [
+        h('div', { 'class': 'tablewrap' }, [compTable]),
+        h('div', { 'class': 'tablewrap', style: 'margin-top:20px' }, [table])
+      ])
+    ]);
+  }
+
+  /* ────────────────────────────────────────────────────── страница */
+
+  function ageMinutes(iso) {
+    if (!iso) return null;
+    var t = Date.parse(iso);
+    if (!isFinite(t)) return null;
+    return (Date.now() - t) / 60000;
+  }
+
+  function renderBanners(d) {
+    var box = document.getElementById('banners');
+    box.innerHTML = '';
+    var age = ageMinutes(d.generated_at);
+    var limit = isNum(d.stale_after_minutes) ? d.stale_after_minutes : 150;
+    if (isNum(age) && age > limit) {
+      var hrs = Math.floor(age / 60), mins = Math.round(age % 60);
+      box.appendChild(h('div', { 'class': 'banner banner--warn' }, [
+        ico('warn', 'banner__ico'),
+        h('div', null, [
+          h('b', { text: 'Данные устарели. ' }),
+          h('span', { text: 'Публикация была ' + (hrs ? hrs + ' ч ' : '') + mins + ' мин назад при норме ' +
+            Math.round(limit / 60) + ' ч. Числа на экране — последние успешные, а не сегодняшние.' })
+        ])
+      ]));
+    }
+    var bad = [];
+    Object.keys(d.sources || {}).forEach(function (k) {
+      var s = d.sources[k];
+      if (s && (s.status === 'error' || s.status === 'stale')) bad.push(k);
+    });
+    if (bad.length) {
+      box.appendChild(h('div', { 'class': 'banner' }, [
+        ico('info', 'banner__ico'),
+        h('div', null, [
+          h('b', { text: 'Часть источников молчит: ' }),
+          h('span', { text: bad.join(', ') + '. Затронутые тайлы помечены жёлтой точкой; ядро и состояния считаются по последним доступным данным.' })
+        ])
+      ]));
+    }
+  }
+
+  function render(d) {
+    window.__lastPayload = d;
+    C.resetResize();
+    var app = document.getElementById('app');
+    var scroll = window.scrollY;
+    app.innerHTML = '';
+    renderBanners(d);
+    app.appendChild(renderHero(d));
+    app.appendChild(renderCore(d));
+    app.appendChild(renderStates(d));
+    app.appendChild(renderMonitors(d));
+    var ev = renderEvents(d);
+    if (ev) app.appendChild(ev);
+    if (document.getElementById('table-toggle').getAttribute('aria-pressed') === 'true') {
+      app.appendChild(renderTable(d));
+    }
+    // Всё дерево уже в документе — только теперь у контейнеров графиков есть
+    // ширина, и их можно рисовать. Второй вызов в следующем кадре добирает те,
+    // чей размер на момент первого ещё считался (шрифты, полоса прокрутки).
+    C.flush();
+    requestAnimationFrame(function () { C.flush(); });
+
+    var asof = document.getElementById('asof');
+    asof.textContent = 'по ' + fmtDay(d.asof_trading_day) + (d.run_mode === 'intraday' ? ' · внутри дня' : '');
+    var age = ageMinutes(d.generated_at);
+    var ageEl = document.getElementById('age');
+    var limit = isNum(d.stale_after_minutes) ? d.stale_after_minutes : 150;
+    if (isNum(age)) {
+      // На узком экране префикс «обновлено» съедает место, которого не хватает
+      // кнопкам: смысл несёт число, а не слово.
+      var terse = window.innerWidth < 620;
+      var body = age < 1 ? 'только что'
+        : (age < 60 ? Math.round(age) + ' мин назад' : Math.floor(age / 60) + ' ч назад');
+      ageEl.textContent = terse ? body : 'обновлено ' + body;
+      ageEl.title = 'Публикация витрины: ' + (d.generated_at || '—');
+      ageEl.className = 'age' + (age > limit ? ' age--stale' : '');
+    }
+    var meta = document.getElementById('foot-meta');
+    meta.textContent = 'Данные конвейера от ' + (d.generated_at || '—') +
+      ' · режим ' + (d.run_mode || '—') + ' · схема ' + (d.schema || '—') +
+      '. Методика и проверка гипотез — validation/VALIDATION.md и validation/REGIME.md в репозитории.';
+    window.scrollTo(0, scroll);
+  }
+
+  function showFatal(title, text) {
+    document.getElementById('app').innerHTML = '';
+    document.getElementById('banners').innerHTML = '';
+    document.getElementById('app').appendChild(h('div', { 'class': 'banner banner--err' }, [
+      ico('crit', 'banner__ico'),
+      h('div', null, [h('b', { text: title + ' ' }), h('span', { text: text })])
+    ]));
   }
 
   function load() {
-    if (busy) return;
-    busy = true;
-    refreshBtn.disabled = true;
-    lastTryAt = Date.now();
-    fetchData().then(function (res) {
-      if (res.kind === 'ok') {
-        lastProblem = null;
-        if (res.text !== lastRaw) {
-          lastRaw = res.text;
-          lastData = res.data;
-          // Скролл восстанавливаем сами: дерево заменяется целиком, а пользователь
-          // может читать журнал в момент автообновления.
-          var y = window.scrollY || window.pageYOffset || 0;
-          renderAll(res.data);
-          window.scrollTo(0, y);
+    fetch(DATA_URL + '?ts=' + Date.now(), { cache: 'no-store' })
+      .then(function (r) {
+        if (r.status === 503) {
+          return r.json().catch(function () { return {}; }).then(function (j) {
+            throw new Error('NOTPUB:' + (j.hint || 'конвейер ещё не публиковал витрину'));
+          });
         }
-      } else {
-        lastProblem = res;
-        if (!lastData) {
-          if (res.kind === 'notready') {
-            showBlocking('Сборщик ещё не публиковал',
-              'Панель появится после первого успешного прогона пайплайна.', res.message);
-          } else {
-            showBlocking('Данные недоступны', problemText(res));
-          }
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(render)
+      .catch(function (e) {
+        var msg = String(e && e.message || e);
+        if (msg.indexOf('NOTPUB:') === 0) {
+          showFatal('Витрина ещё не публиковалась.', msg.slice(7));
+        } else if (window.__lastPayload) {
+          // Держим предыдущий рендер: мигать скелетом на каждом сбое сети хуже,
+          // чем показать прежние числа с честной отметкой возраста.
+          var el = document.getElementById('age');
+          if (el) { el.textContent = 'связь потеряна'; el.className = 'age age--stale'; }
+        } else {
+          showFatal('Не удалось загрузить данные.', msg + '. Панель повторит попытку автоматически.');
         }
-      }
-      updateFreshness();
-    })['catch'](function (err) {
-      lastProblem = { kind: 'neterr', message: err && err.message ? err.message : null };
-      updateFreshness();
-    }).then(function () {
-      busy = false;
-      refreshBtn.disabled = false;
-    });
+      });
   }
 
-  refreshBtn.addEventListener('click', load);
+  function init() {
+    initTheme();
+    var tt = document.getElementById('table-toggle');
+    tt.addEventListener('click', function () {
+      var on = tt.getAttribute('aria-pressed') === 'true';
+      tt.setAttribute('aria-pressed', on ? 'false' : 'true');
+      if (window.__lastPayload) render(window.__lastPayload);
+    });
+    load();
+    setInterval(load, REFRESH_MS);
+  }
 
-  // Поворот экрана меняет ширину — графики надо пересобрать. Порог 40 px: на телефоне
-  // resize срабатывает ещё и на скрытие адресной строки (меняется только высота).
-  var resizeTimer = null;
-  window.addEventListener('resize', function () {
-    if (resizeTimer) window.clearTimeout(resizeTimer);
-    resizeTimer = window.setTimeout(function () {
-      resizeTimer = null;
-      if (!lastData || Math.abs(fullChartW() - renderedW) < 40) return;
-      var y = window.scrollY || window.pageYOffset || 0;
-      renderAll(lastData);
-      window.scrollTo(0, y);
-    }, 250);
-  });
-
-  // На телефоне вкладка часто «спит»: пока не видно — не дёргаем сеть, при возврате
-  // обновляемся сразу, если прошлый заход был давно.
-  document.addEventListener('visibilitychange', function () {
-    if (!document.hidden && Date.now() - lastTryAt > REFRESH_MS / 2) load();
-  });
-  window.setInterval(function () { if (!document.hidden) load(); }, REFRESH_MS);
-  window.setInterval(updateFreshness, AGE_TICK_MS);
-
-  load();
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+  else init();
 })();
