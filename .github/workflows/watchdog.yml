@@ -1,0 +1,97 @@
+# Внешний сторож: замечает, что витрина перестала обновляться, и пишет в телеграм.
+#
+# ЗАЧЕМ, если на VPS уже есть dash-watch. Тот живёт НА ТОЙ ЖЕ машине и умирает
+# вместе с ней. Ровно тот отказ, ради которого сторож и нужен — машина не отвечает
+# (OOM, сеть, авария хостера), — местный сторож не заметит по определению: он тоже
+# мёртв. А Cloudflare продолжит отдавать последний записанный файл с кодом 200
+# сколько угодно: R2 — это ведро, а не конвейер, оно не знает, что данные устарели.
+# Внешне панель выглядит живой и показывает вчерашние числа как сегодняшние.
+#
+# ЧЕГО ЗДЕСЬ НЕТ НАМЕРЕННО. Этот воркфлоу ничего не публикует и не знает ключей R2:
+# он только смотрит и говорит. Подмена писателя — отдельный fallback.yml, включать
+# его или нет, решается независимо (сейчас он только по кнопке).
+name: Сторож витрины
+
+on:
+  schedule:
+    # Каждые два часа. Чаще нет смысла: полный прогон конвейера идёт раз в сутки
+    # (19:05 МСК), и порог протухания всё равно измеряется часами.
+    # ВНИМАНИЕ: GitHub отключает расписания в репозиториях без активности 60 дней
+    # и умеет опаздывать на десятки минут — для оповещения это приемлемо, для
+    # автоматической подмены писателя было бы нет.
+    - cron: "17 */2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Проверить возраст витрины и сообщить, если она встала
+        env:
+          URL: https://tzi-842.pages.dev/data/data.json
+          # Порог по ДНЕВНОМУ циклу, а не по интрадей-такту: ночью и в выходные
+          # интрадея нет вовсе, и порог «три такта по 15 минут» кричал бы каждую ночь.
+          # 26 часов = сутки плюс запас на сдвиг расписания.
+          MAX_AGE_MIN: ${{ vars.WATCHDOG_MAX_AGE_MIN || '1560' }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+
+          say() {
+            # Молчим, если канал не настроен: сторож без телеграма всё равно оставляет
+            # красный прогон в Actions — это тоже сигнал, просто медленнее.
+            if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+              echo "::warning::нет секретов TELEGRAM_* — сообщение не отправлено"
+              return 0
+            fi
+            curl -sS --max-time 20 -X POST \
+              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -H 'content-type: application/json; charset=utf-8' \
+              --data "$(python3 -c '
+import json, os, sys
+print(json.dumps({"chat_id": os.environ["TELEGRAM_CHAT_ID"],
+                  "text": sys.argv[1],
+                  "disable_web_page_preview": True}, ensure_ascii=False))' "$1")" \
+              >/dev/null || echo "::warning::телеграм не принял сообщение"
+          }
+
+          headers="$RUNNER_TEMP/head.txt"
+          code=$(curl -sS -I -o "$headers" -w '%{http_code}' \
+                   --max-time 20 --retry 2 --retry-delay 3 "$URL" || echo 000)
+          echo "код ответа витрины: $code"
+
+          if [ "$code" = "000" ]; then
+            say "🔴 MOEX Radar: витрина не отвечает вовсе (край Cloudflare молчит). Смотреть: сам сайт tzi-842.pages.dev и статус Cloudflare."
+            echo "::error::витрина не ответила"
+            exit 1
+          fi
+
+          if [ "$code" != "200" ]; then
+            say "🔴 MOEX Radar: витрина отдаёт код ${code} вместо данных. Если это 503 — конвейер ни разу не публиковал; смотреть moex-radar-daily на VPS."
+            echo "::error::витрина отдала $code"
+            exit 1
+          fi
+
+          lm=$(grep -i '^last-modified:' "$headers" | tail -1 | cut -d' ' -f2- | tr -d '\r')
+          if [ -z "$lm" ]; then
+            say "🟡 MOEX Radar: витрина отвечает, но без заголовка last-modified — возраст публикации определить нечем. Смотреть functions/data/[[path]].js."
+            echo "::error::нет last-modified"
+            exit 1
+          fi
+
+          age_min=$(( ( $(date -u +%s) - $(date -u -d "$lm" +%s) ) / 60 ))
+          echo "публикация: $lm, возраст $age_min мин (порог $MAX_AGE_MIN)"
+
+          if [ "$age_min" -ge "$MAX_AGE_MIN" ]; then
+            hours=$(( age_min / 60 ))
+            say "🔴 MOEX Radar: витрина не обновляется ${hours} ч (порог $(( MAX_AGE_MIN / 60 )) ч). Панель показывает старые числа как свежие. Смотреть на VPS: systemctl status moex-radar-daily; journalctl -u moex-radar-daily -n 50. Если машина не отвечает — это она и есть."
+            echo "::error::витрина протухла: $age_min мин"
+            exit 1
+          fi
+
+          echo "витрина свежая — конвейер жив"
