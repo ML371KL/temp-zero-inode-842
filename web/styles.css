@@ -584,10 +584,10 @@ body { overflow-x: hidden; }
 .howto__grid { display: grid; gap: 24px; }
 @media (min-width: 760px) { .howto__grid { grid-template-columns: repeat(3, 1fr); } }
 .howto__k {
-  font-size: 12px; font-weight: 680; letter-spacing: .08em; text-transform: uppercase;
+  font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
   color: var(--ink-3); margin-bottom: 8px;
 }
-.howto__col p { font-size: 14px; line-height: 1.6; color: var(--ink-2); text-wrap: pretty; }
+.howto__col p { font-size: 15px; line-height: 1.6; color: var(--ink-2); text-wrap: pretty; }
 .howto__cta {
   margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--hair);
   display: flex; flex-wrap: wrap; align-items: center; gap: 14px 20px;
@@ -600,7 +600,7 @@ body { overflow-x: hidden; }
   display: inline-flex; align-items: center; gap: 8px; flex: none;
   padding: 10px 16px; border-radius: 999px;
   background: var(--ink); color: var(--surface);
-  font-size: 14px; font-weight: 560; text-decoration: none;
+  font-size: 15px; font-weight: 600; text-decoration: none;
   transition: opacity .12s ease;
 }
 .btn-link:hover { opacity: .86; }
@@ -609,9 +609,9 @@ body { overflow-x: hidden; }
 /* ─────────────────────────────────────────────────────────── руководство */
 
 .guide { max-width: 1180px; }
-.guide__h1 { font-size: clamp(28px, 4vw, 40px); font-weight: 660; letter-spacing: -.022em; margin: 32px 0 14px; }
-.guide__lead { font-size: 17px; line-height: 1.6; color: var(--ink-2); max-width: 72ch; text-wrap: pretty; }
-.guide__lead b { color: var(--ink); font-weight: 620; }
+.guide__h1 { font-size: clamp(28px, 4vw, 40px); font-weight: 700; letter-spacing: -.022em; margin: 32px 0 14px; }
+.guide__lead { font-size: 15px; line-height: 1.6; color: var(--ink-2); max-width: 72ch; text-wrap: pretty; }
+.guide__lead b { color: var(--ink); font-weight: 600; }
 
 .guide__toc {
   display: flex; flex-wrap: wrap; gap: 8px;
@@ -627,10 +627,10 @@ body { overflow-x: hidden; }
 
 .guide__sec { margin-top: 44px; scroll-margin-top: 76px; }
 .guide__sec h2 {
-  font-size: 22px; font-weight: 640; letter-spacing: -.015em;
+  font-size: 21px; font-weight: 600; letter-spacing: -.015em;
   padding-bottom: 10px; border-bottom: 1px solid var(--hair); margin-bottom: 18px;
 }
-.guide__sec h3 { font-size: 16px; font-weight: 600; margin: 26px 0 8px; }
+.guide__sec h3 { font-size: 15px; font-weight: 600; margin: 26px 0 8px; }
 .guide__sec p { font-size: 15px; line-height: 1.65; margin-bottom: 12px; max-width: 74ch; text-wrap: pretty; }
 .guide__sec code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -646,7 +646,7 @@ body { overflow-x: hidden; }
   content: counter(s); position: absolute; left: 0; top: 1px;
   width: 24px; height: 24px; border-radius: 50%;
   background: var(--inset); color: var(--ink-2);
-  font-size: 12.5px; font-weight: 620; display: grid; place-items: center;
+  font-size: 13px; font-weight: 600; display: grid; place-items: center;
 }
 .guide__list { max-width: 74ch; }
 .guide__list li {
@@ -661,7 +661,7 @@ body { overflow-x: hidden; }
 .guide__note, .guide__warn {
   padding: 14px 16px; border-radius: var(--radius-sm);
   border: 1px solid var(--hair); border-left: 3px solid var(--axis);
-  background: var(--surface); font-size: 14px; line-height: 1.6;
+  background: var(--surface); font-size: 15px; line-height: 1.6;
   max-width: 78ch; margin: 16px 0;
 }
 .guide__warn { border-left-color: var(--warn); }
@@ -670,10 +670,10 @@ body { overflow-x: hidden; }
 .guide__table { min-width: 560px; }
 .guide__table th, .guide__table td { white-space: normal; }
 .guide__table th[scope="col"] { white-space: nowrap; }
-.guide__table th[scope="row"] { font-weight: 580; }
+.guide__table th[scope="row"] { font-weight: 600; }
 .guide__table td, .guide__table th { vertical-align: top; }
 .guide__table td { white-space: normal; }
-.guide__dim { color: var(--ink-3); font-weight: 400; font-size: 12.5px; }
+.guide__dim { color: var(--ink-3); font-weight: 400; font-size: 13px; }
 
 .guide__tiers { display: grid; gap: 14px; margin: 16px 0 8px; }
 @media (min-width: 720px) { .guide__tiers { grid-template-columns: repeat(2, 1fr); } }
@@ -682,8 +682,8 @@ body { overflow-x: hidden; }
   padding: 14px 16px; background: var(--surface);
   border: 1px solid var(--hair); border-radius: var(--radius-sm);
 }
-.guide__tier p { font-size: 13.5px; line-height: 1.55; margin: 0; color: var(--ink-2); }
+.guide__tier p { font-size: 13px; line-height: 1.55; margin: 0; color: var(--ink-2); }
 
 .guide__dl { max-width: 78ch; }
-.guide__dl dt { font-weight: 600; font-size: 14.5px; margin-top: 14px; }
-.guide__dl dd { margin: 4px 0 0; font-size: 14px; line-height: 1.6; color: var(--ink-2); text-wrap: pretty; }
+.guide__dl dt { font-weight: 600; font-size: 15px; margin-top: 14px; }
+.guide__dl dd { margin: 4px 0 0; font-size: 15px; line-height: 1.6; color: var(--ink-2); text-wrap: pretty; }
