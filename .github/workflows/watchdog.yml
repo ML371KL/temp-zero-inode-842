@@ -49,14 +49,16 @@ jobs:
               echo "::warning::нет секретов TELEGRAM_* — сообщение не отправлено"
               return 0
             fi
-            curl -sS --max-time 20 -X POST \
-              "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-              -H 'content-type: application/json; charset=utf-8' \
-              --data "$(python3 -c '
-import json, os, sys
-print(json.dumps({"chat_id": os.environ["TELEGRAM_CHAT_ID"],
-                  "text": sys.argv[1],
-                  "disable_web_page_preview": True}, ensure_ascii=False))' "$1")" \
+            # Форма, а не JSON: --data-urlencode сам экранирует текст, и не нужен
+            # вложенный скрипт-сериализатор. Первая редакция собирала JSON
+            # многострочным python3 -c прямо здесь — его строки начинались с нулевой
+            # колонки и рвали блок YAML, из-за чего GitHub молча не видел ни имени
+            # воркфлоу, ни триггера workflow_dispatch.
+            local api="https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage"
+            curl -sS --max-time 20 -X POST "$api" \
+              -d "chat_id=${TELEGRAM_CHAT_ID}" \
+              -d "disable_web_page_preview=true" \
+              --data-urlencode "text=$1" \
               >/dev/null || echo "::warning::телеграм не принял сообщение"
           }
 
