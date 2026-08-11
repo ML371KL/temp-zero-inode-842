@@ -114,6 +114,28 @@ def _run_start(series, dates, j):
     return dates[k]
 
 
+def _legs_segments(mf, idx, start="2004-01-01"):
+    """Отрезки опубликованной серии по ЧИСЛУ РАБОТАВШИХ НОГ: [[n, первый, последний], …].
+
+    Зачем это вообще публикуется: slope_10_2 начинается в 2015, бочка — в 2016, поэтому
+    155 из 272 месяцев графика посчитаны по ОДНОЙ ноге (usd_mom63; сольный период p=0,12,
+    REGIME §4). Модель там та же самая M1 — её OOS-окно 2010–2026 на 42% состоит из
+    одноногих месяцев, — но на графике одноногая эра неотличима от трёхногой, а именно
+    в ней стоят все восемь значений, упёртых в обрезку ±3. Без этих отрезков фронт
+    физически не может нарисовать оговорку: в серии лежат только [дата, значение].
+    """
+    out = []
+    for i in range(idx + 1):
+        if mf["dates"][i] < start or not calc.is_num(mf["composite"][i]):
+            continue
+        n = mf["n_used"][i]
+        if out and out[-1][0] == n:
+            out[-1][2] = mf["dates"][i]
+        else:
+            out.append([n, mf["dates"][i], mf["dates"][i]])
+    return out
+
+
 def compute_core(panel, with_health=True):
     """-> {"value","sign","sign_since","components":[…],"series":[…],"health":{…}}"""
     mf = monthly_frame(panel)
@@ -124,6 +146,7 @@ def compute_core(panel, with_health=True):
         out = {"value": None, "sign": 0, "sign_since": None, "label": "нет данных",
                "degraded": True, "n_components": 0,
                "n_expected": len(constants.CORE_COMPONENTS),
+               "full_legs_since": None, "legs_segments": [],
                "asof": labels[-1] if labels else None,
                "components": [_component_stub(c) for c in constants.CORE_COMPONENTS],
                "series": [], "month_end": None}
@@ -138,7 +161,10 @@ def compute_core(panel, with_health=True):
     sign_since = _run_start(hyst, labels, idx) if hyst[idx] is not None else None
 
     n_used = mf["n_used"][idx]
-    weight = round(1.0 / n_used, 4) if n_used else 0.0
+    # Вес НЕ округляем: 1/3 после round(...,4) даёт 0.3333, и на витрине три ноги
+    # печатаются как «33%» — в сумме 99%, будто четвёртой доли не хватает. Веса равные
+    # по построению (REGIME §7), и их сумма обязана быть ровно 1.
+    weight = 1.0 / n_used if n_used else 0.0
     components = []
     for comp in constants.CORE_COMPONENTS:
         cid = comp["id"]
@@ -168,6 +194,14 @@ def compute_core(panel, with_health=True):
                          "label": core_label(comp_series[j])}
             break
 
+    # Состав ядра во времени. full_legs_since — начало ПОСЛЕДНЕГО непрерывного отрезка
+    # с полным составом, а не первое его появление: n_used сегодня монотонен, но стоит
+    # умереть источнику zcyc или бочки — и «первое вхождение» начнёт врать, показывая
+    # 2017 год там, где ядро снова стоит на двух ногах.
+    n_expected = len(constants.CORE_COMPONENTS)
+    segments = _legs_segments(mf, idx)
+    full_legs_since = segments[-1][1] if (segments and segments[-1][0] == n_expected) else None
+
     out = {
         "value": _round(value, 3),
         "sign": sign,
@@ -178,7 +212,9 @@ def compute_core(panel, with_health=True):
         # давал p=0,12, это «сигнал есть, доверия мало», а не полноценный композит.
         "degraded": n_used <= 1,
         "n_components": n_used,
-        "n_expected": len(constants.CORE_COMPONENTS),
+        "n_expected": n_expected,
+        "full_legs_since": full_legs_since,
+        "legs_segments": segments,
         "components": components,
         "month_end": month_end,
         "series": [[labels[i], _round(v, 3)] for i, v in enumerate(comp_series)

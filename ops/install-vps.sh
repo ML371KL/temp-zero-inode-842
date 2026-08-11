@@ -18,7 +18,12 @@ REPO_DIR="${REPO_DIR:-/srv/dash/repo-842}"
 RUN_USER="${RUN_USER:-dash}"
 ETC_DIR=/usr/local/etc/moex-radar
 STATE_DIR="${STATE_DIR:-/var/lib/moex-radar}"
-UNITS=(moex-radar-daily moex-radar-intraday moex-radar-monthly)
+# Список полный намеренно: режим, которого здесь нет, не запускает НИКТО, и заметить это
+# по панели нельзя — ряд просто стоит на значении с бутстрапа, а тайл светится зелёным
+# (SLA считается от fetched_at, и «никто не спрашивал» неотличимо от «источник свежий»).
+# Так пять рядов из тридцати шести не обновлялись с установки. Инвариант «каждый режим
+# из registry.MODES стоит в чьём-то ExecStart» проверяется в .github/workflows/ci.yml.
+UNITS=(moex-radar-daily moex-radar-intraday moex-radar-manual moex-radar-monthly moex-radar-weekly)
 
 say() { printf '\n== %s\n' "$*"; }
 note() { printf '   %s\n' "$*"; }

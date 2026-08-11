@@ -348,7 +348,11 @@ class TestFredBrent(FetcherCase):
         self.assertNotIn("2026-07-30", points)
         self.assertNotIn("2026-08-05", points)
         self.assertEqual(points["2026-08-07"], 70.31)
-        self.assertEqual(meta["unit"], "usd")
+        # usd_bbl, а не usd: доллары за БАРРЕЛЬ. Из этого ряда считается рублёвая
+        # бочка (нога ядра), и «usd» на панели читалось бы как курс; в прод-сторе
+        # стоит usd_bbl, а фетчер объявлял usd — расхождение всплыло бы на bootstrap
+        # в чистый стор, где unit закрепляется навсегда.
+        self.assertEqual(meta["unit"], "usd_bbl")
         self.assertEqual(meta["asof"], "2026-08-07")
 
     def test_not_a_csv_is_a_source_failure(self):

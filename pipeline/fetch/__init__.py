@@ -43,7 +43,16 @@ def incremental_start(series_id, back_days=RETRO_DAYS, default_start="1997-01-01
     last = store.last_date(series_id)
     if not last:
         return default_start
-    return dates.fmt_date(dates.add_days(last, -abs(back_days)))
+    start = dates.fmt_date(dates.add_days(last, -abs(back_days)))
+    # Страховка от «ряда, отравленного датой из будущего»: если стартовать
+    # приходится позже сегодняшнего дня, окно перевёрнуто (from > till), источник
+    # молча отвечает пустым списком, и ряд замирает НАВСЕГДА со status=ok. Чинить
+    # это руками (bootstrap) — единственный выход, поэтому лечим сами и вслух.
+    today = dates.fmt_date(dates.today_msk())
+    if start > today:
+        http.LOG(f"{series_id}: последняя точка {last} в будущем — тяну с {default_start}")
+        return default_start
+    return start
 
 
 def make_meta(source, url, points=None, status="ok", note=None, asof=None, **extra):

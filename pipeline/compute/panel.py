@@ -26,9 +26,9 @@ import math
 from datetime import date, timedelta
 
 try:  # прогон как пакет: python -m pipeline.run
-    from ..lib import calc, registry
+    from ..lib import calc, dates as datelib, registry
 except ImportError:  # прогон как python pipeline/run.py (корень sys.path = pipeline/)
-    from lib import calc, registry
+    from lib import calc, dates as datelib, registry
 
 __all__ = ["build_panel", "PanelError"]
 
@@ -51,6 +51,12 @@ FFILL_LIMITS = {
     "mcftr": 5, "rgbi": 5, "zcyc": 5, "mcxsm": 3, "rvi": 3,
     "hy": 3, "brent": 7, "futoi": 3, "breadth": 3,
 }
+
+# Ставка по вкладам — не рыночный ряд, у неё свой темп: декада ЦБ выходит каждые
+# ~7 торговых дней (максимум разрыва за 612 наблюдений с 2009 года — 9 дней).
+# 15 = запас 1,7x: на всей истории не теряется ни одной строки, но мёртвый источник
+# перестаёт изображать свежую ставку через три недели, а не через полтора года.
+DEPOSIT_FFILL_LIMIT = 15
 
 
 # --------------------------------------------------------------- доступ к стору
@@ -109,12 +115,25 @@ def _lag_days(sid):
 
 
 def _shift(day, lag):
+    """Дата периода -> дата ДОСТУПНОСТИ (registry.pub_lag_days).
+
+    Считаем через dates.apply_pub_lag — ту самую функцию, которую проверяют тесты:
+    раньше панель считала лаг своей копией формулы, а покрыта была чужая.
+    На неразобранном ключе НЕ возвращаем дату как есть: молчаливый возврат означал
+    значение БЕЗ лага, то есть видимое на 4–15 дней раньше публикации (заглядывание
+    в будущее — ровно то, от чего защищается весь этот файл). Пусть лучше ValueError
+    поднимется наверх и _align выбросит точку: потерять наблюдение безопаснее, чем
+    показать его раньше срока. Ключ вида '2015-01' (Минфин исторически отдавал месяц
+    без дня) сначала нормализуем в конец месяца, иначе лаг поехал бы от первого числа.
+    """
+    key = str(day)[:10]
+    if len(key) == 7:
+        key = _month_end_iso(key)
     if not lag:
-        return day
-    try:
-        return (date.fromisoformat(day[:10]) + timedelta(days=lag)).isoformat()
-    except ValueError:
-        return day
+        return key
+    # datelib, а не dates: `dates` во всём файле — это СПИСОК торговых дней панели,
+    # и модуль под тем же именем прятался бы за ним в каждой функции.
+    return datelib.fmt_date(datelib.apply_pub_lag(key, lag))
 
 
 def _align(points, dates, lag=0, limit=None):
@@ -271,11 +290,24 @@ def build_panel(store):
     mcftr = _col_cal(store, "mcftr", dates, FFILL_LIMITS["mcftr"])
     mcftr_252 = calc.log_return(mcftr, 252)
     px_252 = calc.log_return(px, 252)
-    cols["dy_trail"] = [None if not (calc.is_num(a) and calc.is_num(b)) else (a - b) * 100.0
-                        for a, b in zip(mcftr_252, px_252)]
+    # Разность считаем ТОЛЬКО в дни, где у MCFTR есть СОБСТВЕННАЯ точка. Протянутый
+    # MCFTR против свежего IMOEX даёт не дивдоходность, а дивдоходность МИНУС
+    # сегодняшняя доходность индекса: 11.08.2026 MCFTR отстал на день, и dy_trail
+    # уехал с 8.49 на 7.14 ровно на +1.32% индекса — z −1.77 вместо +0.25, вердикт
+    # «против лонга» вместо «нейтрально», а тайл «Вклады против дивидендов» (он
+    # считает по общим датам) показывал рядом другое число. Пустой хвост честнее:
+    # states берёт последнее валидное значение, то есть настоящий вчерашний спред.
+    own = {d for d, v in _points(store, "mcftr").items() if calc.is_num(v)}
+    cols["dy_trail"] = [None if (t not in own or not (calc.is_num(a) and calc.is_num(b)))
+                        else (a - b) * 100.0
+                        for t, a, b in zip(dates, mcftr_252, px_252)]
 
     # ---- ставка по вкладам и спред переключения -------------------------------
-    deposit = _col(store, "deposit_decade", dates)  # декада + pub_lag 4 дня, тянем без лимита
+    # Декада ЦБ выходит каждые ~7 торговых дней (исторический максимум разрыва — 9),
+    # поэтому лимит 15 не теряет ни одной строки за всю историю, но и не даёт мёртвому
+    # источнику кормить switch_spread месяцами: при обрыве ряда на 18 месяцев спред
+    # уезжал с −4.35 до −12.98 и разворачивал вердикт, оставаясь неотличимым от живого.
+    deposit = _col(store, "deposit_decade", dates, DEPOSIT_FFILL_LIMIT)
     cols["deposit"] = deposit
     cols["switch_spread"] = _sub(cols["dy_trail"], deposit)
 

@@ -38,6 +38,21 @@
   function isNum(v) { return typeof v === 'number' && isFinite(v); }
   function clamp(v, a, b) { return v < a ? a : (v > b ? b : v); }
 
+  /** Честное «нет данных» вместо пустого прямоугольника.
+   *
+   * Пустой <svg> без единого узла — это тихий отказ: он неотличим от «график ещё
+   * считается» и от «полоса действительно ровная». Так вело себя пять форм из
+   * семи; правильный образец был только у spark. Текст пишем внутри картинки,
+   * а не рядом, чтобы он гарантированно оказался там же, где ждали график. */
+  function emptyFig(W, H, text) {
+    return el('svg', { 'class': 'fig', width: W, height: H, role: 'img', 'aria-label': text || 'нет данных' }, [
+      el('text', { x: 1, y: H / 2 + 4, 'class': 'tick' }, [document.createTextNode(text || 'нет данных')])
+    ]);
+  }
+
+  var seq = 0;
+  function uid(prefix) { return prefix + (++seq) + Math.random().toString(36).slice(2, 6); }
+
   /** Цвет из CSS-переменной: палитра живёт в одном месте и переключается с темой. */
   function tok(name, fallback) {
     var v = getComputedStyle(document.documentElement).getPropertyValue(name);
@@ -150,6 +165,15 @@
         h('span', { 'class': 'tip__v', text: r.v, style: r.color ? 'color:' + r.color : null })
       ]));
     });
+    // Подсказка центрируется по точке (transform: translate(-50%,…)), и у последней
+    // точки ряда её правая половина уезжала за карточку: .hero стоит с overflow:
+    // hidden, так что у самого востребованного значения — текущего — обрезался
+    // последний символ. Прижимаем к границам контейнера ПОСЛЕ наполнения: ширина
+    // подсказки зависит от текста и до вставки строк неизвестна.
+    var box = tip.parentNode;
+    var half = tip.offsetWidth / 2;
+    var boxW = box ? box.clientWidth : 0;
+    if (boxW > half * 2 + 4) x = clamp(x, half + 2, boxW - half - 2);
     tip.style.left = x + 'px';
     tip.style.top = y + 'px';
     tip.setAttribute('data-show', '1');
@@ -183,14 +207,26 @@
         var x0 = x(z.a), x1 = x(z.b);
         kids.push(el('rect', {
           x: x0 + 1, y: padTop, width: Math.max(1, x1 - x0 - 2), height: trackH,
-          rx: 3, fill: z.c, 'fill-opacity': z.o
+          rx: 3, fill: z.c, 'fill-opacity': z.o,
+          // Исключение из правила «разделяем пустотой»: нейтральная середина — это
+          // --mid, а он к поверхности даёт 1,23 (норма для графики 3,0), и зона
+          // −0,3…+0,3 читалась как ДЫРА в дорожке. Заливку не темним (она обязана
+          // остаться серединой диверджент-шкалы) — различимость даёт волосяной контур.
+          stroke: z.c === tok('--mid') ? tok('--axis') : null,
+          'stroke-width': z.c === tok('--mid') ? 1 : null
         }));
       });
       [-3, -1, 0, 1, 3].forEach(function (v) {
+        // fmtNum, а не String(v): String(-3) даёт дефис U+002D, а вся остальная
+        // панель печатает настоящий минус U+2212 — на 11px тиках разница видна.
         kids.push(el('text', {
           x: x(v), y: padTop + trackH + 15, 'text-anchor': 'middle', 'class': 'tick'
-        }, [document.createTextNode(v > 0 ? '+' + v : String(v))]));
+        }, [document.createTextNode(fmtNum(v, 0, true))]));
       });
+      if (!isNum(value)) {
+        kids.push(el('text', { x: padX, y: padTop - 10, 'class': 'tick' },
+          [document.createTextNode('композит не рассчитан')]));
+      }
       if (isNum(value)) {
         var mx = x(value);
         kids.push(el('line', {
@@ -206,7 +242,7 @@
         'class': 'fig', width: W, height: H, viewBox: '0 0 ' + W + ' ' + H,
         role: 'img',
         'aria-label': 'Шкала композита от минус трёх до плюс трёх, текущее значение ' +
-          fmtNum(value, 2, true)
+          (isNum(value) ? fmtNum(value, 2, true) : 'не рассчитано')
       }, kids);
     });
     return box.node;
@@ -215,21 +251,31 @@
   /* ─────────────────────────── 2. История со знаковой заливкой + крестовина */
 
   /** Ряд [[дата, значение]] с нулевой линией: заливка выше нуля — синяя,
-   *  ниже — красная (диверджент по полярности). Точки смены знака подписаны
-   *  выборочно; каждое значение доступно в подсказке и в режиме таблицы. */
+   *  ниже — красная (диверджент по полярности). Отмечены только значимые
+   *  развороты; каждое значение доступно в подсказке и в режиме таблицы. */
   function signedHistory(series, opts) {
     opts = opts || {};
     var H = opts.height || 190;
     var box = chartBox(H);
     var pts = (series || []).filter(function (r) { return r && isNum(+r[1]); })
       .map(function (r) { return [String(r[0]), +r[1]]; });
+    var hintId = uid('kbhint');
+    box.node.appendChild(h('div', {
+      'class': 'sr', id: hintId,
+      text: 'График с клавиатуры: стрелки влево и вправо — переход по точкам ряда, Home — начало ряда, End — конец. Значение точки объявляется подсказкой.'
+    }));
     box.render(function (W) {
-      if (!pts.length) return el('svg', { width: W, height: H });
+      if (!pts.length) return emptyFig(W, H, 'нет данных: ряд пуст');
       var padL = 30, padR = 12, padT = 12, padB = 22;
       var iw = W - padL - padR, ih = H - padT - padB;
       var vmax = 0;
       pts.forEach(function (p) { vmax = Math.max(vmax, Math.abs(p[1])); });
-      vmax = Math.max(0.5, Math.ceil(vmax * 2) / 2);
+      // Домен ФИКСИРОВАН на ±3, а не подгоняется под видимый срез. Композит один и
+      // тот же рисуется дважды: в шапке за 24 месяца и большим графиком с 2004-го.
+      // Пока масштаб считался по срезу, шапка жила в ±1,5, а большой — в ±3, и одно
+      // и то же +0,7 было нарисовано вдвое выше на 500 пикселей ниже по странице.
+      // ±3 — это клип конвейера (constants.py), то есть домен известен заранее.
+      vmax = isNum(opts.vmax) ? opts.vmax : Math.max(3, Math.ceil(vmax * 2) / 2);
       var x = function (i) { return padL + (pts.length === 1 ? iw / 2 : i / (pts.length - 1) * iw); };
       var y = function (v) { return padT + (1 - (v + vmax) / (2 * vmax)) * ih; };
       var y0 = y(0);
@@ -245,15 +291,15 @@
       var line = pts.map(function (p, i) { return (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(p[1]).toFixed(1); }).join(' ');
       var area = line + ' L' + x(pts.length - 1).toFixed(1) + ' ' + y0.toFixed(1) +
         ' L' + x(0).toFixed(1) + ' ' + y0.toFixed(1) + ' Z';
-      var uid = 'clip' + Math.random().toString(36).slice(2, 8);
+      var clipId = 'clip' + Math.random().toString(36).slice(2, 8);
       kids.push(el('defs', null, [
-        el('clipPath', { id: uid + 'p' }, [el('rect', { x: 0, y: padT - 2, width: W, height: y0 - padT + 2 })]),
-        el('clipPath', { id: uid + 'n' }, [el('rect', { x: 0, y: y0, width: W, height: H - y0 })])
+        el('clipPath', { id: clipId + 'p' }, [el('rect', { x: 0, y: padT - 2, width: W, height: y0 - padT + 2 })]),
+        el('clipPath', { id: clipId + 'n' }, [el('rect', { x: 0, y: y0, width: W, height: H - y0 })])
       ]));
-      kids.push(el('path', { d: area, fill: tok('--pos'), 'fill-opacity': 0.16, 'clip-path': 'url(#' + uid + 'p)' }));
-      kids.push(el('path', { d: area, fill: tok('--neg'), 'fill-opacity': 0.16, 'clip-path': 'url(#' + uid + 'n)' }));
-      kids.push(el('path', { d: line, 'class': 'series', stroke: tok('--pos'), 'clip-path': 'url(#' + uid + 'p)' }));
-      kids.push(el('path', { d: line, 'class': 'series', stroke: tok('--neg'), 'clip-path': 'url(#' + uid + 'n)' }));
+      kids.push(el('path', { d: area, fill: tok('--pos'), 'fill-opacity': 0.16, 'clip-path': 'url(#' + clipId + 'p)' }));
+      kids.push(el('path', { d: area, fill: tok('--neg'), 'fill-opacity': 0.16, 'clip-path': 'url(#' + clipId + 'n)' }));
+      kids.push(el('path', { d: line, 'class': 'series', stroke: tok('--pos'), 'clip-path': 'url(#' + clipId + 'p)' }));
+      kids.push(el('path', { d: line, 'class': 'series', stroke: tok('--neg'), 'clip-path': 'url(#' + clipId + 'n)' }));
 
       // Годовые отметки — по одной на 3–4 года, чтобы подписи не сталкивались.
       var years = {}, order = [];
@@ -266,15 +312,48 @@
           [document.createTextNode(yr)]));
       });
 
-      // Смены знака: выборочные подписи вместо числа над каждой точкой.
-      for (var i = 1; i < pts.length; i++) {
-        if ((pts[i][1] >= 0) !== (pts[i - 1][1] >= 0)) {
-          kids.push(el('circle', {
-            cx: x(i), cy: y0, r: 3, fill: tok('--ink-3'),
-            stroke: tok('--surface'), 'stroke-width': 2
-          }));
+      // Развороты: помечаем ТОЛЬКО те смены знака, которые продержались хотя бы
+      // hold месяцев. Пометка каждой (их 55 на 272 точках) давала при 1098px зазор
+      // от 3,9px между кружками диаметром 10px, а на 390px — 49 зазоров из 56
+      // меньше диаметра: точки сливались в сплошной серый брусок вдоль нуля и
+      // прятали саму нулевую ось. То, что композит часто пересекает ноль, и так
+      // видно по заливке; ценность несут развороты, которые устояли.
+      //
+      // Порог поднимаем, пока марки не перестанут наезжать друг на друга: сколько
+      // их влезет, решает ширина, а не вкус. На плоте 1098px это «продержалось
+      // 6 месяцев» (16 марок), на 324px — 9 месяцев (8 марок), на 254px — 12 (5).
+      // Так же, через шаг по ширине, тут прорежены и годовые подписи; марка,
+      // которая не помещается, не рисуется вовсе.
+      function reversals(hold) {
+        var out = [];
+        for (var i = 1; i < pts.length; i++) {
+          if ((pts[i][1] >= 0) === (pts[i - 1][1] >= 0)) continue;
+          var run = 1;
+          while (i + run < pts.length && (pts[i + run][1] >= 0) === (pts[i][1] >= 0)) run++;
+          // Последний разворот показываем всегда: это текущий режим («знак не
+          // менялся с …» в шапке), и он по определению ещё не успел выстояться.
+          if (run < hold && i + run < pts.length) continue;
+          out.push(i);
         }
+        return out;
       }
+      // Условие остановки — фактический зазор в пикселях, а не число марок:
+      // развороты стоят неравномерно, и «шестнадцать штук» на 324px всё ещё
+      // означали две пары, налезающие друг на друга.
+      function minGap(list) {
+        var m = Infinity;
+        for (var k = 1; k < list.length; k++) m = Math.min(m, x(list[k]) - x(list[k - 1]));
+        return m;
+      }
+      var DOT = 12;  // диаметр марки с кольцом плюс воздух
+      var hold = 3, marks = reversals(hold);
+      while (hold < 36 && marks.length > 1 && minGap(marks) < DOT) { hold += 3; marks = reversals(hold); }
+      marks.forEach(function (i) {
+        kids.push(el('circle', {
+          cx: x(i), cy: y0, r: 3.5, fill: tok('--ink-3'),
+          stroke: tok('--surface'), 'stroke-width': 2
+        }));
+      });
 
       var last = pts[pts.length - 1];
       kids.push(el('circle', {
@@ -292,7 +371,7 @@
 
       var svg = el('svg', {
         'class': 'fig', width: W, height: H, viewBox: '0 0 ' + W + ' ' + H,
-        role: 'img', tabindex: '0',
+        role: 'img', tabindex: '0', 'aria-describedby': hintId,
         'aria-label': (opts.aria || 'Историческая динамика') + ': ' + pts.length +
           ' точек с ' + fmtMon(pts[0][0]) + ' по ' + fmtMon(last[0]) +
           ', последнее значение ' + fmtNum(last[1], 2, true)
@@ -311,18 +390,28 @@
         focus.setAttribute('cx', px); focus.setAttribute('cy', py); focus.setAttribute('opacity', 1);
         showTip(tip, px, py, [
           { title: fmtMon(pts[i][0]) },
+          // Чернильные варианты пары: это ТЕКСТ в подсказке 13px, ему нужно 4,5,
+          // а цвета марок --pos/--neg дают на светлой поверхности 4,30 и 3,85.
           { k: opts.label || 'значение', v: fmtNum(pts[i][1], 2, true),
-            color: pts[i][1] >= 0 ? tok('--pos') : tok('--neg') }
+            color: pts[i][1] >= 0 ? tok('--pos-ink') : tok('--neg-ink') }
         ]);
       }
       function hide() { cross.setAttribute('opacity', 0); focus.setAttribute('opacity', 0); hideTip(tip); }
       hit.addEventListener('pointermove', function (e) { show(pick(e.clientX)); });
       hit.addEventListener('pointerleave', hide);
       var kb = pts.length - 1;
+      // На фокусе сразу показываем крестовину: раньше клавиатурный пользователь
+      // видел только кольцо фокуса вокруг картинки и никакого курсора на данных —
+      // функция была, но найти её было нельзя. Home/End добавлены туда же: без них
+      // до начала 272-точечного ряда пришлось бы жать стрелку 271 раз.
+      svg.addEventListener('focus', function () { show(kb); });
       svg.addEventListener('keydown', function (e) {
-        if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+        if (e.key === 'Home') kb = 0;
+        else if (e.key === 'End') kb = pts.length - 1;
+        else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+          kb = clamp(kb + (e.key === 'ArrowRight' ? 1 : -1), 0, pts.length - 1);
+        } else return;
         e.preventDefault();
-        kb = clamp(kb + (e.key === 'ArrowRight' ? 1 : -1), 0, pts.length - 1);
         show(kb);
       });
       svg.addEventListener('blur', hide);
@@ -397,7 +486,7 @@
     }
 
     box.render(function (W) {
-      if (!pts.length) return el('svg', { 'class': 'fig', width: W, height: H });
+      if (!pts.length) return emptyFig(W, H, 'нет данных: лента состояний не рассчитана');
       var padT = 8, bandH = 30, padL = 0;
       var iw = W - padL;
       var seg = iw / pts.length;
@@ -408,6 +497,14 @@
           fill: color(p[1])
         }));
       });
+      // Волосяная рамка вокруг ленты. Нейтральный сегмент — это --mid, он даёт к
+      // поверхности карточки 1,23 при норме 3,0 для графики: эпоха «около нуля»
+      // выглядела дырой в ленте, а не её частью. Рамка задаёт границы полосы, не
+      // трогая заливку (заливка обязана остаться серединой диверджент-шкалы).
+      kids.push(el('rect', {
+        x: padL + 0.5, y: padT + 0.5, width: Math.max(1, iw - 1), height: bandH - 1,
+        fill: 'none', stroke: tok('--axis'), 'stroke-width': 1
+      }));
       // Годовые подписи под лентой — редкие, чтобы не столкнулись.
       var years = {}, order = [];
       pts.forEach(function (p, i) { var yr = String(p[0]).slice(0, 4); if (!(yr in years)) { years[yr] = i; order.push(yr); } });
@@ -416,8 +513,13 @@
         if (k % step) return;
         var px = padL + years[yr] * seg;
         kids.push(el('line', { x1: px, y1: padT + bandH, x2: px, y2: padT + bandH + 4, 'class': 'axisline' }));
-        kids.push(el('text', { x: px, y: padT + bandH + 17, 'text-anchor': 'middle', 'class': 'tick' },
-          [document.createTextNode(yr)]));
+        // Крайние подписи прижимаем к своей засечке, а не центрируем по ней:
+        // у ленты нет левого поля (padL = 0), и «2004» при text-anchor=middle
+        // уезжало на 11px левее начала графика — мимо собственной засечки.
+        kids.push(el('text', {
+          x: px, y: padT + bandH + 17, 'class': 'tick',
+          'text-anchor': px < 14 ? 'start' : (px > iw - 14 ? 'end' : 'middle')
+        }, [document.createTextNode(yr)]));
       });
       var lastX = padL + (pts.length - 1) * seg + seg / 2;
       kids.push(el('path', {
@@ -446,7 +548,7 @@
           { title: fmtMon(pts[i][0]) },
           { k: 'ячейка', v: c.label || pts[i][1] },
           { k: 'ср. месяц', v: isNum(c.mean_fwd1m_pct) ? fmtNum(c.mean_fwd1m_pct, 2, true) + '%' : '—',
-            color: isNum(c.mean_fwd1m_pct) ? (c.mean_fwd1m_pct >= 0 ? tok('--pos') : tok('--neg')) : null },
+            color: isNum(c.mean_fwd1m_pct) ? (c.mean_fwd1m_pct >= 0 ? tok('--pos-ink') : tok('--neg-ink')) : null },
           { k: 'наблюдений', v: isNum(c.n) ? String(c.n) : '—' }
         ]);
       });
@@ -459,24 +561,42 @@
   /* ───────────────────────────────────── 5. Расстояние до переключения */
 
   /** Текущее значение против порога: дорожка, засечка порога, маркер значения.
-   *  Заливка показывает, с какой стороны порога мы находимся. */
+   *  Заливка показывает, с какой стороны порога мы находимся.
+   *
+   *  ПОЛЯРНОСТЬ КРАСИМ ТОЛЬКО ПО ЯВНОМУ ЗАЯВЛЕНИЮ вызывающего (opts.bad —
+   *  'below' или 'above'). Здесь была ловушка: старый ключ opts.invert ставился
+   *  как `invert: id === 'bond'`, то есть для всех прочих строк приезжало
+   *  invert:false — «не сказано» и «сказано: плохо сверху» были одним значением.
+   *  Для тренда плохо СНИЗУ (индекс ниже MA200), и полоса красила падение на 11%
+   *  в синий «за лонг», пока в шапке тот же бит светился красным «медведь».
+   *  Пока сторона не объявлена, полоса показывает расстояние нейтральными
+   *  чернилами: геометрия (маркер левее или правее засечки) не врёт никогда,
+   *  а цвет без заявленной полярности врал в трети случаев.
+   *
+   *  Старый invert намеренно НЕ поддержан как синоним: он объявлен ровно у одной
+   *  строки из трёх, и покрасить одну полосу красным, оставив две серыми, — это
+   *  ложь умолчанием (волатильность тоже за порогом в плохую сторону, но её
+   *  красить было бы нечем). Либо полярность объявлена у всех строк набора,
+   *  либо у полосы её нет ни у одной. */
   function thresholdBar(value, threshold, opts) {
     opts = opts || {};
     var H = 34;
     var box = chartBox(H);
     box.render(function (W) {
-      if (!isNum(value) || !isNum(threshold)) return el('svg', { 'class': 'fig', width: W, height: H });
+      if (!isNum(value) || !isNum(threshold)) return emptyFig(W, H, 'нет данных: значение или порог не рассчитаны');
       var span = Math.max(Math.abs(value - threshold) * 2.4, Math.abs(threshold) * 0.5, 1);
       var mid = threshold, lo = mid - span, hi = mid + span;
       var padX = 6, iw = W - padX * 2, trackY = 12, trackH = 8;
       var x = function (v) { return padX + clamp((v - lo) / (hi - lo), 0, 1) * iw; };
-      var beyond = opts.invert ? value <= threshold : value >= threshold;
+      var bad = opts.bad === 'below' || opts.bad === 'above' ? opts.bad : null;
+      var beyond = bad === 'below' ? value <= threshold : (bad === 'above' ? value >= threshold : null);
       var kids = [
         el('rect', { x: padX, y: trackY, width: iw, height: trackH, rx: 4, fill: tok('--inset') }),
         el('rect', {
           x: Math.min(x(value), x(threshold)), y: trackY,
           width: Math.max(2, Math.abs(x(value) - x(threshold))), height: trackH, rx: 4,
-          fill: beyond ? tok('--neg') : tok('--pos'), 'fill-opacity': .55
+          fill: beyond === null ? tok('--ink-3') : (beyond ? tok('--neg') : tok('--pos')),
+          'fill-opacity': beyond === null ? .38 : .55
         }),
         el('line', { x1: x(threshold), y1: trackY - 5, x2: x(threshold), y2: trackY + trackH + 5, stroke: tok('--ink-3'), 'stroke-width': 2 }),
         el('circle', { cx: x(value), cy: trackY + trackH / 2, r: 5, fill: tok('--ink'), stroke: tok('--surface'), 'stroke-width': 2 }),
@@ -485,7 +605,11 @@
       ];
       return el('svg', {
         'class': 'fig', width: W, height: H, viewBox: '0 0 ' + W + ' ' + H, role: 'img',
-        'aria-label': 'Текущее ' + fmtNum(value, 1, true) + ' при пороге ' + fmtNum(threshold, 1, true)
+        // Сторона порога словами: у полосы это единственная марка, и без неё
+        // положение читалось только цветом и геометрией.
+        'aria-label': 'Текущее ' + fmtNum(value, 1, true) + ' при пороге ' + fmtNum(threshold, 1, true) +
+          ' — ' + (value === threshold ? 'ровно на пороге'
+            : (value < threshold ? 'ниже порога на ' : 'выше порога на ') + fmtNum(Math.abs(value - threshold), 1, false))
       }, kids);
     });
     return box.node;
@@ -498,10 +622,17 @@
     var H = opts.height || 40;
     var color = opts.color || tok('--s1');
     var box = chartBox(H);
+    var dg = opts.digits == null ? 1 : opts.digits;
     var pts = (series || []).filter(function (r) { return r && isNum(+r[1]); })
       .map(function (r) { return [String(r[0]), +r[1]]; });
+    // Подпись периода занимает свою полосу ПОД графиком, а не отъедает высоту
+    // линии: ряд без единой подписи оси нельзя прочесть вообще — «скользящий IC»
+    // на этом графике охватывает 25 лет, и по картинке это было не отличить от
+    // последних двадцати четырёх месяцев, обещанных подписью карточки.
+    var LBL = 15;
     box.render(function (W) {
-      if (pts.length < 2) return el('svg', { 'class': 'fig', width: W, height: H });
+      if (pts.length < 2) return emptyFig(W, H + LBL, 'нет данных: истории меньше двух точек');
+      var Hs = H + LBL;
       var padY = 5, iw = W - 6, ih = H - padY * 2;
       var lo = Infinity, hi = -Infinity;
       pts.forEach(function (p) { lo = Math.min(lo, p[1]); hi = Math.max(hi, p[1]); });
@@ -510,24 +641,41 @@
       var y = function (v) { return padY + (1 - (v - lo) / (hi - lo)) * ih; };
       var d = pts.map(function (p, i) { return (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(p[1]).toFixed(1); }).join(' ');
       var kids = [];
-      if (opts.zero && lo < 0 && hi > 0) kids.push(el('line', { x1: 1, y1: y(0), x2: 1 + iw, y2: y(0), 'class': 'gridline' }));
+      if (opts.zero && lo < 0 && hi > 0) {
+        // Ноль — не сетка, а ось: весь смысл графика здоровья модели в том, ушёл
+        // ли IC под ноль, а классом gridline эта линия давала к поверхности 1,29
+        // и была не видна. Плюс подпись «0» — линия без подписи не отвечает,
+        // что она означает.
+        kids.push(el('line', { x1: 1, y1: y(0), x2: 1 + iw, y2: y(0), 'class': 'axisline' }));
+        kids.push(el('text', { x: 1, y: y(0) - 3, 'class': 'tick' }, [document.createTextNode('0')]));
+      }
       kids.push(el('path', { d: d, 'class': 'series', stroke: color, 'stroke-width': 1.75 }));
       var last = pts[pts.length - 1];
       kids.push(el('circle', { cx: x(pts.length - 1), cy: y(last[1]), r: 3.5, fill: color, stroke: tok('--surface'), 'stroke-width': 2 }));
+      // Даты по краям: месяц для месячных рядов, день для дневных. Шаг определяем
+      // по самому ряду, а не по вызову, — вызывающий про это ничего не сообщает.
+      var monthly = pts.length > 2 && (Date.parse(pts[pts.length - 1][0]) - Date.parse(pts[0][0])) / (pts.length - 1) > 20 * 864e5;
+      var fmtEnd = monthly ? fmtMon : fmtDay;
+      kids.push(el('text', { x: 1, y: Hs - 3, 'class': 'tick' }, [document.createTextNode(fmtEnd(pts[0][0]))]));
+      kids.push(el('text', { x: 1 + iw, y: Hs - 3, 'text-anchor': 'end', 'class': 'tick' },
+        [document.createTextNode(fmtEnd(last[0]))]));
       var svg = el('svg', {
-        'class': 'fig', width: W, height: H, viewBox: '0 0 ' + W + ' ' + H, role: 'img',
-        'aria-label': (opts.aria || 'Динамика показателя') + ': от ' + fmtNum(pts[0][1], 1, false) +
-          ' до ' + fmtNum(last[1], 1, false)
+        'class': 'fig', width: W, height: Hs, viewBox: '0 0 ' + W + ' ' + Hs, role: 'img',
+        // opts.digits тут игнорировался: карточка «Здоровье модели» просит два
+        // знака, а скринридеру объявлялось «до 0,0» при IC +0,05 — то есть ровно
+        // противоположное тому, что показано глазами рядом.
+        'aria-label': (opts.aria || 'Динамика показателя') + ', ' + fmtEnd(pts[0][0]) + ' — ' + fmtEnd(last[0]) +
+          ': от ' + fmtNum(pts[0][1], dg, false) + ' до ' + fmtNum(last[1], dg, false)
       }, kids);
       var tip = box.tip;
-      var hit = el('rect', { 'class': 'hit', x: 0, y: 0, width: W, height: H });
+      var hit = el('rect', { 'class': 'hit', x: 0, y: 0, width: W, height: Hs });
       svg.appendChild(hit);
       hit.addEventListener('pointermove', function (e) {
         var r = svg.getBoundingClientRect();
         var i = clamp(Math.round((e.clientX - r.left - 1) / iw * (pts.length - 1)), 0, pts.length - 1);
         showTip(tip, x(i), y(pts[i][1]), [
-          { title: fmtDay(pts[i][0]) },
-          { k: opts.label || 'значение', v: fmtNum(pts[i][1], opts.digits == null ? 1 : opts.digits, false) + (opts.unit || '') }
+          { title: monthly ? fmtMon(pts[i][0]) : fmtDay(pts[i][0]) },
+          { k: opts.label || 'значение', v: fmtNum(pts[i][1], dg, false) + (opts.unit || '') }
         ]);
       });
       hit.addEventListener('pointerleave', function () { hideTip(tip); });
@@ -547,7 +695,8 @@
     var box = chartBox(H);
     box.render(function (W) {
       var vals = (values || []).map(function (v) { return isNum(+v) ? +v : null; });
-      if (!vals.length) return el('svg', { 'class': 'fig', width: W, height: H });
+      if (!vals.length) return emptyFig(W, H, 'нет данных: потоки не получены');
+      if (!vals.some(isNum)) return emptyFig(W, H, 'нет данных: все месяцы пустые');
       var m = 0;
       vals.forEach(function (v) { if (isNum(v)) m = Math.max(m, Math.abs(v)); });
       if (m <= 0) m = 1;
@@ -577,7 +726,7 @@
         showTip(tip, 2 + i * ((W - 4) / vals.length) + bw / 2, y0, [
           { title: fmtMon(months[i]) },
           { k: opts.label || 'нетто', v: fmtNum(vals[i], 1, true) + (opts.unit || ''),
-            color: vals[i] >= 0 ? tok('--pos') : tok('--neg') }
+            color: vals[i] >= 0 ? tok('--pos-ink') : tok('--neg-ink') }
         ]);
       });
       hit.addEventListener('pointerleave', function () { hideTip(tip); });

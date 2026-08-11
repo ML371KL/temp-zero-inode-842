@@ -13,6 +13,7 @@ HTTP-запросов. Подпись SigV4 — это четыре HMAC-SHA256,
 
 import hashlib
 import hmac
+import http.client
 import json
 import os
 import time
@@ -118,7 +119,10 @@ def _request(method, key, body=b"", headers=None, timeout=_TIMEOUT, retries=_RET
             hdrs = {k.lower(): v for k, v in (exc.headers or {}).items()}
             try:
                 data = exc.read()
-            except OSError:
+            except (OSError, http.client.HTTPException):
+                # Исключение, поднятое ВНУТРИ обработчика, соседними except уже не
+                # ловится: обрыв тела на чтении текста ошибки улетал наружу мимо всех
+                # ретраев. Тело ошибки не стоит падения прогона — читаем как пустое.
                 data = b""
             if exc.code in (404, 412):
                 return exc.code, hdrs, data
@@ -127,7 +131,15 @@ def _request(method, key, body=b"", headers=None, timeout=_TIMEOUT, retries=_RET
                 raise R2Error(f"{method} {key}: HTTP {exc.code} "
                               f"{data[:300].decode('utf-8', 'replace')}") from exc
             last = f"HTTP {exc.code}"
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except (urllib.error.URLError, TimeoutError, OSError,
+                http.client.HTTPException) as exc:
+            # http.client.HTTPException (IncompleteRead, BadStatusLine, LineTooLong)
+            # — НЕ подкласс OSError, и без него обрыв тела ответа улетал наружу мимо
+            # ретраев: на PUT это трейсбек из publish() (который обещает исключений
+            # не выпускать), на GET lease.json — тихий no-op с ok=True и кодом 0, то
+            # есть VPS не написал ничего, а прогон отчитался успехом. Соседний
+            # lib/http.py этот класс в ретраях держит с самого начала — здесь его
+            # просто забыли.
             last = f"{type(exc).__name__}: {exc}"
         if attempt < retries:
             time.sleep(1.0 * attempt)

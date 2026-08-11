@@ -61,6 +61,16 @@ monitors_mod = _optional("pipeline.compute.monitors")
 MODES = ("intraday", "daily", "weekly", "monthly", "manual", "bootstrap", "selftest")
 QUOTE_SERIES = [("imoex", "Индекс МосБиржи"), ("rgbi", "RGBI"), ("rvi", "RVI"),
                 ("cny_tom", "CNY/RUB"), ("brent_moex", "Brent"), ("gld_tom", "Золото")]
+# Интрадей-котировки: бумага ISS → ОТДЕЛЬНЫЙ ряд стора live_*.
+#
+# ПОЧЕМУ отдельный ряд, а не точка в imoex: дневное закрытие — это то, на чём
+# посчитаны ядро и состояния (REGIME.md §2). Подложив в imoex цену середины дня,
+# мы бы подменили закрытие внутридневным значением, и фолбэк «интрадей без прошлого
+# data.json — считаем полностью» посчитал бы композит на неполном дне. live_* живут
+# сбоку, их читает только витрина котировок, а панель и валидация их не видят.
+LIVE_QUOTE_IDS = {"IMOEX": "live_imoex", "RGBI": "live_rgbi", "RVI": "live_rvi",
+                  "CNYRUB_TOM": "live_cny_tom", "GLDRUB_TOM": "live_gld_tom"}
+LIVE_PREFIX = "live_"
 SELFTEST_ASOF = "2026-08-11"  # фиксированная дата: «сегодня минус N» в проверках запрещено
 
 
@@ -199,6 +209,21 @@ def fetch_all(items, journal, bootstrap=False):
                 added += len(points)
             ms = int((time.time() - t0) * 1000)
             asof = (results[0][2] or {}).get("asof")
+            # Половина фетчеров (minfin, rosstat, orfr, moex_press, polymarket,
+            # investfunds) по контракту §0 наружу не кидает, а отдаёт отказ полем
+            # meta.status. Считать провалом только исключение — значит писать в
+            # журнал «ok» о ряде, который не собрался ни разу: три таких ряда
+            # молча простояли пустыми, и сводка отказов их не показывала.
+            bad = sorted({str((m or {}).get("status")) for _, _, m in results
+                          if (m or {}).get("status") in ("error", "manual_needed")})
+            if bad:
+                note = "; ".join(str((m or {}).get("note") or "")[:120] for _, _, m in results
+                                 if (m or {}).get("status") in ("error", "manual_needed"))
+                journal.warn("fetch", f"{sid} источник вернул {','.join(bad)} "
+                                      f"({ms}мс, точек={added}): {note}")
+                report[sid] = {"status": "error", "points": added, "ms": ms, "asof": asof,
+                               "note": note}
+                continue
             journal.line("fetch", f"{sid} ok {ms}мс точек={added} asof={asof}")
             report[sid] = {"status": "ok", "points": added, "ms": ms, "asof": asof}
         except FetchError as exc:
@@ -210,6 +235,36 @@ def fetch_all(items, journal, bootstrap=False):
             report[sid] = {"status": "error", "note": f"{type(exc).__name__}: {exc}"}
             _mark_error(sid, f"{type(exc).__name__}: {exc}")
     return report
+
+
+def fetch_live_quotes(journal):
+    """marketdata ISS для интрадей-такта: цена, которая действительно движется днём.
+
+    Раньше режим intraday опрашивал history тех же бумаг, а history внутри дня ещё
+    не содержит текущего дня — панель весь торговый день переиздавала вчерашнее
+    закрытие с новым generated_at и писала «обновлено только что». iss.intraday_quote
+    существовал, но не вызывался ниоткуда.
+    """
+    if store is None:
+        return {}
+    try:
+        iss = importlib.import_module("pipeline.fetch.iss")
+        results = _normalize(iss.intraday_quote(secs=tuple(LIVE_QUOTE_IDS), ids=LIVE_QUOTE_IDS))
+    except Exception as exc:  # noqa: BLE001 — граница изоляции, как в fetch_all
+        journal.warn("fetch", f"живые котировки: {type(exc).__name__}: {exc} "
+                              f"(витрина покажет последнее закрытие)")
+        return {}
+    out = {}
+    for sid, points, meta in results:
+        try:
+            store.upsert_points(sid, points or {}, meta or {})
+        except Exception as exc:  # noqa: BLE001
+            journal.warn("fetch", f"{sid}: {type(exc).__name__}: {exc}")
+            continue
+        out[sid] = (meta or {}).get("asof")
+    journal.line("fetch", "живые котировки: " +
+                 (", ".join(f"{k}={v}" for k, v in sorted(out.items())) or "нет"))
+    return out
 
 
 def _mark_error(sid, note):
@@ -292,16 +347,35 @@ def _asof_trading_day(now):
 
 
 def _quotes(now):
+    """Блок котировок: живая цена, если она свежее закрытия, иначе закрытие.
+
+    Изменение к вчерашнему считаем от ПОСЛЕДНЕГО ЗАКРЫТИЯ строго ДО даты живой
+    точки: сравнивать живую цену с самой собой (закрытие того же дня уже могло
+    приехать в history вечером) — значит рисовать 0% в момент, когда рынок ходит.
+    """
     out = {}
     for sid, label in QUOTE_SERIES:
         pts = _pairs(sid)
-        if not pts:
+        live = _pairs(LIVE_PREFIX + sid)
+        row = None
+        if live and (not pts or live[-1][0] >= pts[-1][0]):
+            d, v = live[-1]
+            base = [p for p in pts if p[0] < d]
+            prev = base[-1][1] if base else None
+            meta = _meta(LIVE_PREFIX + sid)
+            row = {"intraday": True, "delay_min": meta.get("delay_min"),
+                   "updatetime": meta.get("updatetime")}
+        elif pts:
+            d, v = pts[-1]
+            prev = pts[-2][1] if len(pts) > 1 else None
+            meta = _meta(sid)
+            row = {"intraday": False}
+        if row is None:
             continue
-        d, v = pts[-1]
-        prev = pts[-2][1] if len(pts) > 1 else None
-        out[sid] = {"label": label, "value": round(float(v), 4), "asof": d,
+        row.update({"label": label, "value": round(float(v), 4), "asof": d,
                     "chg_pct": (round((v / prev - 1.0) * 100.0, 2) if prev else None),
-                    "age_min": _age_min(_meta(sid).get("fetched_at"), now)}
+                    "age_min": _age_min(meta.get("fetched_at"), now)})
+        out[sid] = row
     return out
 
 
@@ -358,6 +432,36 @@ def build_payload_for_mode(mode, now, journal):
     core, states = build_full(now, journal)
     return publish_mod.build_payload(core=core, states=states, monitors=monitors,
                                      sources=sources, mode=mode, asof=asof, quotes=quotes)
+
+
+def _seed_payload(journal):
+    """Опубликованная витрина для восстановления состояния алертов на чистой машине.
+
+    Нужна только фолбэк-раннеру GHA (STATE_DIR в runner.temp, каждый прогон с нуля)
+    и первой установке: без снимка прошлого detect молчит по определению, и ровно
+    в аварии VPS телеграм-канал был глухим. На VPS состояние есть — лишнего GET к
+    бакету не делаем.
+    """
+    try:
+        if not alerts.needs_seed():
+            return None
+    except Exception as exc:  # noqa: BLE001 — состояние не читается: не наша беда
+        journal.debug("alerts", f"состояние не прочиталось: {exc}")
+        return None
+    prev = publish_mod.read_local_payload()
+    if prev:
+        return prev
+    if not r2.configured():
+        return None
+    try:
+        prev = r2.get_json(publish_mod.DATA_KEY)
+    except Exception as exc:  # noqa: BLE001 — бакет недоступен: работаем как раньше
+        journal.warn("alerts", f"опубликованный data.json не прочитан: {exc}")
+        return None
+    if prev:
+        journal.line("alerts", "состояние восстановлено из опубликованного data.json "
+                               f"(asof {prev.get('asof_trading_day')})")
+    return prev
 
 
 # ------------------------------------------------------------------ selftest
@@ -456,6 +560,8 @@ def main(argv=None):
     journal.line("plan", f"рядов к опросу {sum(1 for _, _, s in items if not s)} "
                          f"из {len(items)} (пропуск по окнам: {sum(1 for _, _, s in items if s)})")
     fetch_report = fetch_all(items, journal, bootstrap=(args.mode == "bootstrap"))
+    if args.mode == "intraday":
+        fetch_live_quotes(journal)
     failed = [sid for sid, r in fetch_report.items() if r["status"] == "error"]
     if failed:
         journal.line("fetch", f"отказов {len(failed)}: {', '.join(sorted(failed)[:8])}")
@@ -473,10 +579,23 @@ def main(argv=None):
             monitors=_monitors(now, journal), sources=_sources(now, journal),
             mode=args.mode, asof=prev.get("asof_trading_day"), quotes=_quotes(now))
 
+    # Алерты изолированы целиком: это единственный этап, который сам ничего не
+    # публикует. Раньше исключение в правиле или мусор в alerts_state.json
+    # превращали «нет уведомления» в «панель не обновилась» — прогон падал ДО
+    # publish, и systemd после трёх таких падений глушил юнит.
     events = []
     if not args.no_alerts:
-        events = alerts.run(payload, dry_run=args.dry_run, enabled=True, now=now)
-    payload["events"] = alerts.payload_events(events)
+        try:
+            events = alerts.run(payload, dry_run=args.dry_run, enabled=True, now=now,
+                                seed_payload=_seed_payload(journal))
+        except Exception as exc:  # noqa: BLE001 — граница изоляции
+            journal.warn("alerts", f"правила упали: {type(exc).__name__}: {exc} "
+                                   f"(публикацию это не останавливает)")
+    try:
+        payload["events"] = alerts.payload_events(events)
+    except Exception as exc:  # noqa: BLE001
+        journal.warn("alerts", f"лента событий не собралась: {type(exc).__name__}: {exc}")
+        payload["events"] = []
     delivered = sum(1 for e in events if e.get("delivered"))
     journal.line("alerts", f"событий {len(events)}, доставлено {delivered}" +
                  ("" if not events else ": " + "; ".join(e["kind"] for e in events)))
@@ -489,9 +608,19 @@ def main(argv=None):
                             + (f"; обрезано: {', '.join(res['trimmed'])}" if res["trimmed"] else ""))
     for err in res["errors"]:
         journal.warn("publish", err)
+    if res.get("integrity"):
+        journal.warn("publish", ("целостность payload: " if res["published"] else
+                                 "витрина НЕ опубликована, целостность: ")
+                     + "; ".join(res["integrity"]))
     if not args.no_alerts:
-        alerts.after_publish(res, dry_run=args.dry_run, enabled=True, now=now)
-    telegram.prune_markers()
+        try:
+            alerts.after_publish(res, dry_run=args.dry_run, enabled=True, now=now)
+        except Exception as exc:  # noqa: BLE001 — граница изоляции
+            journal.warn("alerts", f"санитарные события упали: {type(exc).__name__}: {exc}")
+    try:
+        telegram.prune_markers()
+    except Exception as exc:  # noqa: BLE001
+        journal.warn("alerts", f"чистка маркеров: {type(exc).__name__}: {exc}")
 
     code = 0 if res["ok"] else 2
     journal.line("done", f"режим={args.mode} за {journal.elapsed():.1f}с "

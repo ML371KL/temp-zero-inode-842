@@ -1,0 +1,45 @@
+[Unit]
+Description=MOEX Radar · недельный опрос (ИПЦ Росстата, аукционы ОФЗ, гэп выходных)
+Documentation=https://github.com/ML371KL/temp-zero-inode-842/blob/main/docs/ARCHITECTURE.md
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=3600
+StartLimitBurst=3
+
+[Service]
+# Type=exec, а не oneshot: systemd отказывается загружать oneshot с Restart= отличным
+# от no, а повтор здесь нужен — Росстат в день релиза отвечает не с первой попытки.
+Type=exec
+User=dash
+Group=dash
+WorkingDirectory=/srv/dash/repo-842
+EnvironmentFile=/usr/local/etc/moex-radar/env
+Environment=PYTHONUNBUFFERED=1
+# Этого юнита не было до 12.08.2026, и режим weekly не запускался ничем: cpi_weekly и
+# ofz_auctions стояли на значениях с бутстрапа, а тайлы при этом светились зелёным —
+# SLA считается от fetched_at, и «никто не спрашивал» выглядит там как «источник молчит».
+# Обвязка режим знала всегда (ops/moex-radar.sh: дедлайн 900 с, проверка края) — не было
+# только расписания.
+ExecStart=/usr/local/sbin/moex-radar weekly
+Restart=on-failure
+RestartSec=300
+# 240 с ожидания замка + 900 с собственного дедлайна обвязки + запас: юнит обязан
+# пережить скрипт, иначе в журнале останется запись systemd об убийстве вместо строки
+# обвязки о том, ЧТО не уложилось.
+RuntimeMaxSec=1500
+SyslogIdentifier=moex-radar-weekly
+
+StateDirectory=moex-radar
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+ReadWritePaths=/srv/dash/repo-842
+
+MemoryHigh=512M
+MemoryMax=1G
+Nice=10
+
+# '-+' обязательно: '-' — падение мостика не красит прогон, '+' — под ProtectSystem
+# мостик иначе не запишет маркер дедупа.
+ExecStopPost=-+/usr/local/sbin/dash-alert %n

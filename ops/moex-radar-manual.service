@@ -1,0 +1,46 @@
+[Unit]
+Description=MOEX Radar · ручные вводы из inputs/ (консенсус ЦБ, события, дивиденды)
+Documentation=https://github.com/ML371KL/temp-zero-inode-842/blob/main/docs/ARCHITECTURE.md
+# Сеть нужна не фетчерам (они читают файлы из чекаута), а обвязке: git fetch за свежим
+# main и публикация в R2. Без online-цели прогон стартовал бы до поднятия маршрутов и
+# работал бы кодом прошлого дня — то есть без только что закоммиченного консенсуса.
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=1800
+StartLimitBurst=3
+
+[Service]
+# Type=exec, а не oneshot: с oneshot systemd отказывается принимать Restart=on-failure.
+Type=exec
+User=dash
+Group=dash
+WorkingDirectory=/srv/dash/repo-842
+EnvironmentFile=/usr/local/etc/moex-radar/env
+Environment=PYTHONUNBUFFERED=1
+# Отдельный юнит, потому что MODES['daily'] ручные фетчеры исключает явно
+# (pipeline/lib/registry.py), а таймера под режим manual не было вовсе: коммит в
+# inputs/consensus.yml с телефона доезжал до чекаута на VPS и там оставался — тайл
+# «Дивидендный календарь» стоял пустым, а ветка «сюрприз к консенсусу» в алертах была
+# недостижима. Сам опрос стоит миллисекунды: три файла с диска, ни одного запроса в сеть.
+ExecStart=/usr/local/sbin/moex-radar manual
+Restart=on-failure
+RestartSec=120
+# 240 с ожидания замка + 1200 с дедлайна обвязки + запас. Дедлайн большой не из-за
+# фетчеров, а из-за того, что прогон в конце пересчитывает панель целиком и публикует.
+RuntimeMaxSec=1800
+SyslogIdentifier=moex-radar-manual
+
+StateDirectory=moex-radar
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+ReadWritePaths=/srv/dash/repo-842
+
+MemoryHigh=512M
+MemoryMax=1G
+Nice=10
+
+# '-+' обязательно: '-' — падение мостика не красит прогон, '+' — под ProtectSystem
+# мостик иначе не запишет маркер дедупа.
+ExecStopPost=-+/usr/local/sbin/dash-alert %n

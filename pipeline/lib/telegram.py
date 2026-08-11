@@ -23,6 +23,13 @@ API = "https://api.telegram.org"
 TIMEOUT = 15
 _SAFE_KEY = re.compile(r"[^0-9A-Za-z._=-]+")
 
+# Три исхода доставки. ПОЧЕМУ не bool: «уже отправляли» и «не доставили» — разные
+# вещи, а notify() возвращал на них одинаковый False. Из-за этого alerts.run считал
+# доставленное событие потерянным и клал его в очередь повторов: за день накануне
+# заседания ЦБ 56 интрадей-тактов забивали очередь одним и тем же cb_reminder, и
+# настоящие события (снятие облигационного флага, окно входа) в неё уже не влезали.
+SENT, DUP, FAIL = "sent", "dup", "fail"
+
 
 def state_dir():
     """STATE_DIR задаётся на VPS и в GHA; локально — .state в корне репозитория.
@@ -115,17 +122,27 @@ def send(text, silent=False, retries=2):
     return False, last
 
 
-def notify(key, text, silent=False, cooldown_hours=None):
-    """Отправить с дедупом по ключу. True — доставлено именно сейчас."""
+def deliver(key, text, silent=False, cooldown_hours=None):
+    """Отправить с дедупом по ключу: SENT (ушло сейчас) | DUP (уже отправляли) | FAIL.
+
+    Вызывающему важно отличать DUP от FAIL: на DUP событие считается доставленным
+    и в очередь повторов НЕ кладётся, на FAIL — кладётся и повторяется.
+    """
     try:
         if already_sent(key, cooldown_hours):
-            return False
+            return DUP
         ok, _err = send(text, silent=silent)
         if ok:
             _mark(key, text)
-        return ok
+            return SENT
+        return FAIL
     except Exception:  # noqa: BLE001 — контракт модуля: уведомление не роняет прогон
-        return False
+        return FAIL
+
+
+def notify(key, text, silent=False, cooldown_hours=None):
+    """Совместимость: True — сообщение ушло ИМЕННО СЕЙЧАС (DUP и FAIL дают False)."""
+    return deliver(key, text, silent=silent, cooldown_hours=cooldown_hours) == SENT
 
 
 def prune_markers(days=45):

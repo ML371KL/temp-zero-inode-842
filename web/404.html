@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ru" data-theme="">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>MOEX Radar — страницы нет</title>
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="styles.css">
+<!--
+  Этот файл существует ради КОДА ОТВЕТА, а не ради дизайна. Cloudflare Pages на путь,
+  для которого не нашлось ни функции, ни файла, отдаёт 200 и главную страницу — то есть
+  «успех» на /wrangler.toml, /.git/config, /pipeline/run.py и на любой опечатанный адрес.
+  Для человека это удобно, для программы — ложь: она просила ресурс, получила 200 и
+  разбирает вёрстку. Как только в раздаче лежит 404.html, Pages отвечает ИМ и со
+  статусом 404, и «200» снова означает «ресурс есть».
+  Ни инлайн-скрипта, ни инлайн-стилей здесь нет намеренно: страница обязана открываться
+  под тем же строгим CSP, что и панель (functions/_middleware.js), а тема без скрипта
+  берётся системная — на странице-заглушке моргание не стоит ни строчки кода.
+-->
+</head>
+<body>
+<main class="wrap">
+  <h1>Страницы нет</h1>
+  <p class="empty">Такого адреса на панели не существует. Данные лежат под
+    <code>/data/data.json</code>, сама панель — на <a href="/">главной</a>.</p>
+</main>
+</body>
+</html>

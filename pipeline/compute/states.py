@@ -13,10 +13,12 @@
 CELL_STATS получены на 2004–2026 и меняются только реколибровкой.
 """
 
+import math
+
 try:
-    from ..lib import calc, constants
+    from ..lib import calc, constants, dates as datelib
 except ImportError:
-    from lib import calc, constants
+    from lib import calc, constants, dates as datelib
 
 __all__ = ["compute_states", "cell_code"]
 
@@ -107,11 +109,23 @@ def _run_start(series, dates, j):
 
 
 def _last_z(series):
-    """(последнее значение, его z по окну 252 дня) — окно как у витринных сигналов."""
+    """(индекс, последнее значение, его z по окну 252 дня) — окно как у витринных сигналов."""
     j, v = calc.last_valid(series or [])
     if j is None:
-        return None, None
-    return v, calc.zscore_last(series[:j + 1], SIGNAL_Z_WINDOW, SIGNAL_Z_MIN)
+        return None, None, None
+    return j, v, calc.zscore_last(series[:j + 1], SIGNAL_Z_WINDOW, SIGNAL_Z_MIN)
+
+
+def _days_between(a, b):
+    """Календарных дней между двумя датами панели; None вместо исключения.
+
+    Считает lib/dates, а не datetime тут же: там разбор дат один на весь проект.
+    Глушим ошибку сознательно — возраст числа это подпись на витрине, и кривая дата
+    в одном ряду не имеет права ронять прогон (контракт §0)."""
+    try:
+        return datelib.days_between(a, b)
+    except (TypeError, ValueError, AttributeError):
+        return None
 
 
 def compute_states(panel):
@@ -154,7 +168,7 @@ def compute_states(panel):
         "since": since,
         "cell": cell,
         "distances": _distances(cols, current),
-        "active_signals": _active_signals(cols, current),
+        "active_signals": _active_signals(dates, cols, current),
         "cells": _cells(key),
         "series": _ribbon(dates, bits),
         "asof": dates[-1],
@@ -203,8 +217,14 @@ def _distances(cols, current):
 
     _, dd = calc.last_valid(cols.get("rgbi_dd") or [])
     if calc.is_num(dd):
-        thr_pct = constants.STATE_RULES["bond"]["threshold"] * 100.0
-        val = dd * 100.0
+        # rgbi_dd — ЛОГАРИФМИЧЕСКАЯ просадка (так её считала валидация, и на этой мере
+        # стоят CELL_STATS — бит трогать нельзя). Но пользователь читает «−5,9% от
+        # максимума» как просадку котировки, а котировка просела на −5,7%; в 2022-м
+        # разрыв доходил до 6 п.п. (−37,5% лог против −31,3% фактических). Поэтому в
+        # витрину отдаём обычные проценты — И значение, И порог, чтобы сравнение
+        # осталось честным: exp монотонна, момент переключения флага не сдвигается.
+        thr_pct = (math.exp(constants.STATE_RULES["bond"]["threshold"]) - 1.0) * 100.0
+        val = (math.exp(dd) - 1.0) * 100.0
         verb = "снимется" if current.get("bond") else "включится"
         out.append({
             "id": "bond", "label": constants.STATE_RULES["bond"]["label"],
@@ -237,14 +257,26 @@ def _gate_text(cond):
     return ", ".join(parts)
 
 
-def _active_signals(cols, current):
+def _active_signals(dates, cols, current):
     """Сигналы второго ряда, включённые ТЕКУЩЕЙ ячейкой (constants.SECOND_LAYER).
 
     Вердикт («за лонг» / «против лонга») — витринная нормировка: знак сигнала,
     умноженный на его z по 252 дням. Это НЕ прогноз доходности и не то, на чём
     считался IC: у сигналов второго ряда доказано направление в своём состоянии,
     а не сила на конкретном уровне.
+
+    Каждая запись датируется (asof/lag_days), и вот почему это не косметика:
+    futoi_z120 живёт на бесплатном ISS, который публикует позицию физлиц с задержкой
+    ~14 дней, а FFILL тянет последнее наблюдение ещё на 3 торговых дня — показанное
+    число вообще не соответствует ни одному наблюдению, но подписано «сейчас».
+    ВАЖНО: вердикт по возрасту НЕ гасим. SLA источника (registry: iss_daily = 26 ч)
+    меряет свежесть ВЫКАЧКИ, а не возраст данных; порог по нему срабатывал бы всегда
+    и навсегда убрал бы futoi с панели в 60% месяцев истории — это не датирование,
+    а удаление сигнала. Дело витрины — показать дату, дело пользователя — учесть её.
+    asof — последний день ПАНЕЛИ, где сигнал определён; у протянутых ffill'ом рядов
+    он на несколько дней новее, чем asof самого источника на тайле монитора.
     """
+    last_day = dates[-1] if dates else None
     out = []
     for sig in constants.SECOND_LAYER:
         active = _gate_ok(sig.get("when"), current)
@@ -254,7 +286,9 @@ def _active_signals(cols, current):
             via = sig["alt_when"] if active else via
         if not active:
             continue
-        value, z = _last_z(cols.get(sig["id"]))
+        j, value, z = _last_z(cols.get(sig["id"]))
+        asof = dates[j] if (j is not None and j < len(dates)) else None
+        lag_days = _days_between(asof, last_day) if (asof and last_day) else None
         contrib = sig["sign"] * z if calc.is_num(z) else None
         if contrib is None:
             verdict = "нет данных"
@@ -269,6 +303,8 @@ def _active_signals(cols, current):
             "sign": sig["sign"],
             "value": round(value, 4) if calc.is_num(value) else None,
             "z": round(z, 2) if calc.is_num(z) else None,
+            "asof": asof,
+            "lag_days": lag_days,
             "verdict": verdict,
             "why": sig.get("why", ""),
             "gate": _gate_text(via),

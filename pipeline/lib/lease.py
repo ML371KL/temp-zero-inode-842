@@ -80,7 +80,11 @@ def can_write(wid=None, role=None, now=None):
         return True, "лиз уже у GHA"
     age = age_seconds(lease, now)
     ttl = lease.get("ttl_seconds")
-    ttl = int(ttl) if isinstance(ttl, (int, float)) and ttl > 0 else DEFAULT_TTL
+    # bool из JSON («ttl_seconds": true») — это isinstance(..., int) и True > 0, то
+    # есть TTL длиной РОВНО СЕКУНДУ: heartbeat живого VPS мгновенно «протухает» и
+    # фолбэк начинает писать параллельно — ровно то, против чего §5 и написан.
+    ttl = (int(ttl) if isinstance(ttl, (int, float)) and not isinstance(ttl, bool) and ttl > 0
+           else DEFAULT_TTL)
     if age is None:
         return True, "в лизе нет heartbeat — считаем его протухшим"
     if age > ttl:

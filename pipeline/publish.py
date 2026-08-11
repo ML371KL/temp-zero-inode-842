@@ -190,6 +190,26 @@ def fit_size(payload, limit=MAX_BYTES):
     return data, cut
 
 
+# ---------------------------------------------------------------- целостность
+
+def check_payload(payload):
+    """Пусто там, где обязано быть число. Пустой список = витрину можно публиковать.
+
+    ПОЧЕМУ проверка нужна: неполный стор (восстановление из обрезанной копии,
+    оборванная запись, ручная чистка raw/) даёт панель со словами «нет данных»
+    вместо вердикта, и при этом ВСЁ зелёное — фетч прошёл, источники ok, health
+    смотрит только на 'dead', сторож видит свежий Last-Modified. Узнавалось это
+    глазами на самой панели.
+    """
+    payload = payload or {}
+    problems = []
+    if (payload.get("core") or {}).get("value") is None:
+        problems.append("ядро пустое (core.value = null)")
+    if not (payload.get("verdict") or {}).get("cell_code"):
+        problems.append("вердикт пуст (verdict.cell_code = null)")
+    return problems
+
+
 # -------------------------------------------------------------------- история
 
 def _series_pairs(store, sid):
@@ -299,15 +319,52 @@ def publish(payload, mode="daily", store=None, dry_run=False, history=None):
     """
     result = {"ok": False, "published": False, "reason": None, "bytes": 0,
               "objects": [], "errors": [], "trimmed": [], "lease_ok": True,
-              "lease_reason": None, "mode": mode}
+              "lease_reason": None, "mode": mode, "limit": MAX_BYTES,
+              "oversize": False, "integrity": []}
+
+    # Прошлую витрину читаем ДО того, как перезапишем локальную копию: она же —
+    # эталон для проверки целостности (не подсовываем ли мы пустоту поверх числа).
+    previous = read_local_payload()
+    problems = check_payload(payload)
+    result["integrity"] = problems
+
+    # История собирается ДО обрезки: fit_size меняет payload на месте, и прореженные
+    # ядро с состояниями уезжали в history/daily.json — объект, который панель
+    # называет «полной историей». Заметно только за 250 КБ, поэтому и не всплывало.
+    hist = history if history is not None else build_history(store, payload)
+
     data, cut = fit_size(payload)
     result["bytes"], result["trimmed"] = len(data), cut
     if len(data) > MAX_BYTES:
         # Публикуем всё равно: тяжёлая панель лучше вчерашней. Но это состояние
-        # обязано быть громким — лестницу обрезки пора чинить.
+        # обязано быть громким — лестницу обрезки пора чинить (событие шлёт
+        # alerts.after_publish по этому флагу).
+        result["oversize"] = True
         result["errors"].append(f"payload {len(data)} Б больше лимита {MAX_BYTES} Б после обрезки")
 
-    hist = history if history is not None else build_history(store, payload)
+    if problems:
+        result["errors"] += problems
+        result["reason"] = "целостность: " + "; ".join(problems)
+        if previous is None and not dry_run and r2.configured():
+            # Локальной копии нет только у раннера с пустым STATE_DIR (фолбэк GHA).
+            # Прежде чем положить «нет данных» поверх живой витрины, спрашиваем бакет:
+            # иначе подмена писателя затирает хорошую панель ровно в аварии.
+            try:
+                previous = r2.get_json(DATA_KEY)
+            except (r2.R2Error, OSError, ValueError) as exc:
+                result["errors"].append(f"чтение {DATA_KEY}: {exc}")
+        # Регрессия: вчера число было, сегодня null. Публиковать НЕЛЬЗЯ — иначе
+        # авария конвейера доедет до читателя как «нет данных» и станет неотличима
+        # от рыночного состояния. Локальную копию тоже не трогаем: из неё интрадей
+        # берёт ядро и состояния, а следующий прогон — эталон целостности.
+        known = set(check_payload(previous)) if isinstance(previous, dict) else None
+        if known is not None and [p for p in problems if p not in known]:
+            try:
+                _write_local(DATA_KEY + ".rejected", data)
+            except OSError as exc:
+                result["errors"].append(f"локальная копия: {exc}")
+            return result
+
     try:
         # Локальная раскладка повторяет бакет: фолбэк-раннер и отладка читают
         # те же пути, что фронт, — иначе расхождение вылезает в самый неудобный момент.
@@ -317,7 +374,9 @@ def publish(payload, mode="daily", store=None, dry_run=False, history=None):
         result["errors"].append(f"локальная копия: {exc}")
 
     if dry_run:
-        result.update(ok=True, reason="dry-run: в R2 не пишем")
+        # ok=False при пустом ядре/вердикте и в сухом прогоне: проверка «на посмотреть»
+        # обязана краснеть на том же, на чём покраснеет боевая.
+        result.update(ok=not problems, reason=result["reason"] or "dry-run: в R2 не пишем")
         return result
     if not r2.configured():
         result["reason"] = "R2 не сконфигурирован"
@@ -331,14 +390,15 @@ def publish(payload, mode="daily", store=None, dry_run=False, history=None):
     result["lease_reason"] = why
     if not allowed:
         # Не наша очередь писать — это НЕ ошибка прогона (CONTRACT §5).
-        result.update(ok=True, lease_ok=False, reason=f"лиз: {why}")
+        result.update(ok=not problems, lease_ok=False,
+                      reason=result["reason"] or f"лиз: {why}")
         return result
 
     try:
         r2.put(DATA_KEY, data, "application/json; charset=utf-8",
                cache_control="public, max-age=60")
         result["objects"].append(DATA_KEY)
-        result.update(ok=True, published=True, reason=why)
+        result.update(ok=not problems, published=True, reason=result["reason"] or why)
     except (r2.R2Error, OSError, ValueError) as exc:
         result["reason"] = f"data.json: {exc}"
         result["errors"].append(result["reason"])
@@ -350,18 +410,30 @@ def publish(payload, mode="daily", store=None, dry_run=False, history=None):
     except (r2.R2Error, OSError, ValueError) as exc:
         result["errors"].append(f"{HISTORY_DAILY_KEY}: {exc}")
 
+    # «Объекта нет» и «прочитать не удалось» — РАЗНЫЕ вещи. get_json отдаёт None
+    # только на 404; на 503 и на битом JSON он кидает. Раньше исключение приводило
+    # к prev=None, и лента заголовков (до 200 записей × 14 тайлов) перезаписывалась
+    # одной сегодняшней записью — необратимо, потому что локальная копия пишется
+    # уже урезанной. Не прочитали — шаг ПРОПУСКАЕМ, ошибка остаётся в errors.
+    prev, prev_ok = None, True
     try:
         prev = r2.get_json(HISTORY_MONITORS_KEY)
     except (r2.R2Error, OSError, ValueError) as exc:
-        prev = None
-        result["errors"].append(f"чтение {HISTORY_MONITORS_KEY}: {exc}")
-    mon_hist = build_monitors_history(payload.get("monitors"), prev if isinstance(prev, dict) else None)
-    try:
-        r2.put_json(HISTORY_MONITORS_KEY, mon_hist, cache_control="public, max-age=600")
-        result["objects"].append(HISTORY_MONITORS_KEY)
-        _write_local(HISTORY_MONITORS_KEY, mon_hist)
-    except (r2.R2Error, OSError, ValueError) as exc:
-        result["errors"].append(f"{HISTORY_MONITORS_KEY}: {exc}")
+        prev_ok = False
+        result["errors"].append(f"чтение {HISTORY_MONITORS_KEY}: {exc} — историю мониторов "
+                                f"в этот раз не трогаем")
+    if prev_ok:
+        mon_hist = build_monitors_history(payload.get("monitors"),
+                                          prev if isinstance(prev, dict) else None)
+        # Между интрадей-тактами объект байт-в-байт тот же (≈57 раз в сутки): лишний
+        # PUT — это лишняя экспозиция к сбою записи, а пользы от него нет.
+        if mon_hist != prev:
+            try:
+                r2.put_json(HISTORY_MONITORS_KEY, mon_hist, cache_control="public, max-age=600")
+                result["objects"].append(HISTORY_MONITORS_KEY)
+                _write_local(HISTORY_MONITORS_KEY, mon_hist)
+            except (r2.R2Error, OSError, ValueError) as exc:
+                result["errors"].append(f"{HISTORY_MONITORS_KEY}: {exc}")
 
     result["raw_mirrored"] = _mirror_raw(store, result["errors"])
 

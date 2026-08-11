@@ -28,6 +28,11 @@ FUTOI_ROW_CAP = 1000  # жёсткий предел ответа analyticalprodu
 
 # id рядов, которые нельзя вывести из тикера (registry.SERIES знает их как cny_tom/gld_tom)
 SELT_IDS = {"CNYRUB_TOM": "cny_tom", "GLDRUB_TOM": "gld_tom", "USD000UTSTOM": "usd_tom"}
+# Единица зависит от инструмента, а не от рынка: GLDRUB_TOM котируется в рублях за
+# ГРАММ, а не за штуку. Объявленная единица закрепляется в сторе НАВСЕГДА (store
+# .upsert_points не перезаписывает заполненный unit), поэтому «rub» для золота
+# всплыл бы только после bootstrap в чистый стор — и уже неисправимо.
+SELT_UNITS = {"GLDRUB_TOM": "rub_g"}
 
 # Сроки КБД, которые кладём в стор. Имена — из docs/CONTRACT.md §2 (zcyc_y1/y2/y10),
 # полугодовой срок пишем как zcyc_y0_5: точка в id пошла бы в имя файла и в ключ R2.
@@ -114,6 +119,29 @@ def _num(row, idx, name):
     return float(value)
 
 
+def _window(frm, till):
+    """Границы запрошенного окна строками — для отсева дат, которых мы не просили.
+
+    Даты у разных фетчеров лежат то строками, то datetime.date; сравнивать их
+    напрямую нельзя (date <= str — TypeError), поэтому нормализуем один раз на
+    вызов, а не на каждую строку ответа.
+    """
+    return dates.fmt_date(frm), dates.fmt_date(till)
+
+
+def _in_window(day, lo, hi):
+    """Точка из ответа обязана лежать в ЗАПРОШЕННОМ окне.
+
+    Грабля дорогая и тихая: сегодня ISS фильтрует по from/till на сервере, но ОДНА
+    битая строка (опечатка года в TRADEDATE) кладёт в ряд дату из будущего —
+    last_date уезжает в 2099-й, следующее окно получается перевёрнутым (from > till),
+    ISS отвечает пустым списком, empty_is_fatal при наполненном сторе молчит, и ряд
+    навсегда замирает со status=ok. Лечится только ручным bootstrap, а видно не по
+    чему: SLA считается по fetched_at, который обновляется каждый прогон.
+    """
+    return lo <= str(day)[:10] <= hi
+
+
 # ------------------------------------------------------------------- индексы
 def _index_series(sec, field, series_id, unit, default_start, drop_zero=False,
                   start=None, end=None, bootstrap=False):
@@ -125,11 +153,15 @@ def _index_series(sec, field, series_id, unit, default_start, drop_zero=False,
         {"from": frm, "till": till},
         columns=["TRADEDATE", "CLOSE", "VALUE", "YIELD"])
     idx = _colmap(cols)
+    lo, hi = _window(frm, till)
     points = {}
     for row in rows:
         day = row[idx["TRADEDATE"]] if "TRADEDATE" in idx else None
         value = _num(row, idx, field)
         if not day or value is None:
+            continue
+        if not _in_window(day, lo, hi):
+            http.LOG(f"{sid}: дата {day} вне окна {lo}..{hi} — строку отбросил")
             continue
         # У ценовых индексов YIELD приходит нулём-заглушкой: для облигационного
         # индекса доходность 0 невозможна, значит это «нет данных», а не значение.
@@ -171,6 +203,7 @@ def selt(sec="CNYRUB_TOM", series_id=None, start=None, end=None, bootstrap=False
         {"from": frm, "till": till},
         columns=["TRADEDATE", "CLOSE", "WAPRICE"])
     idx = _colmap(cols)
+    lo, hi = _window(frm, till)
     points = {}
     for row in rows:
         day = row[idx["TRADEDATE"]] if "TRADEDATE" in idx else None
@@ -178,11 +211,12 @@ def selt(sec="CNYRUB_TOM", series_id=None, start=None, end=None, bootstrap=False
         value = _num(row, idx, "CLOSE")
         if value is None:
             value = _num(row, idx, "WAPRICE")
-        if day and value is not None:
+        if day and value is not None and _in_window(day, lo, hi):
             points[str(day)] = value
     if not points and empty_is_fatal(sid):
         raise FetchError(f"ISS: пусто по {sec} за {frm}..{till}", url=url)
-    return sid, points, make_meta("iss", url, points, unit="rub", rows=len(rows), secid=sec)
+    return sid, points, make_meta("iss", url, points, unit=SELT_UNITS.get(sec.upper(), "rub"),
+                                  rows=len(rows), secid=sec)
 
 
 # ------------------------------------------------------------------ КБД (zcyc)
@@ -206,7 +240,15 @@ def zcyc(start=None, end=None, max_days=None, bootstrap=False):
         frm = dates.parse_date("2015-01-05")  # глубина панели валидации
     till = dates.parse_date(end) if end else dates.today_msk()
 
-    days = [d for d in dates.iter_trading_days(frm, till)]
+    # Календарь запроса — не только эвристика «будни минус праздники»: МосБиржа с 2025
+    # торгует по субботам, и КБД за такую субботу не запрашивался НИКОГДА (в ряду
+    # оставалась дыра, а панель показывала пятничную кривую — на 2024-12-28 ошибка
+    # наклона 0,45 п.п.). Инкрементальная догрузка такую дыру не закрывает, поэтому
+    # берём ещё и дни, в которые индекс реально торговался.
+    traded = {d for d, v in ((store.load_series("imoex") or {}).get("points") or {}).items()
+              if v is not None}
+    days = [d for d in dates.iter_days(frm, till)
+            if dates.is_trading_day(d) or dates.fmt_date(d) in traded]
     if max_days:
         days = days[-int(max_days):]
     per_tenor = {sid: {} for sid in ids}
@@ -267,25 +309,44 @@ def futoi(ticker="MX", series_prefix=None, start=None, end=None, chunk_days=3,
            for grp, gsuf in FUTOI_GROUPS.items()
            for field, fsuf in FUTOI_FIELDS.items()}
     anchor = f"{prefix}_pos"
-    frm = dates.parse_date(start) if start else dates.parse_date(
-        incremental_start(anchor, RETRO_DAYS, "2020-06-01", bootstrap))
+    known = [store.last_date(sid) for sid in ids.values()]
+    have = [d for d in known if d]
+    if start:
+        frm = dates.parse_date(start)
+    elif have and not bootstrap:
+        # Окно считаем по САМОМУ отстающему подряду, а не по якорю futoi_*_pos:
+        # run.py пишет ряды по одному, и падение на середине цикла оставляет часть
+        # id позади — пятидневное окно от якоря такую дыру не догоняет никогда.
+        # Уходить при этом в default_start (как делает zcyc) НЕЛЬЗЯ: полный долив
+        # futoi с 2020-06-01 — это ~750 окон по 4 запроса (замер ~2000 с) против
+        # дедлайна суточного прогона в 900 с. Историю доливает только bootstrap.
+        frm = dates.add_days(min(have), -RETRO_DAYS)
+        if len(have) < len(ids):
+            http.LOG(f"futoi {ticker}: подрядов без истории {len(ids) - len(have)} — "
+                     f"их прошлое дольёт только bootstrap")
+    else:
+        frm = dates.parse_date(incremental_start(anchor, RETRO_DAYS, "2020-06-01", bootstrap))
     till = dates.parse_date(end) if end else dates.today_msk()
 
     best = {}   # (date, clgroup) -> (ключ сортировки, строка, idx)
     url = None
     day = frm
+    lo, hi = _window(frm, till)
+    asked = failed = 0
     while day <= till:
         chunk_end = min(dates.add_days(day, max(1, chunk_days) - 1), till)
-        rows, cols, url = _futoi_window(ticker, day, chunk_end)
+        rows, cols, url, bad = _futoi_window(ticker, day, chunk_end)
+        asked, failed = asked + 1, failed + bad
         if len(rows) >= FUTOI_ROW_CAP:
             # Ответ обрезан по 1000 строк — окно надо сузить до одного дня,
             # иначе тихо потеряем начало периода.
             rows, cols = [], []
             for one in dates.iter_days(day, chunk_end):
-                r, c, url = _futoi_window(ticker, one, one)
+                r, c, url, bad = _futoi_window(ticker, one, one)
+                asked, failed = asked + 1, failed + bad
                 rows.extend(r)
                 cols = cols or c
-        _futoi_absorb(rows, cols, best)
+        _futoi_absorb(rows, cols, best, lo, hi)
         day = dates.add_days(chunk_end, 1)
 
     points = {sid: {} for sid in ids.values()}
@@ -301,29 +362,41 @@ def futoi(ticker="MX", series_prefix=None, start=None, end=None, chunk_days=3,
         raise FetchError(f"ISS: futoi {ticker} пуст за {dates.fmt_date(frm)}..{dates.fmt_date(till)}",
                          url=url)
     # Бесплатный ISS отдаёт futoi с задержкой ~14 дней (см. registry) — «нет свежего»
-    # это не отказ источника, а его нормальный режим.
+    # это не отказ источника, а его нормальный режим. А вот отказ HTTP — отказ, и он
+    # обязан быть виден: раньше _futoi_window глотал любой FetchError, и прогон, где
+    # 7 окон из 7 вернули 403, рапортовал ok с этой же успокаивающей запиской.
     note = "бесплатный ISS публикует с задержкой ~14 дней"
+    status = "ok"
+    if failed:
+        note = f"окон опрошено {asked}, отказов {failed}; " + note
+        # Разделяем «источник молчит по расписанию» и «источник не отвечает»:
+        # ретро-окно всегда переотдаёт уже известные дни, поэтому ноль точек при
+        # хотя бы одном отказе — это отказ, а не нормальный лаг (CONTRACT §7).
+        if failed >= asked or not filled:
+            status = "error"
     # holders_* — число ЛИЦ, остальное — контракты: разные единицы в одном наборе
     # рядов, и путать их нельзя (из них считается средний размер позиции).
     return [(sid, points[sid],
-             make_meta("iss", url, points[sid], note=note, ticker=ticker,
+             make_meta("iss", url, points[sid], status=status, note=note, ticker=ticker,
+                       fetch_failed=failed,
                        unit="persons" if "holders" in sid else "contracts"))
             for sid in sorted(points)]
 
 
 def _futoi_window(ticker, day_from, day_till):
+    """(строки, колонки, url, 1 если запрос провалился)."""
     url = _url(f"analyticalproducts/futoi/securities/{ticker}",
                {"from": dates.fmt_date(day_from), "till": dates.fmt_date(day_till)})
     try:
         payload = http.get_json(url)
     except FetchError as e:
         http.LOG(f"futoi {ticker} {day_from}..{day_till}: {e}")
-        return [], [], url
+        return [], [], url, 1
     block = payload.get("futoi") or {}
-    return (block.get("data") or []), list(block.get("columns") or []), url
+    return (block.get("data") or []), list(block.get("columns") or []), url, 0
 
 
-def _futoi_absorb(rows, cols, best):
+def _futoi_absorb(rows, cols, best, lo=None, hi=None):
     if not rows or not cols:
         return
     idx = _colmap(cols)
@@ -334,6 +407,8 @@ def _futoi_absorb(rows, cols, best):
         tradedate, grp = str(row[pos_date]), str(row[pos_grp])
         if grp not in FUTOI_GROUPS:
             continue
+        if lo is not None and not _in_window(tradedate, lo, hi):
+            continue  # дата вне запрошенного окна — см. _in_window
         order = _num(row, idx, "seqnum")
         if order is None:
             pos_time = idx.get("tradetime", idx.get("systime"))
@@ -345,8 +420,16 @@ def _futoi_absorb(rows, cols, best):
 
 
 def _cmp_key(value):
-    """Числа и времена в одном сравнении: seqnum есть не всегда."""
-    return (0, float(value), "") if isinstance(value, (int, float)) else (1, 0.0, str(value))
+    """Числа и времена в одном сравнении: seqnum есть не всегда.
+
+    Строка со seqnum ВСЕГДА старше строки без него. Раньше ключ переключал типы
+    так, что любое время побеждало любой seqnum ((1,0.0,'10:00') > (0,999999,'')),
+    и при смешанной схеме одного дня — а она у ISS уже плавала — в ряд уезжал
+    утренний срез вместо позиции на конец сессии (разница внутри дня до 12%).
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return (0, 0.0, str(value if value is not None else ""))
+    return (1, float(value), "")
 
 
 # --------------------------------------------------------------- ширина рынка
@@ -362,7 +445,7 @@ def breadth(tickers=None, start=None, end=None, bootstrap=False):
     """
     names = list(tickers or BREADTH_TICKERS)
     till = end or dates.fmt_date(dates.today_msk())
-    merged, fresh, urls, missing = {}, {}, {}, []
+    merged, fresh, urls, missing, failed = {}, {}, {}, [], []
     for ticker in names:
         sid = f"px_{ticker.lower()}"
         frm = start or incremental_start(sid, RETRO_DAYS, "2014-01-01", bootstrap)
@@ -374,9 +457,14 @@ def breadth(tickers=None, start=None, end=None, bootstrap=False):
                 columns=["TRADEDATE", "CLOSE", "LEGALCLOSEPRICE"])
         except FetchError as e:
             http.LOG(f"breadth {ticker}: {e}")
+            # Отказ HTTP и делистинг — разные вещи: первый портит СОСТАВ корзины на
+            # свежем дне, второй только сужает её навсегда. Раньше оба тонули в
+            # http.LOG, и ширина молча считалась по другим бумагам.
+            failed.append(ticker)
             cols, rows = [], []
         urls[ticker] = url
         idx = _colmap(cols)
+        lo, hi = _window(frm, till)
         new = {}
         for row in rows:
             day = row[idx["TRADEDATE"]] if "TRADEDATE" in idx else None
@@ -385,7 +473,7 @@ def breadth(tickers=None, start=None, end=None, bootstrap=False):
             value = _num(row, idx, "CLOSE")
             if value is None:
                 value = _num(row, idx, "LEGALCLOSEPRICE")
-            if day and value is not None:
+            if day and value is not None and _in_window(day, lo, hi):
                 new[str(day)] = value
         stored = (store.load_series(sid) or {}).get("points") or {}
         history = {k: v for k, v in stored.items() if v is not None}
@@ -404,13 +492,32 @@ def breadth(tickers=None, start=None, end=None, bootstrap=False):
         raise FetchError(f"ISS: ширина рынка — данных всего по {len(merged)} бумагам",
                          url=urls.get(names[0]))
 
-    agg = _pct_above_ma(merged)
-    note = f"нет данных по {len(missing)}: {','.join(missing)}" if missing else None
+    tally = _ma_tally(merged)
+    agg = _pct_from_tally(tally)
+    agg, dropped = _drop_thin_tail(agg, tally, bool(failed))
+    notes, status = [], "ok"
+    if missing:
+        notes.append(f"нет данных по {len(missing)}: {','.join(missing)}")
+    if failed:
+        notes.append(f"HTTP-отказов {len(failed)}: {','.join(failed[:10])}")
+        # Отказ ПО ВСЕМ бумагам — это отказ источника, а ряд при этом отдаётся из
+        # кэша: контракт §7 требует показать это статусом, иначе тайл зелёный, а
+        # alerts._source_stale молчит.
+        if len(failed) >= len(names):
+            status = "error"
+    if dropped:
+        notes.append(f"недобранный день {dropped} в агрегат не положен")
+    # Число бумаг в meta — ФАКТИЧЕСКОЕ покрытие последней точки, а не размер списка:
+    # раньше здесь стоял len(merged) и в проде писалось «45» при реальных 42
+    # (три бумаги делистнуты), то есть поле врало даже без единого отказа.
+    covered = tally.get(max(agg), (0, 0))[1] if agg else 0
     # В meta агрегата кладём шаблон запроса, а не URL последней бумаги: иначе
     # источник ряда читается как «ширина рынка = BSPB».
     agg_url = f"{ISS}/history/engines/stock/markets/shares/boards/TQBR/securities/{{ticker}}.json"
-    out = [("breadth", agg, make_meta("iss", agg_url, agg, unit="share", note=note,
-                                      tickers=len(merged)))]
+    out = [("breadth", agg, make_meta("iss", agg_url, agg, unit="share", status=status,
+                                      note="; ".join(notes) or None,
+                                      tickers=covered, tickers_basket=len(merged),
+                                      tickers_asked=len(names), fetch_failed=len(failed)))]
     for ticker, points in fresh.items():
         sid = f"px_{ticker.lower()}"
         out.append((sid, points, make_meta("iss", urls.get(ticker), points, unit="rub",
@@ -418,9 +525,12 @@ def breadth(tickers=None, start=None, end=None, bootstrap=False):
     return out
 
 
-def _pct_above_ma(px_by_ticker, window=BREADTH_MA, min_obs=BREADTH_MIN_OBS,
-                  min_tickers=BREADTH_MIN_TICKERS):
-    tally = {}  # дата -> [сколько выше MA, сколько посчиталось]
+def _ma_tally(px_by_ticker, window=BREADTH_MA, min_obs=BREADTH_MIN_OBS):
+    """дата -> [сколько бумаг выше своей MA, сколько бумаг вообще посчиталось].
+
+    Второе число — покрытие дня; без него отказ части бумаг неотличим от нормы.
+    """
+    tally = {}
     for series in px_by_ticker.values():
         days = sorted(series)
         values = [series[d] for d in days]
@@ -436,8 +546,39 @@ def _pct_above_ma(px_by_ticker, window=BREADTH_MA, min_obs=BREADTH_MIN_OBS,
             slot[1] += 1
             if values[i] > running / count:
                 slot[0] += 1
+    return tally
+
+
+def _pct_from_tally(tally, min_tickers=BREADTH_MIN_TICKERS):
     return {day: above / total for day, (above, total) in tally.items()
             if total >= min_tickers}
+
+
+def _pct_above_ma(px_by_ticker, window=BREADTH_MA, min_obs=BREADTH_MIN_OBS,
+                  min_tickers=BREADTH_MIN_TICKERS):
+    """Доля бумаг выше своей MA по дням (порог покрытия — min_tickers)."""
+    return _pct_from_tally(_ma_tally(px_by_ticker, window, min_obs), min_tickers)
+
+
+def _drop_thin_tail(agg, tally, had_failures, keep=0.9, look_back=5):
+    """Убрать САМЫЙ СВЕЖИЙ день, если он недобран из-за отказов HTTP.
+
+    Порог BREADTH_MIN_TICKERS ловит только совсем пустые дни: при 20 живых бумагах
+    из 42 значение считается и публикуется как настоящее (замер: отклонение до
+    17 п.п. при рассеянных отказах). Жёстко требовать «сегодня N бумаг» нельзя —
+    в биржевой праздник свежих строк нет ни у кого и ряд бы краснел на ровном месте,
+    поэтому сравниваем покрытие последнего дня с его же недавним уровнем и только
+    когда отказы РЕАЛЬНО были. Прошлые дни не трогаем: их следующий прогон
+    пересчитает по полной корзине (агрегат каждый раз считается по всей истории).
+    """
+    if not agg or not had_failures:
+        return agg, None
+    days = sorted(agg)
+    last = days[-1]
+    prev = [tally[d][1] for d in days[-1 - look_back:-1]]
+    if not prev or tally[last][1] >= keep * max(prev):
+        return agg, None
+    return {d: v for d, v in agg.items() if d != last}, last
 
 
 # ------------------------------------------------------------------- интрадей
@@ -504,15 +645,25 @@ def _quote_value(row, idx, is_fx):
 
 def _quote_date(row, idx):
     """Какой датой класть живую котировку. Дату берём у биржи, а не у себя:
-    после полуночи МСК и в вечернюю сессию «сегодня» у нас и у ISS разные."""
+    после полуночи МСК и в вечернюю сессию «сегодня» у нас и у ISS разные.
+
+    Но не дальше завтрашнего дня: интрадей пишет в те же imoex/cny_tom, по которым
+    строится календарь панели, и дата из будущего заморозила бы ряд навсегда
+    (см. _in_window). Один день вперёд оставляем — это и есть вечерняя сессия.
+    """
+    horizon = dates.fmt_date(dates.add_days(dates.today_msk(), 1))
     for name in ("TRADEDATE", "TRADE_SESSION_DATE", "SYSTIME"):
         raw = _cell(row, idx, name)
         if not raw:
             continue
         try:
-            return dates.fmt_date(str(raw)[:10])
+            day = dates.fmt_date(str(raw)[:10])
         except ValueError:
             continue
+        if day > horizon:
+            http.LOG(f"интрадей: {name}={raw} дальше {horizon} — беру свою дату")
+            continue
+        return day
     return dates.fmt_date(dates.today_msk())
 
 
@@ -546,13 +697,14 @@ def futures_br(series_id="brent_moex", assetcode="BR", start=None, end=None,
         {"from": dates.fmt_date(frm), "till": dates.fmt_date(till)},
         columns=["TRADEDATE", "CLOSE", "SETTLEPRICE"])
     idx = _colmap(cols)
+    lo, hi = _window(frm, till)   # frm/till здесь datetime.date — сравнивать со строкой нельзя
     points = {}
     for row in rows:
         day = row[idx["TRADEDATE"]] if "TRADEDATE" in idx else None
         value = _num(row, idx, "CLOSE")
         if value is None:
             value = _num(row, idx, "SETTLEPRICE")
-        if day and value is not None:
+        if day and value is not None and _in_window(day, lo, hi):
             points[str(day)] = value
     if not points and empty_is_fatal(series_id):
         raise FetchError(f"ISS: пусто по фьючерсу {secid}", url=url)

@@ -92,7 +92,10 @@ class TestGhaFallback(LeaseCase):
         self.assertIn("heartbeat", why)
 
     def test_broken_ttl_falls_back_to_default(self):
-        for bad in (0, -1, "полтора часа", None):
+        # True — не «единичка»: isinstance(True, int) истинно, True > 0 тоже, и
+        # ttl_seconds:true из чужого сериализатора давал TTL длиной РОВНО СЕКУНДУ —
+        # фолбэк начинал писать параллельно с живым VPS (нарушение §5).
+        for bad in (0, -1, True, "полтора часа", None):
             with self.subTest(ttl=bad):
                 self.with_lease({"writer": "vps", "holder_id": "vps:radar",
                                  "heartbeat": stamp(30), "ttl_seconds": bad})

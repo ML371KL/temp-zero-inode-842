@@ -16,6 +16,17 @@
 import glob
 import sys
 
+# Консоль Windows по умолчанию cp1252, и русский вывод роняет линтер с
+# UnicodeEncodeError ещё до того, как он успеет сказать «чисто»: код возврата 1
+# неотличим от «нашлись проблемы», а трейсбек читается как поломка обёрток. Ловушка
+# та же, что в pipeline/run.py и ops/seed_store.py (грабля №5 в docs/DEPLOY.md), и на
+# раннере Ubuntu она невидима — там локаль UTF-8, и линтер всегда зелёный.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 
 def find_bad_continuations(text):
     """-> [(номер строки, текст)] для комментариев сразу после переноса.

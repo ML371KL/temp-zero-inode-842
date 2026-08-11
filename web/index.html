@@ -22,8 +22,12 @@
 
 <header class="top">
   <div class="top__in">
+    <!-- Именно h1, а не span: на странице не было ни одного заголовка первого
+         уровня, дерево начиналось с h2 «Ядро», и скринридер при навигации по
+         заголовкам не находил ни имени панели, ни её главного вывода. Вид не
+         меняется — размер и начертание задаёт класс, а не тег. -->
     <div class="brand">
-      <span class="brand__name">MOEX&nbsp;Radar</span>
+      <h1 class="brand__name">MOEX&nbsp;Radar</h1>
       <span class="brand__sub" id="asof">загрузка…</span>
     </div>
     <span class="top__spacer"></span>

@@ -84,9 +84,29 @@ jobs:
             # главной страницы — если сюда вернулось 200, значит функция не доехала,
             # и всякий, кто разбирает /data/* как JSON, сломается на вёрстке.
             missing=$(curl -s -o /dev/null -w '%{http_code}' "$base/data/nope.json" || true)
+            # Проверка `/data/nope.json` НЕДОСТАТОЧНА: этот путь в функцию попадает и
+            # честно отвечает 404. Мимо функции уходили другие — с пустым сегментом и с
+            # процент-кодированием (`/data//data.json`, `/data/%2e%2e/lease.json`), и на
+            # них Pages отдавал 200 с вёрсткой: программа просила данные, получала
+            # «успех» и разбирала HTML как JSON. Проверяем и тип ответа: на 200 с
+            # text/html под /data/ деплой обязан краснеть.
+            # --path-as-is обязателен — иначе curl сам схлопнет «//» и проверит не то.
+            slash=$(curl -s --path-as-is -o /dev/null -w '%{http_code} %{content_type}' \
+                      "$base/data//data.json" || true)
+            # `%2e%2e` край раскодирует и схлопнет ДО маршрутизации, то есть запрос
+            # уходит из-под /data/ на статику. Там его ловит web/404.html: 404 с
+            # вёрсткой — честный ответ, 200 с вёрсткой — тот самый ложный «успех».
+            enc=$(curl -s --path-as-is -o /dev/null -w '%{http_code} %{content_type}' \
+                    "$base/data/%2e%2e/lease.json" || true)
             echo "попытка $attempt: страница $page, данные $data, несуществующее $missing"
+            echo "  граница /data/: пустой сегмент [$slash], кодировка [$enc]"
+            # Сравнение по образцу, а не по равенству: curl печатает content_type целиком,
+            # вместе с «; charset=utf-8».
+            slash_ok=0; case "$slash" in "404 application/json"*) slash_ok=1;; esac
+            enc_ok=0;   case "$enc"   in "404 "*)                 enc_ok=1;;   esac
             if [ "$page" = "200" ] && { [ "$data" = "200" ] || [ "$data" = "503" ]; } \
-               && [ "$missing" = "404" ]; then
+               && [ "$missing" = "404" ] \
+               && [ "$slash_ok" = "1" ] && [ "$enc_ok" = "1" ]; then
               head -c 200 "$RUNNER_TEMP/data.head" || true
               exit 0
             fi

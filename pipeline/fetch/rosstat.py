@@ -85,6 +85,25 @@ def _num(raw):
         return None
 
 
+def _stored_last(series_id):
+    """Последняя дата уже собранного ряда или None (стор фетчерам читать можно).
+
+    Импорт ленивый и по обеим схемам путей — как и у get_text выше: модуль зовут
+    и как pipeline.fetch.rosstat, и напрямую при отладке парсеров.
+    """
+    try:
+        from lib.store import last_date
+    except ImportError:
+        try:
+            from pipeline.lib.store import last_date
+        except ImportError:
+            return None
+    try:
+        return last_date(series_id)
+    except (OSError, ValueError):
+        return None
+
+
 def _meta(source, url, status, note=None, extra=None):
     meta = {"source": source, "url": url, "status": status, "note": note,
             "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}
@@ -142,6 +161,12 @@ def _parse_release(text):
         return None
     value = _num(m.group(1))
     return None if value is None else round(value - 100.0, 4)
+
+
+# Публичное имя разбора недельного релиза. Тест недельного ИПЦ искал parse_weekly /
+# cpi_weekly_from_html / parse и МОЛЧА пропускался — единственный ряд с фолбэком на
+# зеркало оставался без единой проверки. Имя _parse_release не трогаем: оно в вызовах.
+parse_weekly = _parse_release
 
 
 def cpi_weekly(limit=4):
@@ -352,6 +377,14 @@ def cpi_monthly():
     if not points:
         return "cpi_monthly", {}, _meta("rosstat", url, "error",
                                         "лист «01» разобран, блок м/м не найден")
+    # asof — по РЯДУ, а не по своей порции. xlsx Росстата отстаёт от исследовательской
+    # затравки (июльский ipc_mes выходит только 9–18 августа), и `max(points)` откатывал
+    # meta.asof с июля на июнь: ряд выглядел протухшим при живых данных — ровно то,
+    # от чего защищается store.py:134-136 («asof пересчитываем каждый раз»).
+    asof = max(points)
+    known = _stored_last("cpi_monthly")
+    if known and known > asof:
+        asof = known
     return "cpi_monthly", points, _meta(
         "rosstat", url, "ok", "месяцев в ряду: %d (файл за %s.%s)"
-        % (len(points), month, year), {"asof": max(points)})
+        % (len(points), month, year), {"asof": asof})

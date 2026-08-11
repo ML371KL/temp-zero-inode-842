@@ -43,5 +43,9 @@ def brent_fred(series_id="brent", fred_id="DCOILBRENTEU", start=None, end=None,
             continue  # мусорная строка в хвосте файла
     if not points and empty_is_fatal(series_id):
         raise FetchError(f"FRED: пустой ряд {fred_id} с {frm}", url=url)
-    return series_id, points, make_meta("fred", url, points, unit="usd", fred_id=fred_id,
+    # unit — «доллары за БАРРЕЛЬ», а не просто «usd»: из этого ряда считается рублёвая
+    # бочка (нога ядра), и подпись «usd» на панели читалась бы как курс. В прод-сторе
+    # стоит usd_bbl, но store.upsert_points не перезаписывает уже заполненный unit —
+    # объявленное здесь «usd» всплыло бы только после bootstrap в чистый стор.
+    return series_id, points, make_meta("fred", url, points, unit="usd_bbl", fred_id=fred_id,
                                         note="FRED публикует с лагом 3–7 дней")

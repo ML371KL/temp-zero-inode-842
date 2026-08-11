@@ -63,8 +63,13 @@ jobs:
           }
 
           headers="$RUNNER_TEMP/head.txt"
+          # `|| true`, а НЕ `|| echo 000`: curl пишет write-out и когда сам провалился,
+          # поэтому к его собственному «000» добавлялось второе, code становился
+          # «000000», сравнение с «000» не срабатывало — и в аварии «край Cloudflare
+          # молчит» уходило сообщение «витрина отдаёт код 000000 вместо данных, смотреть
+          # moex-radar-daily на VPS». Владельца отправляли чинить исправную машину.
           code=$(curl -sS -I -o "$headers" -w '%{http_code}' \
-                   --max-time 20 --retry 2 --retry-delay 3 "$URL" || echo 000)
+                   --max-time 20 --retry 2 --retry-delay 3 "$URL" || true)
           echo "код ответа витрины: $code"
 
           if [ "$code" = "000" ]; then
@@ -79,14 +84,44 @@ jobs:
             exit 1
           fi
 
-          lm=$(grep -i '^last-modified:' "$headers" | tail -1 | cut -d' ' -f2- | tr -d '\r')
+          # Тип ответа проверяем ОТДЕЛЬНО от кода. Смерть функции /data/* выглядит как
+          # успех: Pages на путь без обработчика отдаёт 200 и HTML главной страницы, и
+          # по коду 200 сторож объявляет панель живой, пока читатель разбирает вёрстку
+          # как JSON. Возрастом публикации это не ловится вовсе — у статики нет
+          # last-modified, и шаг раньше просто падал молча (см. ниже).
+          ctype=$(grep -i '^content-type:' "$headers" | tail -1 | cut -d' ' -f2- | tr -d '\r') || ctype=""
+          case "$ctype" in
+            *json*) ;;
+            *)
+              say "🔴 MOEX Radar: витрина отвечает 200, но тип «${ctype:-пусто}» вместо JSON — значит функция /data/* не обслуживает путь и Cloudflare отдаёт вёрстку. Смотреть деплой Pages и functions/data/[[path]].js."
+              echo "::error::витрина отдала не JSON: ${ctype:-пусто}"
+              exit 1
+              ;;
+          esac
+
+          # `|| lm=""`, а не голое присваивание: без заголовка grep возвращает 1,
+          # pipefail протаскивает это через конвейер, set -e убивает ШАГ — и ветка
+          # «отвечает, но без last-modified» была недостижима ровно в том отказе, ради
+          # которого сторож написан: ни сообщения в телеграм, ни ::error::, только
+          # «Process completed with exit code 1». Форма взята из ops/moex-radar.sh:150.
+          lm=$(grep -i '^last-modified:' "$headers" | tail -1 | cut -d' ' -f2- | tr -d '\r') || lm=""
           if [ -z "$lm" ]; then
             say "🟡 MOEX Radar: витрина отвечает, но без заголовка last-modified — возраст публикации определить нечем. Смотреть functions/data/[[path]].js."
             echo "::error::нет last-modified"
             exit 1
           fi
 
-          age_min=$(( ( $(date -u +%s) - $(date -u -d "$lm" +%s) ) / 60 ))
+          # Дата разбирается ДО арифметики. `$(( ... $(date -d "$lm") ... ))` на
+          # неразбираемой строке давал «operand expected» и «age_min: unbound variable»,
+          # то есть второй способ уронить шаг до отправки сообщения.
+          published=$(date -u -d "$lm" +%s 2>/dev/null) || published=""
+          if [ -z "$published" ]; then
+            say "🟡 MOEX Radar: витрина отдала неразбираемый last-modified «$lm» — возраст публикации определить нечем. Смотреть functions/data/[[path]].js."
+            echo "::error::last-modified не разбирается: $lm"
+            exit 1
+          fi
+
+          age_min=$(( ( $(date -u +%s) - published ) / 60 ))
           echo "публикация: $lm, возраст $age_min мин (порог $MAX_AGE_MIN)"
 
           if [ "$age_min" -ge "$MAX_AGE_MIN" ]; then

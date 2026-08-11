@@ -72,7 +72,7 @@ cron-job.org ── (1) пинг VPS-эндпоинта живости, (2) тр
 | КБД (slope_10_2) | ISS `zcyc.json?date=` | EOD |
 | Официальный USD/CNY | cbr.ru XML | ~16:00, курс «на завтра» — брать по дате применения (конвенция сверена в валидации) |
 | RUSFAR3M | ISS | EOD |
-| FUTOI (T−14 бесплатно) | ISS analyticalproducts | + скрейп дневной таблицы open-positions.aspx за сегодня (бесплатной, без истории) — свежий futoi_z120 |
+| FUTOI (T−14 бесплатно) | ISS analyticalproducts | НЕ РЕАЛИЗОВАНО и потому важно: скрейпа open-positions.aspx нет ни в `pipeline/fetch/`, ни в планах на ближайший релиз — в проде ряд структурно отстаёт на ~14 дней, плюс до 3 торговых дней протяжки ffill. Поэтому карточка сигнала обязана нести `asof`/`lag_days` (CONTRACT §3), а не подпись «сейчас» |
 | LQDT/SBMM/AKMM СЧА | investfunds (парсинг страниц фондов) | вечер; периметр зафиксирован = investfunds |
 | Polymarket ceasefire-серия | gamma-api + clob | круглосуточно; хранить дневной срез |
 | GLDRUB, MREDC (ср), RUCBHYCP/RUCBCPNS | ISS | EOD |

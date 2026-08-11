@@ -22,6 +22,9 @@ except ImportError:
 
 __all__ = ["compute_health"]
 
+# Левая граница витринных серий: окно валидации 2004–2026 (REGIME.md §3).
+SERIES_START = "2004-01-01"
+
 
 def _status(ic, n):
     """ok / warn / dead по constants.HEALTH_THRESHOLDS."""
@@ -69,9 +72,16 @@ def compute_health(panel, mf=None, sign_since=None):
         tail = pairs[-win:]
         ic, n = calc.spearman_ic([p[1] for p in tail], [p[2] for p in tail])
 
+    # Витринная серия IC обрезана слева тем же 2004 годом, что и серия ядра
+    # (core.compute_core): валидация считалась на 2004–2026, а ранние точки вдобавок
+    # опираются на месяцы, где композит был одной ногой из трёх. Показывать их рядом
+    # с валидированным окном — обещать историю, которой у модели нет.
+    # На сам ic_24m это не влияет: он берётся с хвоста пар, а не из этой серии.
     series = []
     for k in range(win, len(pairs) + 1):
         w = pairs[k - win:k]
+        if w[-1][0] < SERIES_START:
+            continue
         r, _ = calc.spearman_ic([p[1] for p in w], [p[2] for p in w])
         if r is not None:
             series.append([w[-1][0], round(r, 3)])

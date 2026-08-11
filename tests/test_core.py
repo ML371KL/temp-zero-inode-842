@@ -100,9 +100,11 @@ class TestComposite(CoreCase):
     def test_equal_weights(self):
         # Оптимизация весов на 271 месяце — самообман (REGIME.md §7).
         # мутация: веса из «значимости» компонентов -> сумма перестанет быть 1.
+        # Вес отдаётся неокруглённым: округление до 4 знаков давало 0.3333, и витрина
+        # печатала три ноги по «33%» — 99% в сумме. Сумма долей обязана быть ровно 1.
         weights = [c["weight"] for c in self.out["components"]]
-        self.assertEqual(weights, [round(1 / 3, 4)] * 3)
-        self.assertAlmostEqual(sum(weights), 1.0, places=3)
+        self.assertEqual(weights, [1 / 3] * 3)
+        self.assertEqual(sum(weights), 1.0)
 
     def test_series_is_sorted_and_dated(self):
         series = self.out["series"]

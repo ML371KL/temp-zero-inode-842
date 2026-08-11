@@ -22,7 +22,9 @@ from pipeline.lib import constants, telegram
 STATE_NAME = "alerts_state.json"
 FEED_LIMIT = 20          # столько последних событий уезжает в data.json
 PENDING_MAX_HOURS = 24   # старше — не повторяем: новость протухла
+PENDING_MAX = 40         # длина очереди повторов; режем СТАРОЕ, а не свежее
 DEPOSIT_UPTICK_PP = 0.05  # декадная ставка шумит в сотых, порог отсекает дрожь
+EVENT_FIELDS = ("key", "ts", "kind", "severity", "text")
 
 
 def state_dir():
@@ -35,11 +37,24 @@ def _state_path():
 
 
 def load_state():
+    """Состояние прошлого прогона. Значения неверных типов выбрасываем.
+
+    ПОЧЕМУ проверяем типы: файл переживает падения прогона, ручные правки и откаты
+    версий. Один раз попавший в pending мусор (строка вместо списка событий) валил
+    весь прогон в alerts.run ДО публикации — панель не обновлялась из-за алерта.
+    """
     try:
         data = json.loads(_state_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    return data if isinstance(data, dict) else {}
+    if not isinstance(data, dict):
+        return {}
+    for key in ("pending", "feed"):
+        data[key] = [e for e in data.get(key) or [] if isinstance(e, dict) and e.get("key")] \
+            if isinstance(data.get(key), list) else []
+    if not isinstance(data.get("last"), dict):
+        data.pop("last", None)
+    return data
 
 
 def save_state(state):
@@ -115,12 +130,20 @@ def _core_flip(payload, prev, state, now):
     if sign == 0:
         return []
     prev_sign = state.get("core_sign_alerted")
+    # «Было X» берём из ЗАФИКСИРОВАННОГО знака, а не из вчерашнего снимка: путь
+    # 0.66 → 0.02 → −0.02 → −0.66 давал текст «развернулось: −0.66, было −0.02» —
+    # оба числа одного знака, сообщение выглядит ошибочным ровно там, ради чего
+    # гистерезис и введён.
+    prev_value = state.get("core_value_alerted")
     state["core_sign_alerted"] = sign
+    state["core_value_alerted"] = val
     if prev_sign is None or prev_sign == sign:
         # Первый прогон запоминает знак молча: иначе установка пайплайна начинается
         # с алерта «разворот», которого не было.
         return []
-    from_txt = _num(prev.get("core_value"), 2, True)
+    if not isinstance(prev_value, (int, float)):
+        prev_value = prev.get("core_value")  # состояние от старой версии без core_value_alerted
+    from_txt = _num(prev_value, 2, True)
     since = core.get("sign_since")
     tail = f" Новый знак с {since}." if since else ""
     label = (payload.get("verdict") or {}).get("core_label") or ""
@@ -158,18 +181,26 @@ def _bond_flag(payload, prev, now):
             break
     asof = payload.get("asof_trading_day")
     if new == 1:
+        # Разделитель в жёстких строках — ТОЧКА, как в _num и monitors._n: иначе в
+        # одном прогоне рядом висят «+1.4%/мес (hit 0.6)» и «+1,4%/мес (hit 0,64)»,
+        # и читатель принимает разные величины за одну и ту же с опечаткой.
         return [_ev(f"bond_on:{asof}", "bond_flag_on",
                     f"Облигационный флаг ВКЛЮЧЁН.{dist} Покупка просадок отключается: "
-                    f"при долговом стрессе dd<−10% давала −0,55%/мес.", "warn", now)]
+                    f"при долговом стрессе dd<−10% давала −0.55%/мес.", "warn", now)]
     return [_ev(f"bond_off:{asof}", "bond_flag_off",
                 f"Облигационный флаг снят.{dist} Покупка просадок снова в силе: "
-                f"+1,4%/мес (hit 0,64) при спокойном RGBI.", "info", now)]
+                f"+1.4%/мес (hit 0.64) при спокойном RGBI.", "info", now)]
 
 
 def _buy_window(payload, prev, now):
     cur = (payload.get("states") or {}).get("current") or {}
     vol, bond = cur.get("vol"), cur.get("bond")
     if vol != 1 or bond != 0:
+        return []
+    # Та же защита, что в _bond_flag: неизвестное прошлое — не переход. Состояния
+    # приходят с None после дня, когда панель не посчиталась (нет RGBI), и без
+    # этой строки следующий прогон зовёт «Окно входа» о ячейке, которая не менялась.
+    if prev.get("vol") is None or prev.get("bond") is None:
         return []
     if prev.get("vol") == 1 and prev.get("bond") == 0:
         return []
@@ -275,6 +306,27 @@ def _health(payload, prev, now):
                 f"статус dead. Композит не использовать до разбора.", "warn", now)]
 
 
+def _core_missing(payload, prev, now):
+    """Вчера был вердикт, сегодня «нет данных» — это авария, а не состояние рынка.
+
+    Ловит частичную потерю стора (восстановление из неполной копии, оборванная
+    запись, ручная чистка raw/): фетч при этом проходит зелёным, источники ok,
+    health смотрит только на 'dead', — молчали ВСЕ правила, а панель писала
+    «нет данных» поверх рабочего вердикта.
+    """
+    core = payload.get("core") or {}
+    cell = (payload.get("verdict") or {}).get("cell_code")
+    lost_core = core.get("value") is None and isinstance(prev.get("core_value"), (int, float))
+    lost_cell = not cell and bool(prev.get("cell"))
+    if not lost_core and not lost_cell:
+        return []
+    what = " и ".join(p for p in ("ядро" if lost_core else "", "вердикт" if lost_cell else "") if p)
+    was = _num(prev.get("core_value"), 2, True) if lost_core else prev.get("cell")
+    return [_ev(f"core_missing:{payload.get('asof_trading_day')}", "core_missing",
+                f"Витрина потеряла {what}: было {was}, стало «нет данных». "
+                f"Похоже на неполный стор — публиковать такую панель нельзя.", "warn", now)]
+
+
 def detect(payload, state, now=None):
     """Все переходы этого прогона. state мутируется (гистерезис знака ядра)."""
     now = now or datetime.now(timezone.utc)
@@ -295,6 +347,7 @@ def detect(payload, state, now=None):
     events += _deposit(payload, prev, now)
     events += _sources(payload, prev, now)
     events += _health(payload, prev, now)
+    events += _core_missing(payload, prev, now)
     return events
 
 
@@ -312,7 +365,12 @@ def dispatch(events, dry_run=False, enabled=True):
         elif dry_run:
             ev["delivered"], ev["skip"] = False, "dry-run"
         else:
-            ev["delivered"] = telegram.notify(ev["key"], render(ev))
+            outcome = telegram.deliver(ev["key"], render(ev))
+            # DUP («такой ключ уже уходил») — это ДОСТАВЛЕНО. Считать его провалом
+            # значит вечно держать событие в очереди повторов: cb_reminder рождается
+            # на каждом из 56 интрадей-тактов и один вытеснял из очереди всё живое.
+            ev["delivered"] = outcome in (telegram.SENT, telegram.DUP)
+            ev["outcome"] = outcome
     return events
 
 
@@ -338,24 +396,74 @@ def payload_events(new_events=None, state=None):
              "text": e.get("text")} for e in feed]
 
 
-def run(payload, dry_run=False, enabled=True, now=None):
-    """Полный цикл: определить переходы, повторить недоставленное, отправить, сохранить."""
-    now = now or datetime.now(timezone.utc)
-    state = load_state()
-    events = detect(payload, state, now)
-    pending = [e for e in (state.get("pending") or []) if _fresh(e, now)]
-    batch = pending + events
-    dispatch(batch, dry_run=dry_run, enabled=enabled)
+def _dedup(events):
+    """По одному событию на ключ; при повторе остаётся ПОСЛЕДНЯЯ (свежая) копия."""
+    out = {}
+    for ev in events:
+        if isinstance(ev, dict) and ev.get("key"):
+            out[ev["key"]] = ev
+    return list(out.values())
 
+
+def _requeue(batch):
+    """Очередь повторов: только недоставленное, без дублей, режем СТАРОЕ.
+
+    Срез с головы ([:40]) выбрасывал самое свежее событие — а именно свежее и есть
+    новость. Плюс дедуп: без него одна и та же напоминалка занимала всю очередь.
+    """
+    return [{k: e[k] for k in EVENT_FIELDS if k in e}
+            for e in _dedup(batch) if not e.get("delivered")][-PENDING_MAX:]
+
+
+def _feed_add(state, events):
     feed = list(state.get("feed") or [])
     seen = {e.get("key") for e in feed}
     for ev in events:
         if ev.get("key") not in seen:
-            feed.append({k: ev[k] for k in ("key", "ts", "kind", "severity", "text")})
+            feed.append({k: ev[k] for k in EVENT_FIELDS if k in ev})
+            seen.add(ev.get("key"))
     state["feed"] = feed[-FEED_LIMIT:]
+    return state
+
+
+def seed_from_payload(state, payload, now=None):
+    """Восстановить снимок «прошлого прогона» из ОПУБЛИКОВАННОГО data.json.
+
+    ПОЧЕМУ нужно: на чистой машине state пуст, а detect на пустом prev молчит по
+    определению (иначе установка началась бы с пачки «событий» о прошлой неделе).
+    Фолбэк-раннер GHA поднимается с пустым STATE_DIR КАЖДЫЙ раз — то есть ровно в
+    аварии VPS, когда владелец ждёт уведомлений, канал был гарантированно глухим.
+    Витрины хватает на все правила, кроме гистерезиса знака ядра.
+    """
+    if state.get("last") or not isinstance(payload, dict):
+        return False
+    snap = snapshot(payload, now)
+    if snap.get("core_value") is None and not snap.get("cell"):
+        return False  # витрина сама пустая — восстанавливать нечего
+    state["last"] = snap
+    val = snap.get("core_value")
+    if isinstance(val, (int, float)) and abs(val) > constants.CORE_FLIP_HYSTERESIS:
+        # Знак из опубликованного ядра, иначе первый прогон на фолбэке объявит
+        # «разворот» просто потому, что раньше о знаке никто не сообщал.
+        state["core_sign_alerted"] = 1 if val > 0 else -1
+        state["core_value_alerted"] = val
+    return True
+
+
+def run(payload, dry_run=False, enabled=True, now=None, seed_payload=None):
+    """Полный цикл: определить переходы, повторить недоставленное, отправить, сохранить."""
+    now = now or datetime.now(timezone.utc)
+    state = load_state()
+    if seed_payload is not None:
+        seed_from_payload(state, seed_payload, now)
+    events = detect(payload, state, now)
+    pending = [e for e in (state.get("pending") or []) if _fresh(e, now)]
+    batch = _dedup(pending + events)
+    dispatch(batch, dry_run=dry_run, enabled=enabled)
+
+    _feed_add(state, events)
     state["last"] = snapshot(payload, now)
-    state["pending"] = [{k: e[k] for k in ("key", "ts", "kind", "severity", "text")}
-                        for e in batch if not e.get("delivered")][:40]
+    state["pending"] = _requeue(batch)
     if not dry_run:
         # В dry-run состояние НЕ трогаем: иначе прогон «на посмотреть» съедает
         # переход, и настоящий прогон о нём уже не сообщит.
@@ -363,19 +471,45 @@ def run(payload, dry_run=False, enabled=True, now=None):
     return batch
 
 
+def needs_seed():
+    """Нужен ли внешний снимок: состояния прошлого прогона на машине нет."""
+    return not load_state().get("last")
+
+
 def after_publish(publish_result, dry_run=False, enabled=True, now=None):
     """Санитарные события, которые видны только после попытки записи."""
     now = now or datetime.now(timezone.utc)
+    res = publish_result or {}
     state = load_state()
     had = bool(state.get("lease_ok", True))
-    have = bool((publish_result or {}).get("lease_ok", True))
-    events = []
+    have = bool(res.get("lease_ok", True))
+    events, lease_events = [], []
     if had and not have:
-        events.append(_ev(f"lease_lost:{now.strftime('%Y-%m-%d')}", "lease_lost",
-                          f"Лиз писателя потерян: {(publish_result or {}).get('lease_reason')}. "
-                          f"Этот раннер публикацию пропустил.", "warn", now))
+        lease_events.append(_ev(f"lease_lost:{now.strftime('%Y-%m-%d')}", "lease_lost",
+                                f"Лиз писателя потерян: {res.get('lease_reason')}. "
+                                f"Этот раннер публикацию пропустил.", "warn", now))
+    events += lease_events
+    if res.get("oversize"):
+        # Лестница обрезки прошла целиком, а payload всё равно за лимитом: это
+        # дефект лестницы (раздулся блок, которого в ней нет), и молчать о нём
+        # нельзя — иначе о нарушении контракта §3 узнаёт только тот, кто читает
+        # journald руками.
+        events.append(_ev(f"payload_oversize:{now.strftime('%Y-%m-%d')}", "payload_oversize",
+                          f"data.json {_num(res.get('bytes'), 0)} Б больше лимита "
+                          f"{_num(res.get('limit'), 0)} Б после всей обрезки "
+                          f"(вырезано: {', '.join(res.get('trimmed') or []) or 'нечего'}). "
+                          f"Первая отрисовка на мобильной сети замедлится — чинить лестницу.",
+                          "warn", now))
     dispatch(events, dry_run=dry_run, enabled=enabled)
     if not dry_run:
-        state["lease_ok"] = have
+        _feed_add(state, [e for e in events if e.get("delivered")])
+        # Недоставленное уезжает в ту же очередь повторов, что и обычные события:
+        # раньше lease_lost умирал молча при первом же сетевом чихе, а теряется
+        # лиз как раз в инфраструктурной аварии, когда телеграм тоже нестабилен.
+        state["pending"] = _requeue(list(state.get("pending") or []) + events)
+        # Флаг двигаем только после доставки: иначе следующий прогон уже не увидит
+        # перехода had→have и повторять будет нечего.
+        if all(e.get("delivered") for e in lease_events):
+            state["lease_ok"] = have
         save_state(state)
     return events

@@ -59,7 +59,15 @@ jobs:
           # совпадает с STALE_AFTER_MINUTES — возрастом, на котором краснеет фронт.
           MAX_AGE_MIN: ${{ vars.FALLBACK_MAX_AGE_MIN || '150' }}
           FORCE: ${{ inputs.force }}
-          HAVE_KEYS: ${{ secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != '' }}
+          # Проверять надо ВСЕ три составляющих доступа, а не два ключа: pipeline/lib/r2.py
+          # собирает S3-эндпоинт из идентификатора аккаунта, и без него `configured()`
+          # отдаёт False, publish — «R2 не сконфигурирован», run.py — код 2. Гейт из двух
+          # секретов пропускал такой прогон дальше: раннер поднимался, ставил Python,
+          # обходил ВСЕ источники (минута тарифа плюс нагрузка на ISS/ЦБ/Минфин) и падал
+          # на последнем шаге — ровно тем «молчаливым фолбэком», против которого гейт и
+          # написан. Идентификатор аккаунта у R2 отдельного не бывает: это тот же
+          # CLOUDFLARE_ACCOUNT_ID (ops/env.example), и он уже заведён ради site.yml.
+          HAVE_KEYS: ${{ secrets.R2_ACCESS_KEY_ID != '' && secrets.R2_SECRET_ACCESS_KEY != '' && (secrets.R2_ACCOUNT_ID != '' || secrets.CLOUDFLARE_ACCOUNT_ID != '') }}
         run: |
           set -euo pipefail
 
@@ -77,7 +85,7 @@ jobs:
           NO_KEYS=0
           if [ "$HAVE_KEYS" != "true" ]; then NO_KEYS=1; fi
           if [ "$NO_KEYS" = "1" ] && [ "$GITHUB_EVENT_NAME" != "schedule" ]; then
-            echo "::error::нет секретов R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY — писать нечем"
+            echo "::error::нет секретов R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY (и идентификатора аккаунта: R2_ACCOUNT_ID либо CLOUDFLARE_ACCOUNT_ID) — писать нечем"
             exit 1
           fi
 
@@ -91,9 +99,14 @@ jobs:
           # last-modified ставит functions/data/[[path]].js по времени выгрузки объекта
           # в R2 — это и есть возраст публикации.
           headers="$RUNNER_TEMP/head.txt"
+          # `|| true`, а не `|| echo 000`: curl печатает write-out и при провале, и от
+          # `echo` к нему добавлялось второе «000» — code становился «000000». Здесь
+          # ветка одна («не 200 — работаем»), поэтому поведение не менялось, но форма
+          # обязана совпадать со сторожем: иначе следующий читатель скопирует отсюда
+          # ту версию, где различие кодов уже важно.
           code=$(curl -sS -I -o "$headers" -w '%{http_code}' \
                    --max-time 20 --retry 2 --retry-delay 3 \
-                   https://tzi-842.pages.dev/data/data.json || echo 000)
+                   https://tzi-842.pages.dev/data/data.json || true)
           echo "код ответа витрины: $code"
 
           need_run() {
@@ -112,13 +125,26 @@ jobs:
             need_run
           fi
 
-          lm=$(grep -i '^last-modified:' "$headers" | tail -1 | cut -d' ' -f2- | tr -d '\r')
+          # `|| lm=""`: без заголовка grep возвращает 1, pipefail протаскивает код через
+          # конвейер, и set -e убивал ШАГ прямо здесь — до need_run. То есть в отказе
+          # «функция /data/* не отвечает, Cloudflare отдаёт вёрстку без last-modified»
+          # кнопка «Run» не запускала подмену писателя вовсе, а в журнале оставалось
+          # голое «Process completed with exit code 1». Форма — как в ops/moex-radar.sh.
+          lm=$(grep -i '^last-modified:' "$headers" | tail -1 | cut -d' ' -f2- | tr -d '\r') || lm=""
           if [ -z "$lm" ]; then
             echo "::warning::в ответе нет last-modified — считаю витрину протухшей"
             need_run
           fi
 
-          age_min=$(( ( $(date -u +%s) - $(date -u -d "$lm" +%s) ) / 60 ))
+          # Разбор даты отдельной строкой: арифметика над неразобранной датой давала
+          # «operand expected» и роняла шаг тем же молчаливым способом.
+          published=$(date -u -d "$lm" +%s 2>/dev/null) || published=""
+          if [ -z "$published" ]; then
+            echo "::warning::last-modified «$lm» не разбирается — считаю витрину протухшей"
+            need_run
+          fi
+
+          age_min=$(( ( $(date -u +%s) - published ) / 60 ))
           echo "витрина опубликована $lm, возраст $age_min мин (порог $MAX_AGE_MIN)"
           if [ "$age_min" -lt "$MAX_AGE_MIN" ]; then
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -143,7 +169,13 @@ jobs:
       - name: Собрать и опубликовать
         if: steps.gate.outputs.run == 'true'
         env:
-          R2_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          # Не опечатка: отдельного «R2 account id» у Cloudflare нет, это идентификатор
+          # аккаунта, из которого собирается эндпоинт <id>.r2.cloudflarestorage.com
+          # (ops/env.example). В секретах репозитория он заведён под именем
+          # CLOUDFLARE_ACCOUNT_ID ради site.yml; R2_ACCOUNT_ID слева — на случай, если
+          # оператор заведёт его по букве docs/DEPLOY.md («те же R2_*, что на VPS»).
+          # Значение одно и то же, лишний секрет просто не понадобится.
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ vars.R2_BUCKET || 'moex-radar' }}
