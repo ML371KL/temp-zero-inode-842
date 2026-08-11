@@ -33,6 +33,12 @@ jobs:
           # библиотека, ставить нечего.
           python-version: "3.12"
 
+      - name: Обёртки shell — синтаксис и переносы строк
+        run: |
+          set -euo pipefail
+          for f in ops/*.sh; do bash -n "$f"; done
+          python ops/lint_sh.py "ops/*.sh"
+
       - name: Разбор всех модулей
         run: |
           set -euo pipefail
