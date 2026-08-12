@@ -458,7 +458,14 @@ def _t_dividends(store, now):
             rows.append({"ticker": it.get("ticker") or it.get("name") or "?",
                          "ex_date": ex,
                          "yield_pct": _r(it.get("yield_pct"), 2),
-                         "amount_bn": _r(it.get("amount_bn"), 1)})
+                         "amount_bn": _r(it.get("amount_bn"), 1),
+                         # Просадка ИНДЕКСА от этой отсечки = вес бумаги × её
+                         # дивдоходность. Это и есть та величина, ради которой
+                         # календарь заводился: механический гэп нельзя путать с
+                         # ухудшением рынка, а сам по себе процент доходности бумаги
+                         # ничего не говорит о том, насколько просядет IMOEX.
+                         "index_drag_pct": _r(it.get("index_drag_pct"), 3),
+                         "weight_pct": _r(it.get("weight_pct"), 2)})
     else:
         # Фолбэк: без meta.items ряд несёт только суммы/доходности по датам отсечек.
         for d, v in pts:
@@ -475,11 +482,18 @@ def _t_dividends(store, now):
     total = sum(amounts) if amounts else None
     share = meta.get("reinvest_share")
     share = float(share) if isinstance(share, (int, float)) else REINVEST_SHARE
+    # Суммарная просадка индекса от всех отсечек горизонта. Считается ЗДЕСЬ по тем
+    # же строкам, что показаны, а не берётся из meta: meta.index_drag_ahead_pct
+    # покрывает весь календарь источника, а тайл говорит про окно в 90 дней.
+    drags = [r["index_drag_pct"] for r in window if r.get("index_drag_pct") is not None]
+    drag_total = round(sum(drags), 3) if drags else None
     payload = {
         "upcoming": upcoming[:8],
         "sum_90d_bn": _r(total, 1),
         "reinvest_est_bn": _r(total * share, 1) if total is not None else None,
         "reinvest_share": share,
+        "index_drag_90d_pct": drag_total,
+        "source": meta.get("origin") or meta.get("source"),
         "horizon_to": horizon,
     }
     # Календарь приходит из inputs/ вручную, SLA у него нет: протухшим считаем
@@ -491,9 +505,13 @@ def _t_dividends(store, now):
     else:
         nxt = upcoming[0]
         y = f" ({_n(nxt['yield_pct'], 1)}%)" if nxt["yield_pct"] is not None else ""
-        money = (f"; за 90 дней {_n(total, 0)} млрд, реинвест ≈{_n(total * share, 0)} млрд"
-                 if total is not None else "; сумм выплат в календаре нет")
-        headline = f"Ближайшая отсечка: {nxt['ticker']} {_ddmm(nxt['ex_date'])}{y}{money}"
+        # Гэп индекса — первое, что нужно читателю: он говорит, на сколько просядет
+        # IMOEX механически. Доходность отдельной бумаги без её веса этого не даёт.
+        gap = (f"; гэп индекса за 90 дней ≈{_n(drag_total, 2)}%"
+               if drag_total is not None else "")
+        money = (f", выплат {_n(total, 0)} млрд, реинвест ≈{_n(total * share, 0)} млрд"
+                 if total is not None else "")
+        headline = f"Ближайшая отсечка: {nxt['ticker']} {_ddmm(nxt['ex_date'])}{y}{gap}{money}"
     return _tile("dividends", status, meta.get("asof") or (upcoming[0]["ex_date"] if upcoming else None),
                  headline, payload,
                  f"Оценка реинвеста — допущение: возвращается {int(share * 100)}% выплат "

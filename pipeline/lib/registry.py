@@ -157,9 +157,14 @@ SERIES = {
                             sla=None, required=False, role="monitor",
                             label="Реестр событий (налоги/санкции/переговоры)",
                             note="inputs/events.yml"),
-    "dividends": dict(fetcher="manual.dividends", args={}, cadence="event", pub_lag_days=0,
-                      sla=None, required=False, role="monitor",
-                      label="Дивидендный календарь", note="inputs/dividends.yml"),
+    "dividends": dict(fetcher="dividends.calendar", args={}, cadence="weekly",
+                      pub_lag_days=0, sla=None, required=False, role="monitor",
+                      label="Дивидендный календарь",
+                      note="календарь smart-lab, отфильтрованный по составу IMOEX с "
+                           "весами (ISS analytics) — веса дают ожидаемый гэп индекса. "
+                           "Датасет биржи securities/{sec}/dividends мёртв (у всех "
+                           "бумаг записи кончаются 2025), T-Invest API с прод-машины "
+                           "не отвечает. inputs/dividends.yml остался резервом"),
 }
 
 # Что тянет каждый режим прогона.
@@ -175,7 +180,7 @@ MODES = {
                  "key_rate", "polymarket_ceasefire"],
     "daily": [k for k, v in SERIES.items()
               if v["cadence"] in ("daily", "event") and not v["fetcher"].startswith("manual")],
-    "weekly": ["cpi_weekly", "ofz_auctions", "imoex2"],
+    "weekly": ["cpi_weekly", "ofz_auctions", "imoex2", "dividends"],
     "monthly": [k for k, v in SERIES.items() if v["cadence"] in ("monthly", "decade")],
     "manual": [k for k, v in SERIES.items() if v["fetcher"].startswith("manual")],
 }

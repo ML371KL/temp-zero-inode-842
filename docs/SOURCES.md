@@ -30,7 +30,8 @@
 | `orfr_flows` | cbr.ru/analytics/finstab/orfr/, месячный PDF | месяц | 5–17 число (лаг 15 дней) | `orfr.flows()` → свой извлекатель текста PDF | `status="manual_needed"` и чтение `inputs/orfr.yml`; если и там пусто — `error` |
 | `moex_retail` | iss.moex.com/iss/sitenews.json (зеркало новостей moex.com) | месяц | 5–14 число | `moex_press.retail()` | Лента листается на 45 суток назад, а не на три страницы: биржа публикует ~100 новостей в СУТКИ, и месячный релиз в старое окно не попадал НИКОГДА |
 | ~~`ngd`, `fnb`~~ | **убраны из реестра 12.08.2026**: их не читал ни один тайл и ни одна колонка панели (проверено grep по compute/ и web/). Фетчеры `minfin.ngd()`/`minfin.fnb()` живы и покрыты тестами — вернуть в реестр можно двумя строками | — | — | — | — |
-| `cb_consensus`, `events_registry`, `dividends` | `inputs/*.yml` (руками) | по событию | — | `manual.consensus/events/dividends()` | `missing` — тайл серый; это нормальное состояние незаполненного файла |
+| `dividends` | **T-Invest API** (`InstrumentsService/GetDividends`) → smart-lab → `inputs/dividends.yml`; состав индекса с весами — ISS `analytics/IMOEX` | неделя | по мере рекомендаций СД | `dividends.calendar()` | Скатывается по списку источников. Биржевой датасет `securities/{sec}/dividends` МЁРТВ (у всех бумаг записи кончаются 2025). Веса индекса дают ожидаемый **гэп индекса** = Σ вес × доходность |
+| `cb_consensus`, `events_registry` | `inputs/*.yml` (руками) | по событию | — | `manual.consensus/events()` | `missing` — тайл серый; это нормальное состояние незаполненного файла |
 
 ## 2. Что именно ломается и как это распознать
 

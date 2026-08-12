@@ -40,6 +40,9 @@ HOST_MIN_INTERVAL = {
     "www.cbr.ru": 0.7,
     "cbr.ru": 0.7,
     "fred.stlouisfed.org": 0.5,
+    # У T-Invest лимит 200 унарных запросов в минуту, а календарь опрашивает
+    # три десятка бумаг подряд: дефолтная четверть секунды тут только тормозит.
+    "invest-public-api.tinkoff.ru": 0.1,
 }
 DEFAULT_MIN_INTERVAL = 0.25
 
@@ -59,6 +62,13 @@ DEFAULT_MIN_INTERVAL = 0.25
 HOST_CA_BUNDLE = {
     "rosstat.gov.ru": "russian_trusted.pem",
     "www.rosstat.gov.ru": "russian_trusted.pem",
+    # T-Invest выдан тем же УЦ Минцифры: цепочка *.tinkoff.ru -> Russian Trusted
+    # Sub CA -> Russian Trusted Root CA. Без якоря curl отдаёт «код 000», и это
+    # легко принять за блокировку по IP — рукопожатие при этом проходит целиком, а
+    # падает ПРОВЕРКА (ssl_verify_result=19). С бандлом эндпоинт отвечает 401.
+    "invest-public-api.tinkoff.ru": "russian_trusted.pem",
+    "invest-public-api.tbank.ru": "russian_trusted.pem",
+    "sandbox-invest-public-api.tinkoff.ru": "russian_trusted.pem",
 }
 CA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ca")
 
@@ -73,7 +83,9 @@ CA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ca")
 #
 # Пустая или отсутствующая переменная = подписки нет. Это ЗАКОННЫЙ режим: фетчеры
 # обязаны работать по бесплатному ISS и лишь помечать, что данные с задержкой.
-HOST_AUTH_ENV = {"apim.moex.com": "MOEX_ALGOPACK_TOKEN"}
+HOST_AUTH_ENV = {"apim.moex.com": "MOEX_ALGOPACK_TOKEN",
+                 "invest-public-api.tinkoff.ru": "TINVEST_TOKEN",
+                 "invest-public-api.tbank.ru": "TINVEST_TOKEN"}
 
 _slot_lock = threading.Lock()
 _next_slot = {}  # host -> момент (time.monotonic), раньше которого стучаться нельзя
