@@ -107,6 +107,35 @@ class TestCompose(NexusCase):
         self.assertEqual(text.split("\n")[0], "Облигационный флаг снят.")
         self.assertIn("+1.4%/мес (hit 0.64).", text.split("\n")[1])
 
+    def test_russian_abbreviation_is_not_a_sentence_break(self):
+        """«б.п.», «руб.», «нед.» — точка внутри фразы, а не её конец.
+
+        ОПЛАЧЕНО ПРОДОМ: заголовок решения ЦБ в общей ленте хаба обрывался на
+        «…СЮРПРИЗ +25 б.п.», а «к консенсусу 15.50%.» уезжало в подпись — обрубок
+        посреди самого важного сообщения панели. Отличает конец фразы от сокращения
+        только заглавная буква после пробела.
+        """
+        cases = [
+            ("ЦБ: ключевая 15.75% (−25 б.п.) — СЮРПРИЗ +25 б.п. к консенсусу 15.50%.", 1),
+            ("Потоки ОРФР: ДУ −37.9 млрд руб. за июль — рекорд оттока. Физлица добирали.", 2),
+            ("Недельная инфляция 0.06% против 0.11% нед. назад. Дезинфляция продолжается.", 2),
+        ]
+        for text, lines in cases:
+            with self.subTest(text=text[:40]):
+                got = self.nexus.compose(self.event(text))
+                self.assertEqual(len(got.split("\n")), lines, got)
+                for piece in got.split("\n"):
+                    self.assertFalse(piece.endswith(" б.п.") or piece.endswith(" руб.")
+                                     or piece.endswith(" нед."),
+                                     f"строка оборвана на сокращении: {piece}")
+
+    def test_sentence_after_a_digit_still_splits(self):
+        # Обратная сторона правила: цифра начинает предложение не реже заглавной
+        # («2008 год был последним таким случаем»), и терять разрез на ней нельзя.
+        got = self.nexus.compose(self.event(
+            "Композит сменил знак: +0.31. 2008 год был последним таким случаем."))
+        self.assertEqual(got.split("\n")[0], "Композит сменил знак: +0.31.")
+
     def test_comment_travels_to_the_hub_as_its_own_paragraph(self):
         # Разбор обязан уехать в ленту хаба вместе с фактом: иначе на панели
         # комментарий есть, в телеграме есть, а в хабе событие голое.

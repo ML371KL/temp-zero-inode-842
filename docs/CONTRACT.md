@@ -38,10 +38,18 @@ list_dirty() -> [series_id]                        # для выгрузки в 
 
 ## 2. Реестр рядов (`pipeline/lib/registry.py`)
 
-Каждая запись: `id`, `fetcher`, `cadence` (`intraday|daily|weekly|decade|monthly|event`), `pub_lag_days` (сколько добавить к дате периода, чтобы получить дату доступности), `poll_window` (для «до появления»: диапазон чисел месяца), `required` (bool — влияет ли на ядро), `tier`.
+`SERIES` — словарь: ключ и есть `id`. Поля записи: `fetcher` (`модуль.функция`), `args` (что передать фетчеру), `cadence` (`daily|weekly|decade|monthly|event`), `pub_lag_days` (сколько добавить к дате периода, чтобы получить дату доступности), `sla` (профиль свежести из `lib/sla.py`; `None` — ряд без обещания), `required` (bool — падение ряда роняет прогон), `role` (`core|state|signal|monitor`), `label` (подпись для человека).
 
-Обязательный минимум v1 (ядро + состояния): `imoex`, `imoex_close_val` (объём), `rgbi`, `rvi`, `mcftr`, `mcxsm`, `rtsi`, `cny_tom`, `gld_tom`, `usd_cbr`, `key_rate`, `zcyc_y1/y2/y10`, `rusfar3m`, `rucbhycp_yield`, `rucbcpns_yield`, `brent`, `deposit_decade`, `urals_tax`, `futoi_mx` (pos/long/short/holders), `stocks_breadth` (агрегат `%>MA200`).
-Мониторы v1: `orfr_flows` (5 категорий), `lqdt_aum`, `cpi_weekly`, `cpi_monthly`, `ofz_auctions`, `polymarket_ceasefire`, `dividends_calendar`, `moex_retail`, `ngd_budget`, `fnb`, `m2`, `infom`.
+Ряды по ролям (34 записи, `role` — то, ЧТО ряд делает; `required` — ЧТО будет, если он пропадёт; это разные вещи, и совпадают они не всегда):
+
+* **core (4)** — ноги композита и его вход: `imoex`, `urals_tax`, `usd_cbr`, `zcyc`;
+* **state (3)** — машина состояний: `imoex_value`, `key_rate`, `rgbi`;
+* **signal (6)** — второй слой: `brent`, `brent_moex`, `cny_tom`, `deposit_decade`, `mcftr`, `rtsi`;
+* **monitor (21)** — витрина третьего слоя, в решение не входят: `breadth`, `budget_deficit`, `cb_consensus`, `cny_cbr`, `cpi_monthly`, `cpi_weekly`, `dividends`, `events_registry`, `futoi_mx`, `gld_tom`, `imoex2`, `lqdt_aum`, `mcxsm`, `moex_retail`, `ofz_auctions`, `orfr_flows`, `polymarket_ceasefire`, `rucbcpns_yield`, `rucbhycp_yield`, `rusfar3m`, `rvi`.
+
+`required=true` стоит у шести: `imoex`, `key_rate`, `mcftr`, `rgbi`, `usd_cbr`, `zcyc`.
+
+Режимы прогона (`registry.MODES`) — какие ряды тянет каждый такт: `intraday` (9 рядов), `daily` (23), `weekly` (4), `monthly` (6), `manual` (2). Ряд, не попавший ни в один режим, не обновляется никогда и при этом выглядит исправным — за этим следит `ops/check_schedule.py` в CI.
 
 ## 3. `data.json` (то, что читает фронт)
 
@@ -57,7 +65,8 @@ list_dirty() -> [series_id]                        # для выгрузки в 
   "verdict": {
     "cell_code": "bear|stress|stress",
     "cell_label": "токсичная ячейка",
-    "cell_stats": {"mean_fwd1m_pct": -2.94, "hit": 0.56, "n": 25},
+    "cell_stats": {"mean_fwd1m_pct": -2.94, "hit": 0.56, "n": 25,
+                   "median_fwd1m_pct": 0.64, "worst_pct": -30.0, "best_pct": 18.0},
     "rule": "…текст правила дня…",
     "core_value": 0.50,
     "core_label": "умеренный лонг"
@@ -80,8 +89,13 @@ list_dirty() -> [series_id]                        # для выгрузки в 
     ],
     "series": [["2004-01-31", 0.4], …],
     "health": {"ic_24m": 0.18, "n": 24, "status": "ok|warn|dead",
+               "window_months": 24, "coverage": 1.0, "months_total": 320,
                "below_zero_months": 0, "below_since": null,
-               "review_months": 6, "review_due": false}
+               "review_months": 6, "review_due": false,
+               "sign_since": "2026-06-30", "sign_age_days": 43,
+               "asof_month": "2026-06-30",
+               "series": [["2006-01-31", 0.31], …],
+               "note": "ранговый IC за 24 мес: +0.04 — слабо…"}
   },
   "states": {
     "current": {"trend": 0, "vol": 1, "bond": 1, "rate_phase": -1,
@@ -100,6 +114,9 @@ list_dirty() -> [series_id]                        # для выгрузки в 
      "payload": {…}, "note": "…"}
   ],
   "sources": {"iss": {"asof": "2026-08-11", "fetched_at": "…", "status": "ok", "lag_min": 12}},
+  "quotes": {"imoex": {"value": 2301.43, "chg_pct": -0.96, "asof": "2026-08-12",
+                       "updatetime": "19:00:11", "intraday": true, "delay_min": 0,
+                       "age_min": 0.0, "instrument": "IMOEX", "label": "Индекс МосБиржи"}},
   "events": [{"ts": "2026-08-11T16:05:00Z", "kind": "state_change|core_flip|cb",
               "severity": "info|warn", "text": "…", "comment": "…|null"}]
 }
@@ -110,6 +127,8 @@ list_dirty() -> [series_id]                        # для выгрузки в 
 - **`core.value` — дневное число, `core.month_end` — решение.** Модель месячная (REGIME §6), внутримесячное значение дрожит каждый день. Показывать оба: крупно дневное, рядом якорь закрытого месяца.
 - **`core.legs_segments` / `full_legs_since` — состав ядра во времени.** До 2017 композит держался на одной ноге (slope с 2015, бочка с 2016; REGIME §4, сольный период p=0,12) — 155 из 272 месяцев серии. Без пометки на графике одноногая эра неотличима от трёхногой, а именно в ней стоят все значения, упёртые в обрезку ±3.
 - **`states.distances[bond]` — обычные проценты, бит — логарифмические.** `value`/`threshold` уже переведены через `exp(x)−1`; конвертация парная, поэтому момент переключения флага не сдвигается. Порог в log-мере (−4%) живёт только в `constants.STATE_RULES` — на нём стоят `CELL_STATS`, и менять его нельзя.
+- **`quotes` — живая котировка, а НЕ вход модели.** Блок пишется интрадей-тактом отдельно от рядов и нужен шапке: `value`/`chg_pct` показывают, где рынок прямо сейчас. Ядро, состояния и сигналы считаются по `core`/`states` — то есть по закрытым дням. `intraday:false` означает, что источник отдал последнее закрытие вместо текущей цены, и подпись обязана это сказать.
+- **`core.health.series` — витрина, `ic_24m` — число.** Серия обрезана слева 2004 годом (окно валидации), `ic_24m` считается по хвосту пар и от обрезки не зависит. `below_zero_months` считает подряд идущие ОТРИЦАТЕЛЬНЫЕ точки серии с конца; `review_due` — только достигнутый порог здоровья (`review_months`), а не решение о пересмотре: вторую половину условия (механизм у кандидата) панель измерить не может (ARCHITECTURE §7).
 - **`states.active_signals[].asof` / `lag_days` — возраст показанного числа.** Часть рядов структурно отстаёт (позиция физлиц без подписки — ~14 дней, плюс до 3 торговых дней протяжки ffill; с ключом ALGOPACK этот ряд приходит текущим днём, и `lag_days` схлопывается сам). Вердикт по возрасту НЕ гасится (SLA из реестра меряет свежесть выкачки, а не возраст данных); фронт обязан показать дату, при большом `lag_days` — бейджем, как на тайлах мониторов.
 
 Дополнительные объекты: `history/daily.json` (`{"imoex": [[d,v]…], "core": …, "rgbi": …, "states": …}`, прореженно до 2004), `history/monitors.json`.

@@ -65,6 +65,39 @@ class CellDriftCase(unittest.TestCase):
         self.assertFalse(self.rc.cell_flagged(-3.0, None, 2.9)[0])
 
 
+class HealthSectionCase(unittest.TestCase):
+    """Раздел здоровья не имеет права упасть на штатном значении.
+
+    `ic_24m` бывает None по построению — «мало завершённых месяцев с данными»
+    (pipeline/compute/health.py). Формат `+.3f` на None — это TypeError, то есть
+    отчёт не создаётся, уведомление не уходит ВОВСЕ, а на VPS падение таймера
+    беззвучно. Проверка, которая молчит при поломке, неотличима от проверки,
+    которая молчит потому, что всё хорошо.
+    """
+
+    def setUp(self):
+        self.rc = need(self, "ops.recalibrate", "section_health")
+
+    def render(self, health):
+        out = []
+        self.rc.section_health(health, out)
+        return "\n".join(out)
+
+    def test_ic_none_не_роняет_отчёт(self):
+        text = self.render({"ic_24m": None, "n": 3, "status": "warn",
+                            "below_zero_months": 0, "below_since": None,
+                            "review_months": 6, "review_due": False})
+        self.assertIn("не считается", text)
+        self.assertNotIn("None", text)
+
+    def test_обычное_значение_печатается_числом(self):
+        text = self.render({"ic_24m": -0.045, "n": 24, "status": "warn",
+                            "below_zero_months": 2, "below_since": "2026-06-30",
+                            "review_months": 6, "review_due": False})
+        self.assertIn("−0.045".replace("−", "-"), text)
+        self.assertIn("24 мес", text)
+
+
 class NotifyCase(unittest.TestCase):
     def setUp(self):
         self.rc = need(self, "ops.recalibrate", "notify", "QUARTER_MONTHS")

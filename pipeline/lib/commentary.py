@@ -34,7 +34,20 @@ TIMEOUT = 90
 # Четыре такие попытки подряд — это больше десяти минут, то есть RuntimeMaxSec юнита,
 # и прогон умер бы ПО ДОРОГЕ К ПУБЛИКАЦИИ: витрина не обновилась бы из-за украшения
 # к событию. Ровно на этих граблях проект уже стоял, когда алерты роняли прогон.
-BUDGET = float(os.environ.get("LLM_BUDGET_S") or 240)
+# Бюджет читается ЛЕНИВО и не бросает. На уровне модуля `float("абв")` — это
+# ValueError в момент `import commentary`, то есть опечатка в окружении роняет весь
+# прогон конвейера, а не комментарии к событиям. Контракт этого модуля обратный:
+# доставка комментария не имеет права уронить публикацию.
+BUDGET_DEFAULT_S = 240.0
+
+
+def budget_s():
+    """Сколько секунд суммарно тратим на опрос моделей."""
+    try:
+        value = float((os.environ.get("LLM_BUDGET_S") or "").strip() or BUDGET_DEFAULT_S)
+    except (TypeError, ValueError):
+        return BUDGET_DEFAULT_S
+    return value if value > 0 else BUDGET_DEFAULT_S
 
 FREE_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 # Порядок — по качеству разбора; провайдеры разные намеренно. Каталог живой: прежний
@@ -149,17 +162,28 @@ def market_now(payload):
     return out
 
 
+# Сколько знаков одного комментария вообще имеет смысл разбирать. Просим три-четыре
+# фразы; всё, что длиннее, — уже не комментарий. Ограничение нужно не ради красоты:
+# поиск зацикливания ниже квадратичен по длине (замер: 4 тыс. знаков — 0,1 с,
+# 8 тыс. — 0,41 с, то есть 100 КБ ответа заняли бы около минуты). Интрадей-такт идёт
+# каждые 5 минут и живёт под RuntimeMaxSec — минута в регулярном выражении там лишняя.
+_SCAN_LIMIT = 4000
+
+
 def _defect(text):
     """Явный брак ответа: пустота, обрубок, зацикливание, разметка вместо текста."""
     t = (text or "").strip()
     if len(t) < 40:
         return "слишком короткий ответ"
-    if re.search(r"(.{12,}?)\1{2,}", t):
+    # Все проверки ниже смотрят на голову текста: признаки брака (зацикливание,
+    # чужой язык, транслит) равномерны по ответу, а стоимость — нет.
+    head = t[:_SCAN_LIMIT]
+    if re.search(r"(.{12,}?)\1{2,}", head):
         return "текст зациклился"
     if t.count("```") or t.lstrip().startswith("{"):
         return "вместо текста разметка или JSON"
-    cyr = len(re.findall(r"[а-яёА-ЯЁ]", t))
-    lat = len(re.findall(r"[a-zA-Z]", t))
+    cyr = len(re.findall(r"[а-яёА-ЯЁ]", head))
+    lat = len(re.findall(r"[a-zA-Z]", head))
     # Промпт требует русского, но требование можно и проигнорировать: англоязычный
     # разбор до читателя доходить не должен.
     if cyr + lat >= 40 and cyr / (cyr + lat) < 0.5:
@@ -169,7 +193,7 @@ def _defect(text):
     # Порог в два слова намеренный: одна описка в семистах знаках — это опечатка, и
     # выбрасывать из-за неё разумный разбор дороже, чем показать; systematic-случай
     # (модель транслитерирует постоянно) ловится и уходит следующей модели.
-    mixed = [w for w in re.findall(r"[^\W\d_]+", t, re.UNICODE)
+    mixed = [w for w in re.findall(r"[^\W\d_]+", head, re.UNICODE)
              if len(re.findall(r"[а-яёА-ЯЁ]", w)) >= 2 and len(re.findall(r"[a-zA-Z]", w)) >= 2]
     if len(mixed) >= 2:
         return "латиница вперемешку с кириллицей в словах: " + ", ".join(mixed[:3])
@@ -279,10 +303,10 @@ def comments(events, payload, log=None):
     if paid and not paid_allowed():
         say(f"модель «{paid[0]}» платная, а LLM_ALLOW_PAID не выставлен — комментариев не будет")
         return None
-    started = time.monotonic()
+    started, budget = time.monotonic(), budget_s()
     for i, model in enumerate(models):
-        if i and time.monotonic() - started > BUDGET:
-            say(f"бюджет разбора {BUDGET:.0f}с исчерпан на {i} моделях — дальше не пробую")
+        if i and time.monotonic() - started > budget:
+            say(f"бюджет разбора {budget:.0f}с исчерпан на {i} моделях — дальше не пробую")
             break
         got, try_next = ask(model, events, payload, key, log=say)
         if got:

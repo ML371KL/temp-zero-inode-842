@@ -36,12 +36,16 @@ PREV_ASOF = "2026-08-10"
 
 
 def payload(core=0.68, trend=0, vol=1, bond=1, asof=ASOF, health="ok",
-            cell="bear|stress|stress", monitors=None, sources=None):
+            cell="bear|stress|stress", monitors=None, sources=None,
+            review_due=False, streak=0):
     """Витрина в объёме, который читают правила алертов."""
     return {
         "asof_trading_day": asof,
         "core": {"value": core, "sign": (0 if core is None else (1 if core > 0 else -1)),
-                 "health": {"status": health, "n": 24, "ic_24m": -0.02}},
+                 "health": {"status": health, "n": 24, "ic_24m": -0.02,
+                            "review_due": review_due, "below_zero_months": streak,
+                            "below_since": "2026-01-30" if streak else None,
+                            "review_months": 6}},
         "states": {"current": {"trend": trend, "vol": vol, "bond": bond},
                    "distances": [{"id": "bond", "text": "просадка RGBI −1.2% от максимума"}]},
         "verdict": {"cell_code": cell, "cell_label": "токсичная",
@@ -65,7 +69,8 @@ class AlertsCase(unittest.TestCase):
 
     def setUp(self):
         self.alerts = need(self, "pipeline.alerts", "run", "detect", "after_publish")
-        self.telegram = need(self, "pipeline.lib.telegram", "deliver", "SENT", "DUP", "FAIL")
+        self.telegram = need(self, "pipeline.lib.telegram", "deliver", "SENT", "DUP",
+                             "FAIL", "OFF")
         self.tmp = TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
@@ -552,6 +557,128 @@ class TestComment(AlertsCase):
                                lambda *a, **k: calls.append(1)):
             self.alerts.run(payload(bond=0, cell="bear|stress|ok"), dry_run=True, now=NOW)
         self.assertEqual(calls, [])
+
+
+class TestHealthReviewEvent(AlertsCase):
+    """Событие регламента §7: переход, канал, защёлка после недоставки.
+
+    Аудит 13.08.2026: правило не упоминалось в тестах ни разу. Зелёными проходили
+    удаление правила, снятие защёлки (сообщение каждый прогон вместо перехода),
+    вынос из OPS_KINDS (утечка санитарного события в ленту витрины и в хаб) и
+    потеря события навсегда при недоставке.
+    """
+
+    def due(self, now=NOW, streak=7):
+        return self.alerts.run(payload(review_due=True, streak=streak, health="dead"),
+                               dry_run=False, now=now)
+
+    def kinds(self, events):
+        return [e["kind"] for e in events]
+
+    def test_переход_даёт_ровно_одно_событие(self):
+        self.seed(payload())
+        first = self.due()
+        self.assertEqual(self.kinds(first).count("health_review_due"), 1)
+        second = self.due(NOW + timedelta(days=1))
+        self.assertEqual(self.kinds(second).count("health_review_due"), 0)
+
+    def test_уходит_только_в_ops_канал(self):
+        # мутация: убрать kind из OPS_KINDS -> санитарное событие уезжает в канал
+        # рынка, в журнал витрины и в ленту хаба.
+        self.seed(payload())
+        self.due()
+        ops = " ".join(self.by_channel.get("ops") or [])
+        alerts_ch = " ".join(self.by_channel.get("alerts") or [])
+        self.assertIn("§7", ops)
+        self.assertNotIn("§7", alerts_ch)
+
+    def test_в_ленту_витрины_не_попадает(self):
+        self.seed(payload())
+        self.due()
+        feed = self.alerts.payload_events()
+        self.assertFalse([e for e in feed if e.get("kind") == "health_review_due"])
+        self.assertFalse([e for e in self.state().get("feed") or []
+                          if e.get("kind") == "health_review_due"])
+
+    def test_недоставленное_событие_не_теряется(self):
+        # ГЛАВНОЕ: снимок писался безусловно, поэтому недоставленное событие
+        # исчезало навсегда — в ленту оно не идёт, очередь повторов живёт сутки,
+        # а заново правило его не породит, пока держится та же серия.
+        self.seed(payload())
+        self.online = False
+        self.assertEqual(self.kinds(self.due()).count("health_review_due"), 1)
+        self.assertFalse(self.state()["last"].get("health_review_due"),
+                         "защёлка не имеет права защёлкнуться без доставки")
+        self.online = True
+        # Прошли сутки — очередь повторов уже пуста, спасти может только защёлка.
+        again = self.due(NOW + timedelta(hours=30))
+        self.assertEqual(self.kinds(again).count("health_review_due"), 1)
+
+    def test_доставленное_событие_защёлкивается(self):
+        self.seed(payload())
+        self.due()
+        self.assertTrue(self.state()["last"].get("health_review_due"))
+
+    def test_ненастроенный_ops_канал_не_защёлкивает(self):
+        """«Канала нет» — не доставка, а именно ненастроенный ops-канал и есть
+        умолчание: `ops/env.example` оставляет `ERROR_*` пустыми.
+
+        Отличать «канал выключен» от «не смогли отправить» модуль доставки обязан
+        (telegram.OFF), но для санитарного события оба исхода одинаковы: находка
+        никуда не уехала. Защёлка держит её до настоящей отправки — иначе панель
+        один раз сообщит в пустоту и замолчит навсегда.
+        """
+        os.environ.pop("ERROR_BOT_TOKEN")
+        self.seed(payload())
+        batch = self.due()
+        self.assertEqual(self.kinds(batch).count("health_review_due"), 1)
+        self.assertEqual([e["outcome"] for e in batch if e["kind"] == "health_review_due"],
+                         [self.telegram.OFF])
+        self.assertFalse(self.state()["last"].get("health_review_due"),
+                         "защёлка сработала, хотя событие никуда не ушло")
+        # Канал настроили — находка обязана дойти.
+        os.environ["ERROR_BOT_TOKEN"] = "тест-ops"
+        again = self.due(NOW + timedelta(hours=30))
+        self.assertEqual(self.kinds(again).count("health_review_due"), 1)
+        self.assertIn("§7", " ".join(self.by_channel.get("ops") or []))
+
+
+class TestCommentaryScope(AlertsCase):
+    """Комментатор спрашивается только про то, чего ещё нет в ленте.
+
+    Часть правил рождает событие заново на КАЖДОМ такте (cb_reminder — все 169
+    тактов в канун заседания), телеграм гасит их дедупом уже ПОСЛЕ похода к модели.
+    Модель отвечает 150–200 с, а alerts.run стоит до публикации при дедлайне такта
+    300 с: лишний запрос платит не деньгами, а риском не обновить витрину.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.asked = []
+        patcher = mock.patch.object(
+            self.alerts.commentary, "annotate",
+            lambda evs, pl, log=None: self.asked.append([e["key"] for e in evs]))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_напоминание_цб_идёт_к_модели_один_раз(self):
+        # cb_reminder рождается заново на КАЖДОМ такте, пока до заседания сутки, и
+        # гасится дедупом телеграма уже после похода к модели. Это и есть боевой
+        # случай: 169 тактов в сутки × 8 кануновых дней в году.
+        self.seed(payload())
+        eve = [tile_cb(days_left=1)]
+        first = self.alerts.run(payload(monitors=eve), dry_run=False, now=NOW)
+        self.assertIn("cb_reminder", [e["kind"] for e in first])
+        self.assertTrue([k for batch in self.asked for k in batch if k.startswith("cb_reminder")],
+                        "первый раз спросить обязаны")
+        self.asked.clear()
+
+        second = self.alerts.run(payload(monitors=eve), dry_run=False,
+                                 now=NOW + timedelta(minutes=5))
+        self.assertIn("cb_reminder", [e["kind"] for e in second],
+                      "правило по-прежнему рождает событие — проверка о другом")
+        self.assertEqual([k for batch in self.asked for k in batch], [],
+                         "событие уже в ленте: второй разбор ему не нужен")
 
 
 class TestNexusMirror(AlertsCase):

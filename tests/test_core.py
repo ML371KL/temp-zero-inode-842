@@ -291,24 +291,18 @@ class TestHealthReviewStreak(unittest.TestCase):
     """
 
     def setUp(self):
-        self.health = need(self, "pipeline.compute.health", "compute_health")
+        self.health = need(self, "pipeline.compute.health", "compute_health",
+                           "below_zero_streak")
         self.constants = need(self, "pipeline.lib.constants", "HEALTH_REVIEW_MONTHS")
 
     def build(self, values):
-        """Хвост ряда IC -> (длина серии ниже нуля, месяц начала).
+        """Гоняем ПРОДОВУЮ функцию, а не её копию в тесте.
 
-        compute_health строит ряд сам из панели, поэтому правило хвоста проверяется
-        здесь на готовом ряде — а его согласие с реальным выходом ловит
-        test_real_series_carries_the_fields.
+        Первая редакция переписывала цикл health.py прямо здесь и проверяла себя:
+        зелёными проходили семь мутаций подряд, включая снятие reversed и подмену
+        строгого сравнения. Аудит 13.08.2026.
         """
-        series = [[f"m{i:03d}", v] for i, v in enumerate(values)]
-        streak, since = 0, None
-        for month, value in reversed(series):
-            if value >= 0:
-                break
-            streak += 1
-            since = month
-        return streak, since
+        return self.health.below_zero_streak([[f"m{i:03d}", v] for i, v in enumerate(values)])
 
     def test_streak_counts_only_the_trailing_run(self):
         # Два отрицательных месяца в середине не считаются: регламент про ПОДРЯД.
@@ -325,6 +319,52 @@ class TestHealthReviewStreak(unittest.TestCase):
 
     def test_review_threshold_is_two_quarters(self):
         self.assertEqual(self.constants.HEALTH_REVIEW_MONTHS, 6)
+
+    def test_none_breaks_the_streak(self):
+        # Дыра в ряду — не «ниже нуля»: считать её продолжением серии значит
+        # объявить порог регламента достигнутым по отсутствию данных.
+        self.assertEqual(self.build([-0.3, -0.2, None, -0.1])[0], 1)
+
+    def test_empty_series_is_zero(self):
+        self.assertEqual(self.build([]), (0, None))
+
+    def anti_correlated(self):
+        """Панель, где ядро систематически ошибается: IC уходит ниже нуля.
+
+        Строится в два прохода — сначала считаем композит на нейтральных ценах,
+        затем задаём цены так, чтобы следующий месяц ходил ПРОТИВ знака композита.
+        Иначе проверить счётчик на реальном выходе нечем: у синтетики с ровно
+        растущим индексом форвардные доходности постоянны, ранговый IC не считается
+        вовсе, и хвост ряда пуст.
+        """
+        core = need(self, "pipeline.compute.core", "compute_core", "monthly_frame")
+        legs = dict(usd_mom63=alternating(True), slope_10_2=alternating(True),
+                    urals_rub_gap=alternating(False))
+        comp = core.monthly_frame(panel_of(**legs))["composite"]
+        px = [3000.0]
+        for i in range(MONTHS - 1):
+            step = 1.0 if (comp[i] or 0.0) > 0 else -1.0
+            px.append(px[-1] * math.exp(-0.05 * step))
+        panel = panel_of(**legs)
+        panel["cols"]["imoex"] = px
+        return panel
+
+    def test_счётчик_на_реальном_выходе_не_подделка(self):
+        # мутация: заменить вызов below_zero_streak константой (0, None) — тест
+        # обязан покраснеть. Раньше не краснел: проверялась только согласованность
+        # review_due со счётчиком, а на нулевом счётчике она тривиально верна.
+        out = self.health.compute_health(self.anti_correlated())
+        self.assertLess(out["ic_24m"], 0, "фикстура обязана давать отрицательный IC")
+        self.assertGreater(out["below_zero_months"], 0)
+        self.assertEqual(out["below_zero_months"],
+                         self.health.below_zero_streak(out["series"])[0])
+        self.assertEqual(out["below_since"], self.health.below_zero_streak(out["series"])[1])
+
+    def test_порог_регламента_срабатывает_на_длинной_серии(self):
+        out = self.health.compute_health(self.anti_correlated())
+        self.assertGreaterEqual(out["below_zero_months"], self.constants.HEALTH_REVIEW_MONTHS)
+        self.assertTrue(out["review_due"])
+        self.assertIn("порог", out["note"].lower())
 
     def test_real_series_carries_the_fields(self):
         out = self.health.compute_health(panel_of(

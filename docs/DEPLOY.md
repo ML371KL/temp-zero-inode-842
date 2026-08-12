@@ -13,7 +13,7 @@
 | Витрина в бакете | `data.json`, `history/daily.json` | `curl https://tzi-842.pages.dev/data/data.json` |
 | Клон на VPS | `/srv/dash/repo-842` (пользователь `dash`) | `sudo -u dash git -C /srv/dash/repo-842 log -1` |
 | Стор на VPS | `/var/lib/moex-radar` — 94 ряда, 220 тыс. точек (затравка исследования) | `sudo -u dash ls /var/lib/moex-radar/raw \| wc -l` |
-| Таймеры systemd | `moex-radar-{intraday,daily,monthly}.timer` включены | `systemctl list-timers 'moex-radar*'` |
+| Таймеры systemd | все шесть включены: `moex-radar-{intraday,daily,weekly,monthly,manual,recalibrate}.timer` | `systemctl list-timers 'moex-radar*'` — в выводе должно быть 6 строк |
 | Прогон на VPS | `--dry-run` за 18,9 с, все источники отвечают, ядро совпало с локальным (0,663) | см. ниже |
 
 ## Состояние на вечер 11.08.2026: панель работает сама

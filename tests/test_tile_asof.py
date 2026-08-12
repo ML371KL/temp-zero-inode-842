@@ -99,6 +99,23 @@ class TileAsofCase(unittest.TestCase):
     def test_без_даты_вовсе_молчим(self):
         self.assertEqual(self.ask({"payload": {}}, self.panel()), "нет данных")
 
+    def test_московский_день_на_закрывающем_такте(self):
+        """21:00 UTC — это уже завтра по Москве, и тайлы датируют себя Москвой.
+
+        Тайлы берут дату из compute/monitors.py (_msk_now), поэтому на закрывающем
+        такте 00:00 МСК их asof на день впереди UTC-даты сборки. Горизонт по UTC
+        объявлял такие данные «будущими» и прятал подпись до утра — ловилось у
+        бюджетного узла: asof 2026-08-12 при generated_at 2026-08-11T21:00:05Z.
+        """
+        panel = {"asof_trading_day": TRADING_DAY, "generated_at": "2026-08-11T21:00:05Z"}
+        self.assertEqual(self.ask({"asof": "2026-08-12", "payload": {}}, panel),
+                         "данные: 2026-08-12")
+
+    def test_будущее_остаётся_будущим_и_по_москве(self):
+        # Сдвиг на три часа не должен открыть дорогу дате события через месяц.
+        panel = {"asof_trading_day": TRADING_DAY, "generated_at": "2026-08-11T21:00:05Z"}
+        self.assertEqual(self.ask({"asof": MEETING, "payload": {}}, panel), "нет данных")
+
 
 if __name__ == "__main__":
     unittest.main()

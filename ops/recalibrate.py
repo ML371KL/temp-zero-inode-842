@@ -41,7 +41,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 from pipeline.compute import core, panel as panel_mod, states as states_mod  # noqa: E402
-from pipeline.lib import calc, constants, r2, store  # noqa: E402
+from pipeline.lib import calc, constants, r2, registry, store  # noqa: E402
 
 REFERENCE = ROOT / "validation" / "data" / "walkforward_results.csv"
 OOS_START = "2010-01-01"          # окно walk-forward исследования (REGIME.md §4)
@@ -162,8 +162,11 @@ def section_invariant(labels, comp, out):
                f"(`validation/data/walkforward_results.csv`).")
     if worst is None:
         out.append("")
-        out.append("⚠️ Пересечения с эталоном нет — сверять не с чем.")
-        return False
+        out.append("⚠️ Пересечения с эталоном нет — сверять не с чем. Это НЕ значит, что "
+                   "композит разошёлся: значит, что проверка не состоялась (нет файла "
+                   "эталона либо у панели нет месяцев из его окна).")
+        out.append("")
+        return "no_reference"
     ok = worst < 1e-9
     out.append(f"Максимальное расхождение: **{worst:.12f}** — "
                f"{'совпадает побитово' if ok else '⚠️ РАСХОЖДЕНИЕ'}.")
@@ -173,7 +176,7 @@ def section_invariant(labels, comp, out):
                    "валидация. Это не повод менять состав — это повод найти, какой "
                    "ряд переписали, и понять, стало ли лучше.")
         out.append("")
-    return ok
+    return "ok" if ok else "drift"
 
 
 def section_health(health, out):
@@ -183,7 +186,12 @@ def section_health(health, out):
     span = f"[{lo:+.2f}; {hi:+.2f}]" if lo is not None else "—"
     out.append(f"| величина | значение |")
     out.append(f"|---|---|")
-    out.append(f"| скользящий IC за {health.get('n')} мес | **{health.get('ic_24m'):+.3f}** |")
+    # IC штатно бывает None (мало завершённых месяцев с данными — health.py), и формат
+    # «+.3f» на нём падал TypeError: отчёт не создавался, уведомление не уходило вовсе,
+    # а на VPS это падение беззвучно.
+    ic = health.get("ic_24m")
+    out.append(f"| скользящий IC за {health.get('n')} мес | "
+               f"**{ic:+.3f}** |" if ic is not None else "| скользящий IC | не считается |")
     out.append(f"| 95% интервал | {span} |")
     out.append(f"| статус | **{health.get('status')}** |")
     out.append(f"| месяцев ниже нуля подряд | {health.get('below_zero_months')} "
@@ -225,11 +233,21 @@ def cell_flagged(mean, ref_mean, se_pp):
     return (ratio > DRIFT_SE_RATIO), (f"{ratio:.1f} ст.ош." if ratio > DRIFT_SE_RATIO else None)
 
 
+def _num(value, digits=2, plus=True):
+    """Число из constants или прочерк: часть полей может отсутствовать у старой строки."""
+    if value is None:
+        return "—"
+    return f"{value:+.{digits}f}" if plus else f"{value:.{digits}f}"
+
+
 def section_cells(labels, fwd, cells, out):
     out.append("## 3. Статистика ячеек против `constants.CELL_STATS`")
     out.append("")
-    out.append("| ячейка | n сейчас / в коде | средн сейчас / в коде | Δ в ст.ош. | медиана | худший |")
-    out.append("|---|---|---|---|---|---|")
+    # Все пять величин сверяются с кодом, а не только среднее: раздел называется
+    # «против constants.CELL_STATS», а сверял одну из пяти и три печатал без базы.
+    out.append("| ячейка | n | средн сейчас / в коде | Δ в ст.ош. | медиана сейчас / в коде "
+               "| плюсовых сейчас / в коде | худший сейчас / в коде |")
+    out.append("|---|---|---|---|---|---|---|")
     BITS = {"bull": 1, "bear": 0, "calm": 0, "stress": 1, "ok": 0}
     rows = {}
     for i in range(len(labels) - 2):
@@ -250,13 +268,23 @@ def section_cells(labels, fwd, cells, out):
         ref_mean = ref.get("mean_fwd1m_pct")
         ratio = abs(mean - (ref_mean or 0)) / se_pp if se_pp else 0.0
         flagged, why = cell_flagged(mean, ref_mean, se_pp)
-        mark = " ⚠️" if flagged else ""
+        hit = sum(1 for x in v if x > 0) / n
+        worst = pc(v[0])
+        # НОВЫЙ ЭКСТРЕМУМ — всегда новость, независимо от выборки: месяц хуже всего,
+        # что видела заморозка, меняет то, ради чего ворота закрыты.
+        ref_worst = ref.get("worst_pct")
+        if ref_worst is not None and worst < ref_worst - 0.05:
+            flagged, why = True, f"новый худший месяц {worst:+.1f}% (было {ref_worst:+.1f}%)"
         if flagged:
             # Имя находки — сама ячейка: её числа дрейфуют, а проблема та же.
             drift.append((f"cell:{code}",
                           f"{code}: {mean:+.2f}% против {ref_mean:+.2f}% ({why})"))
-        out.append(f"| {code} | {n} / {ref.get('n')} | {mean:+.2f}% / "
-                   f"{ref_mean:+.2f}%{mark} | {ratio:.2f} | {med:+.2f}% | {pc(v[0]):+.1f}% |")
+        mark = " ⚠️" if flagged else ""
+        esc = code.replace("|", chr(92) + "|")
+        out.append(f"| {esc} | {n} / {ref.get('n')} | {mean:+.2f}% / {ref_mean:+.2f}%{mark} | "
+                   f"{ratio:.2f} | {med:+.2f}% / {_num(ref.get('median_fwd1m_pct'))} | "
+                   f"{hit:.2f} / {_num(ref.get('hit'), 2, plus=False)} | "
+                   f"{worst:+.1f}% / {_num(ref_worst, 1)} |")
     out.append("")
     out.append(f"Порог тревоги — {DRIFT_SE_RATIO} собственной ошибки среднего ячейки, а не "
                f"абсолютные проценты: у ячейки с n=24 эта ошибка около 2,9 п.п., и "
@@ -264,6 +292,9 @@ def section_cells(labels, fwd, cells, out):
                f"число, а не дрейф. Отдельно и независимо от выборки ловятся смена знака и "
                f"переход через {TONE_CRIT_PCT}% (по нему фронт красит ячейку).")
     out.append("")
+    if not rows:
+        out.append("⚠️ Сравнивать нечего: ни одна ячейка не набрала наблюдений.")
+        out.append("")
     if drift:
         out.append("Разошлись: " + "; ".join(text for _, text in drift) + ".")
         out.append("")
@@ -271,7 +302,7 @@ def section_cells(labels, fwd, cells, out):
                    "разом, и правка одной строки рассогласует таблицу с руководством "
                    "и с правилами дня.")
         out.append("")
-    return drift
+    return drift, len(rows)
 
 
 def section_strategies(labels, comp, fwd, cells, out):
@@ -329,8 +360,20 @@ def rate_phase_by_day(panel):
     return phase
 
 
-def signal_on(sig, code, phase):
-    """Включён ли сигнал в этой ячейке — по тем же `when`/`alt_when`, что и в проде."""
+class UnknownGate(RuntimeError):
+    """Ворота, которых реконструкция не знает. Молча считать их закрытыми нельзя."""
+
+
+def signal_on(sig, code, phase, month):
+    """Включён ли сигнал в этой ячейке — по тем же `when`/`alt_when`, что и в проде.
+
+    Ключ `era` раньше проваливался в общую ветку и сравнивался с битами ячейки, где
+    его нет: `bits.get("era")` — None, значит False на ЛЮБОЙ ячейке. Единственный
+    сигнал с такими воротами (dy_trail) не проверялся отчётом никогда — в таблице
+    вечно стояло «мало данных», хотя истории после 2022-03-24 больше четырёх лет.
+    Неизвестное имя ворот теперь ошибка, а не тихое «выключено»: молчаливо
+    выключенная проверка — это ровно тот отказ, который сам себя прячет.
+    """
     bits = bits_of(code)
     if not bits:
         return False
@@ -339,8 +382,20 @@ def signal_on(sig, code, phase):
         if not spec:
             return False
         for key, want in spec.items():
-            got = phase if key == "rate_phase" else bits.get(key)
-            if got != want:
+            if key == "era":
+                # Та же граница, что у states._gate_ok: эра post22 с даты реопена.
+                if want != "post22":
+                    raise UnknownGate(f"{sig.get('id')}: неизвестная эра {want!r}")
+                if month < constants.ERA_POST22_START:
+                    return False
+                continue
+            if key == "rate_phase":
+                if phase != want:
+                    return False
+                continue
+            if key not in bits:
+                raise UnknownGate(f"{sig.get('id')}: неизвестные ворота {key!r}")
+            if bits[key] != want:
                 return False
         return True
 
@@ -350,7 +405,8 @@ def signal_on(sig, code, phase):
 def gate_text(sig):
     words = {"trend": {0: "медведь", 1: "бык"}, "vol": {0: "спокойно", 1: "вола-стресс"},
              "bond": {0: "ОФЗ спокойны", 1: "ОФЗ в стрессе"},
-             "rate_phase": {-1: "смягчение", 1: "ужесточение", 0: "пауза"}}
+             "rate_phase": {-1: "смягчение", 1: "ужесточение", 0: "пауза"},
+             "era": {"post22": "эра после 2022"}}
     out = []
     for spec in (sig.get("when"), sig.get("alt_when")):
         if not spec:
@@ -378,7 +434,7 @@ def section_second_layer(labels, fwd, cells, panel, out):
             j = idx_of.get(labels[i])
             if j is None or fwd[i] is None or series[j] is None:
                 continue
-            if not signal_on(sig, cells.get(labels[i]), phases.get(labels[i], 0)):
+            if not signal_on(sig, cells.get(labels[i]), phases.get(labels[i], 0), labels[i]):
                 continue
             # Знак ноги — тот же, что применяет панель: иначе таблица покажет
             # «перевёрнутый» IC у контрарианских сигналов и это прочтут как поломку.
@@ -460,9 +516,20 @@ def main():
 
     raw = Path(store.raw_dir())
     have = len(list(raw.glob("*.json"))) if raw.exists() else 0
-    restored = None
+    restored, missing = None, []
     if args.restore or have == 0:
         restored, missing = restore_from_r2(raw)
+        # Неполное восстановление МОЛЧАЛО: предупреждение уходило в stderr, а отчёт и
+        # уведомление докладывали вердикты как достоверные. Отсутствие ноги ядра даёт
+        # композит из двух ног вместо трёх — то есть «композит разошёлся с эталоном»
+        # и health=dead на ровном месте. Такое считать нельзя вовсе.
+        critical = [sid for sid in missing
+                    if (registry.SERIES.get(sid) or {}).get("required")]
+        if critical:
+            raise SystemExit(
+                "восстановление неполное: не хватает обязательных рядов "
+                f"({', '.join(critical)}). Считать по огрызку стора нельзя — вердикты "
+                "были бы ложными. Запустите реколибровку на VPS, где стор локальный.")
         if missing:
             print(f"ПРЕДУПРЕЖДЕНИЕ: в зеркале не нашлось {len(missing)} рядов: "
                   f"{', '.join(missing[:8])}", file=sys.stderr)
@@ -483,24 +550,28 @@ def main():
            "с историей, и оставляет решение человеку: автоматический пересмотр состава "
            "по свежей результативности — доказанный провал (REGIME.md §4).", ""]
 
-    invariant_ok = section_invariant(labels, comp, out)
+    invariant = section_invariant(labels, comp, out)
     section_health(health, out)
-    drift = section_cells(labels, fwd, cells, out)
+    drift, compared_cells = section_cells(labels, fwd, cells, out)
     section_strategies(labels, comp, fwd, cells, out)
     section_second_layer(labels, fwd, cells, panel, out)
 
     out.append("## Что делать с этим отчётом")
     out.append("")
-    if not invariant_ok:
+    if invariant == "drift":
         out.append("1. **Инвариант разошёлся** — разобраться в первую очередь: "
                    "композит больше не тот, на котором считалась валидация.")
+    if invariant == "no_reference":
+        out.append("1. **Инвариант не проверялся** — найти "
+                   "`validation/data/walkforward_results.csv`; без него у отчёта нет "
+                   "главной опоры.")
     if drift:
         out.append("1. Числа ячеек разошлись — правку делать целиком, вместе с "
                    "`web/guide.html` (его сверяет `tests/test_guide.py`).")
     if health.get("review_due"):
         out.append("1. **Достигнут порог §7** — искать кандидата с механизмом; "
                    "трейлинг-IC для отбора не использовать.")
-    if invariant_ok and not drift and not health.get("review_due"):
+    if invariant == "ok" and not drift and not health.get("review_due"):
         out.append("Расхождений выше порогов нет. Состав ядра не трогать.")
     out.append("")
 
@@ -514,8 +585,18 @@ def main():
         print(text)
 
     verdicts = list(drift)
-    if not invariant_ok:
+    if invariant == "drift":
         verdicts.insert(0, ("invariant", "композит разошёлся с эталоном исследования"))
+    elif invariant == "no_reference":
+        verdicts.insert(0, ("no_reference",
+                            "инвариант НЕ ПРОВЕРЕН: эталона walk-forward не нашлось"))
+    # «Расхождений нет» и «сравнивать было нечего» — РАЗНЫЕ исходы, и второй опаснее:
+    # он приходит тем же успокаивающим сообщением. Воспроизводилось удалением одного
+    # ряда из стора: разделы 3–5 пустели, а финал печатал «Расхождений нет».
+    if not compared_cells:
+        verdicts.insert(0, ("no_comparison",
+                            "сравнивать было НЕЧЕГО: ни одна ячейка не набрала "
+                            "наблюдений — проверьте полноту стора"))
     print("уведомление:", notify(verdicts, health, args.notify, args.out))
     return 0
 

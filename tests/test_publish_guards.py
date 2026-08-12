@@ -96,6 +96,89 @@ class FakeBucket:
             raise self.pub.r2.R2Error(f"GET {key}: не удалось за 3 попыток (HTTP 503)")
         return self.objects.get(key)
 
+    def _get(self, key):
+        """Сырое тело объекта: манифест зеркала читается именно так, а не get_json."""
+        if self.read_fails:
+            raise self.pub.r2.R2Error(f"GET {key}: не удалось за 3 попыток (HTTP 503)")
+        obj = self.objects.get(key)
+        return None if obj is None else json.dumps(obj, ensure_ascii=False).encode("utf-8")
+
+
+class FakeStore:
+    """Стор с двумя рядами: столько, сколько нужно манифесту зеркала."""
+
+    def __init__(self, series):
+        self.series = list(series)
+        self.cleared = []
+
+    def list_series(self):
+        return list(self.series)
+
+    def list_dirty(self):
+        return []
+
+    def load_series(self, sid):
+        return {"id": sid, "points": {}}
+
+    def clear_dirty(self, ids):
+        self.cleared.extend(ids)
+
+
+class TestMirrorIndex(PublishCase):
+    """raw/_index.json — единственный способ перечислить зеркало.
+
+    Подпись S3 в lib/r2.py не умеет ListObjects, поэтому без манифеста стор из
+    бакета не восстановить: надо заранее знать все имена. Отсюда и цена ошибки —
+    реколибровка на чистом раннере (ops/recalibrate.py) собрала бы композит из
+    того, что попало в манифест, и молча получила бы другую модель.
+    """
+
+    def install(self, bucket):
+        p = mock.patch.object(self.publish.r2, "get", bucket._get)
+        p.start()
+        self.addCleanup(p.stop)
+        return bucket
+
+    def test_манифест_объединяет_а_не_перезаписывает(self):
+        # ОПЛАЧЕНО ПРОДОМ: писателей двое, и у запасного (GitHub Actions) стор пустой
+        # — он собирает только ряды суточного режима. Перезапись вычёркивала 69 рядов
+        # из 105, включая ногу ядра urals_tax: следующее восстановление дало бы
+        # композит из двух ног вместо трёх, то есть ложный «разошёлся с эталоном».
+        bucket = self.install(FakeBucket(
+            self.publish, {"raw/_index.json": {"series": ["urals_tax", "imoex", "cbr_key"]}}
+        ).install(self))
+        store = FakeStore(["imoex", "rgbi"])
+        res = self.publish.publish(self.payload(), "daily", store=store)
+        got = bucket.objects["raw/_index.json"]
+        self.assertEqual(got["series"], ["cbr_key", "imoex", "rgbi", "urals_tax"])
+        self.assertEqual(got["written_by_local"], 2,
+                         "манифест обязан признаваться, сколько рядов знает сам писатель")
+        self.assertEqual(res["raw_indexed"], 4)
+
+    def test_битый_манифест_не_роняет_публикацию(self):
+        bucket = FakeBucket(self.publish).install(self)
+        p = mock.patch.object(self.publish.r2, "get", lambda key: "{ это не json".encode("utf-8"))
+        p.start()
+        self.addCleanup(p.stop)
+        res = self.publish.publish(self.payload(), "daily", store=FakeStore(["imoex"]))
+        self.assertEqual(bucket.objects["raw/_index.json"]["series"], ["imoex"])
+        self.assertTrue(res["ok"])
+
+    def test_недоступный_бакет_не_стирает_манифест(self):
+        # Чтение упало — но запись манифеста идёт всё равно, и в ней не должно
+        # оказаться пусто: иначе одна 503 обнуляет перечень зеркала.
+        bucket = self.install(FakeBucket(self.publish, read_fails=True).install(self))
+        self.publish.publish(self.payload(), "daily", store=FakeStore(["imoex", "rgbi"]))
+        self.assertEqual(bucket.objects["raw/_index.json"]["series"], ["imoex", "rgbi"])
+
+    def test_без_стора_манифест_не_трогаем(self):
+        # Прогон без стора ничего о зеркале не знает: пустой манифест был бы враньём.
+        bucket = self.install(FakeBucket(
+            self.publish, {"raw/_index.json": {"series": ["imoex"]}}).install(self))
+        res = self.publish.publish(self.payload(), "daily", store=None)
+        self.assertIsNone(res["raw_indexed"])
+        self.assertEqual(bucket.objects["raw/_index.json"]["series"], ["imoex"])
+
 
 class TestHistoryIsBuiltBeforeTrim(PublishCase):
     def test_full_history_survives_the_trim_ladder(self):

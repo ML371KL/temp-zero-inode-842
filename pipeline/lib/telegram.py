@@ -36,12 +36,17 @@ CHANNELS = {
     "ops": ("ERROR_BOT_TOKEN", "ERROR_CHAT_ID"),
 }
 
-# Три исхода доставки. ПОЧЕМУ не bool: «уже отправляли» и «не доставили» — разные
+# Четыре исхода доставки. ПОЧЕМУ не bool: «уже отправляли» и «не доставили» — разные
 # вещи, а notify() возвращал на них одинаковый False. Из-за этого alerts.run считал
 # доставленное событие потерянным и клал его в очередь повторов: за день накануне
 # заседания ЦБ 56 интрадей-тактов забивали очередь одним и тем же cb_reminder, и
 # настоящие события (снятие облигационного флага, окно входа) в неё уже не влезали.
-SENT, DUP, FAIL = "sent", "dup", "fail"
+#
+# OFF — «канала нет вовсе»: переменные не заданы, слать некуда и не станет куда до
+# правки окружения. Это НЕ провал доставки, и повторять такое событие бессмысленно:
+# без OFF прогон на машине без токена копил вечную очередь повторов — ровно та же
+# ошибка, которую уже исправили в зеркале хаба (nexus.OFF, alerts.dispatch).
+SENT, DUP, FAIL, OFF = "sent", "dup", "fail", "off"
 
 
 def state_dir():
@@ -141,12 +146,14 @@ def send(text, silent=False, retries=2, channel="alerts"):
 
 
 def deliver(key, text, silent=False, cooldown_hours=None, channel="alerts"):
-    """Отправить с дедупом по ключу: SENT (ушло сейчас) | DUP (уже отправляли) | FAIL.
+    """SENT (ушло сейчас) | DUP (уже отправляли) | OFF (канал не настроен) | FAIL.
 
-    Вызывающему важно отличать DUP от FAIL: на DUP событие считается доставленным
-    и в очередь повторов НЕ кладётся, на FAIL — кладётся и повторяется.
+    Вызывающему важно отличать DUP и OFF от FAIL: на первые двух событие считается
+    закрытым и в очередь повторов НЕ кладётся, на FAIL — кладётся и повторяется.
     """
     try:
+        if config(channel) is None:
+            return OFF
         if already_sent(key, cooldown_hours, channel):
             return DUP
         ok, _err = send(text, silent=silent, channel=channel)
@@ -164,16 +171,38 @@ def notify(key, text, silent=False, cooldown_hours=None, channel="alerts"):
                    channel=channel) == SENT
 
 
+# Ключи, которые обязаны пережить обычную чистку. Маркер — единственная память о
+# том, что сообщение уже уходило, и живёт он ровно до `prune_markers`. У месячного
+# отчёта реколибровки это ломало собственное обещание «пока состав проблем тот же —
+# тишина»: маркер от 5 сентября исчезал к 20 октября, и 5 ноября та же находка
+# уходила заново. Находка живёт месяцами по построению (константы не пересчитаны —
+# расхождение верно и через полгода), поэтому её маркеру нужен свой срок.
+LONG_LIVED = ("recalibrate:",)
+LONG_LIVED_DAYS = 400
+
+
+def _is_long_lived(path):
+    """Долгоживущий ли маркер. Смотрим на КЛЮЧ внутри файла, а не на имя: имя —
+    это хеш, из него исходный ключ не достать."""
+    try:
+        key = json.loads(path.read_text(encoding="utf-8")).get("key") or ""
+    except (OSError, ValueError, TypeError):
+        return False
+    return any(str(key).startswith(prefix) for prefix in LONG_LIVED)
+
+
 def prune_markers(days=45):
     """Чистка каталога маркеров: за год их накапливаются тысячи."""
     cutoff = time.time() - days * 86400
+    long_cutoff = time.time() - LONG_LIVED_DAYS * 86400
     removed = 0
     try:
         # rglob, а не glob: маркеры ops-канала лежат подкаталогом, и обычный glob
         # чистил бы только основной — второй рос бы вечно.
         for path in (state_dir() / "notify").rglob("*.json"):
             try:
-                if path.stat().st_mtime < cutoff:
+                limit = long_cutoff if _is_long_lived(path) else cutoff
+                if path.stat().st_mtime < limit:
                     path.unlink()
                     removed += 1
             except OSError:

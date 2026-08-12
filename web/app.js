@@ -730,7 +730,16 @@
     // календарь, вероятность перемирия, позиции физлиц, бюджетный узел.
     // В будущее по-прежнему не пускаем: дата события (заседание через месяц)
     // отсеивается как и раньше.
-    var horizon = String(d.generated_at || '').slice(0, 10) || d.asof_trading_day || '';
+    //
+    // День сборки считается по МОСКВЕ, а не по UTC. Тайлы датируют себя московским
+    // днём (compute/monitors.py: _msk_now), и на такте после 21:00 UTC московская дата
+    // уже завтрашняя — сравнение с UTC-датой объявляло свежие данные «будущими» и
+    // прятало подпись до утра. Ловилось у бюджетного узла на закрывающем такте 00:00 МСК.
+    // МСК фиксирован (UTC+3) круглый год, поэтому сдвиг — константа, как и в fmtStamp.
+    var built = Date.parse(d.generated_at);
+    var horizon = isFinite(built)
+      ? new Date(built + 3 * 3600 * 1000).toISOString().slice(0, 10)
+      : (d.asof_trading_day || '');
     var asof = m.asof ? String(m.asof) : null;
     if (asof && horizon && asof.slice(0, 10) > horizon) {
       var p = m.payload || {}, best = null;

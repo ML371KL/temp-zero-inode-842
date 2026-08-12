@@ -46,6 +46,29 @@ def _days_between(a, b):
         return None
 
 
+def below_zero_streak(series):
+    """Сколько ЗАКРЫТЫХ месяцев ПОДРЯД с конца скользящий IC ниже нуля -> (сколько, с какого).
+
+    Это и есть величина, на которую ссылается регламент пересмотра состава ядра
+    (docs/ARCHITECTURE.md §7: «health<0 два квартала подряд»). До 12.08.2026 условие
+    было записано словами и не измерялось ничем: алерт срабатывал на ПЕРВЫЙ месяц
+    ниже нуля и молчал дальше, а порог наступал через полгода — в тишине.
+
+    Отдельной функцией, потому что иначе её невозможно проверить: ряд IC собирается
+    из панели внутри compute_health, и тест поневоле переписывал бы этот цикл у себя
+    и проверял собственную копию (так и было — аудит 13.08.2026).
+
+    Ноль НЕ считается «ниже нуля»: порог статуса dead в HEALTH_THRESHOLDS строгий.
+    """
+    streak, since = 0, None
+    for month, value in reversed(list(series or [])):
+        if value is None or value >= 0:
+            break
+        streak += 1
+        since = month
+    return streak, since
+
+
 def compute_health(panel, mf=None, sign_since=None):
     """-> {"ic_24m","n","status","series",…}. Чистая функция: сеть и файлы не трогает."""
     if mf is None:
@@ -93,16 +116,7 @@ def compute_health(panel, mf=None, sign_since=None):
     with_data = sum(1 for v in tail_comp if calc.is_num(v))
     coverage = round(with_data / len(tail_months), 3) if tail_months else 0.0
 
-    # Сколько ЗАКРЫТЫХ месяцев подряд скользящий IC держится ниже нуля. Это и есть
-    # величина, на которую ссылается регламент пересмотра состава (§7: «health<0 два
-    # квартала подряд»): до сих пор условие было записано словами, но не измерялось —
-    # алерт срабатывал на первый день статуса dead и молчал дальше.
-    streak, since = 0, None
-    for month, value in reversed(series):
-        if value >= 0:
-            break
-        streak += 1
-        since = month
+    streak, since = below_zero_streak(series)
 
     asof = labels[-1] if labels else None
     out = {

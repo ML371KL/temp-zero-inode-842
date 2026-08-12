@@ -136,9 +136,17 @@ class TestRequiredShape(PayloadCase):
         # разойдётся с лентой состояний под ним.
         self.assertEqual(verdict["cell_code"], self.expect["cell_code"])
         stats = self.constants.CELL_STATS[tuple(self.expect["cell_key"])]
-        self.assertEqual(verdict["cell_stats"]["mean_fwd1m_pct"],
-                         stats["mean_fwd1m_pct"])
-        self.assertEqual(verdict["cell_stats"]["n"], stats["n"])
+        # Все ПЯТЬ витринных величин, а не только среднее: витрина показывает медиану,
+        # худший месяц и долю плюсовых отдельными тайлами, и до 13.08.2026 контракт
+        # не проверял ни одну из них — выпадение поля из publish._verdict читалось бы
+        # на панели как прочерк, то есть «данных нет», при исправных константах.
+        # Среднее по ячейке — хвостовая статистика, поэтому именно спутники дают смысл.
+        for field in ("mean_fwd1m_pct", "median_fwd1m_pct", "worst_pct", "hit", "n"):
+            with self.subTest(field=field):
+                self.assertIn(field, verdict["cell_stats"])
+                self.assertEqual(verdict["cell_stats"][field], stats[field])
+        # Лучший месяц ездит в витрине ради симметрии подписи «от … до …».
+        self.assertEqual(verdict["cell_stats"].get("best_pct"), stats["best_pct"])
         self.assertEqual(verdict["core_value"], self.core["value"])
         self.assertTrue(verdict["rule"].strip())
 

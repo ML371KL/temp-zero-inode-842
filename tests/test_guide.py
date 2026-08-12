@@ -26,6 +26,65 @@ def read(p):
     return p.read_text(encoding="utf-8")
 
 
+def ru_pct(value, nd, plus=True):
+    """Число так, как оно набрано в руководстве: запятая, типографский минус, знак."""
+    body = f"{abs(value):.{nd}f}".replace(".", ",")
+    sign = "−" if value < 0 else ("+" if plus else "")
+    return f"{sign}{body}%"
+
+
+# Подпись строки: «бык · стресс · облигации ок» -> (тренд, волатильность, облигации).
+# Слова взяты из самой вёрстки; третий признак пишется и как «ок», и как «облигации ок».
+_BITS = ({"бык": 1, "медведь": 0}, {"стресс": 1, "спокойно": 0}, None)
+
+
+def cell_table(html):
+    """Разметка ИМЕННО таблицы ячеек.
+
+    Искать по всему документу нельзя: таблиц в руководстве пять, и первая же
+    `<caption>` принадлежит таблице состава ядра.
+    """
+    table = re.search(r'<table[^>]*>(?:(?!</table>).)*?<caption>Ячейки отсортированы.*?</table>',
+                      html, re.S)
+    if table is None:
+        raise AssertionError("в руководстве не нашлась таблица ячеек")
+    return table.group(0)
+
+
+def cell_rows(html):
+    """Строки таблицы ячеек -> [{key, title, dim, median, mean, worst, hit, n, tone}]."""
+    body = re.search(r"<tbody>(.*?)</tbody>", cell_table(html), re.S)
+    if body is None:
+        raise AssertionError("у таблицы ячеек нет tbody")
+
+    rows = []
+    for chunk in re.findall(r"<tr>(.*?)</tr>", body.group(1), re.S):
+        head = re.search(r'<th scope="row">(.*?)<br>\s*<span class="guide__dim">(.*?)</span>',
+                         chunk, re.S)
+        if head is None:
+            raise AssertionError(f"строка таблицы без названия и признаков: {chunk[:80]}")
+        dim = re.sub(r"\s+", " ", head.group(2)).strip()
+        parts = [p.strip() for p in dim.split("·")]
+        if len(parts) != 3:
+            raise AssertionError(f"в подписи «{dim}» не три признака")
+        key = (_BITS[0].get(parts[0]), _BITS[1].get(parts[1]),
+               1 if "стресс" in parts[2] else 0)
+
+        cells = re.findall(r'<td(?:\s+class="(tone-\w+)")?>(.*?)</td>', chunk, re.S)
+        if len(cells) < 6:
+            raise AssertionError(f"в строке «{dim}» {len(cells)} колонок вместо шести")
+        vals = [re.sub(r"<[^>]+>", "", v).strip() for _, v in cells]
+        rows.append({
+            "key": key,
+            "title": re.sub(r"<[^>]+>", "", head.group(1)).strip(),
+            "dim": dim,
+            "median": vals[0], "mean": vals[1], "worst": vals[2],
+            "hit": vals[3], "n": vals[4],
+            "tone": {"median": cells[0][0], "mean": cells[1][0], "worst": cells[2][0]},
+        })
+    return rows
+
+
 class TestGuideStructure(unittest.TestCase):
     def setUp(self):
         if not GUIDE.exists():
@@ -84,35 +143,92 @@ class TestGuideMatchesConstants(unittest.TestCase):
         self.K = constants
         self.html = read(GUIDE)
 
-    def test_cell_means_present(self):
-        """Каждая ячейка описана в руководстве своей средней доходностью."""
-        for key, cell in self.K.CELL_STATS.items():
-            with self.subTest(cell=cell["label"]):
-                # В тексте числа набраны по-русски: запятая и типографский минус.
-                shown = f"{abs(cell['mean_fwd1m_pct']):.2f}".replace(".", ",")
-                self.assertIn(shown, self.html,
-                              f"средняя ячейки «{cell['label']}» ({shown}%) не найдена в руководстве")
+    def test_cell_table_matches_constants(self):
+        """Таблица ячеек разбирается по строкам и сверяется со своей ячейкой.
 
-    def test_cell_distribution_present(self):
-        """Рядом со средним стоят медиана и худший месяц: одно среднее лжёт.
+        До 13.08.2026 сверка шла подстрокой по всему документу: «есть ли где-нибудь
+        на странице 2,94». Такая проверка зелена, пока числа просто присутствуют, —
+        она не видит ни перепутанных местами строк, ни медианы, уехавшей в колонку
+        среднего, ни числа из соседней ячейки. Восемь ячеек с похожими величинами
+        (+0,93 / +0,85 / +0,54 / +0,51) — ровно тот случай, где перестановка не
+        ловится совпадением набора чисел.
 
-        Среднее по ячейке — хвостовая статистика (у токсичной −2,94% при медиане
-        +0,64%), и читатель, увидевший только его, ждёт «примерно −3% в следующем
-        месяце». Он получит +5% и перестанет верить панели — хотя панель говорила
-        о хвосте, а не о типичном месяце.
+        Разбираем строку целиком: признаки состояния из подписи задают ключ
+        CELL_STATS, шесть колонок — шесть величин этой ячейки.
         """
-        for key, cell in self.K.CELL_STATS.items():
-            with self.subTest(cell=cell["label"]):
-                for field, nd in (("median_fwd1m_pct", 2), ("worst_pct", 1)):
-                    shown = f"{abs(cell[field]):.{nd}f}".replace(".", ",")
-                    self.assertIn(shown, self.html,
-                                  f"{field} ячейки «{cell['label']}» ({shown}%) нет в руководстве")
+        rows = cell_rows(self.html)
+        self.assertEqual(len(rows), len(self.K.CELL_STATS),
+                         f"строк в таблице {len(rows)}, ячеек в модели {len(self.K.CELL_STATS)}")
+        self.assertEqual(len({r["key"] for r in rows}), len(rows),
+                         "две строки таблицы описывают одну и ту же ячейку")
 
-    def test_cell_counts_present(self):
-        for key, cell in self.K.CELL_STATS.items():
-            with self.subTest(cell=cell["label"]):
-                self.assertRegex(self.html, r">\s*%d\s*<" % cell["n"],
-                                 f"число наблюдений ячейки «{cell['label']}» не найдено")
+        for row in rows:
+            cell = self.K.CELL_STATS.get(row["key"])
+            with self.subTest(cell=row["title"], key=row["key"]):
+                self.assertIsNotNone(
+                    cell, f"признаки «{row['dim']}» не соответствуют ни одной ячейке модели")
+                self.assertEqual(row["title"].lower(), cell["label"],
+                                 "название строки разошлось с label ячейки")
+                for col, field, nd in (("median", "median_fwd1m_pct", 2),
+                                       ("mean", "mean_fwd1m_pct", 2),
+                                       ("worst", "worst_pct", 1)):
+                    self.assertEqual(row[col], ru_pct(cell[field], nd),
+                                     f"колонка «{col}»: в руководстве {row[col]}, "
+                                     f"в константах {ru_pct(cell[field], nd)}")
+                self.assertEqual(row["hit"], f"{round(cell['hit'] * 100)}%",
+                                 "доля плюсовых месяцев разошлась с hit")
+                self.assertEqual(row["n"], str(cell["n"]), "число наблюдений разошлось с n")
+
+    def test_cell_table_tone_matches_sign(self):
+        """Минус, покрашенный зелёным, читается как плюс — и наоборот.
+
+        Знак в таблице несёт весь смысл (среднее токсичной ячейки −2,94% против
+        медианы +0,64%), а цвет читается раньше цифры.
+        """
+        for row in cell_rows(self.html):
+            for col in ("median", "mean", "worst"):
+                want = "tone-neg" if row[col].startswith("−") else "tone-pos"
+                with self.subTest(cell=row["title"], col=col):
+                    self.assertEqual(row["tone"][col], want,
+                                     f"{row[col]} покрашено как {row['tone'][col]}")
+
+    def test_cell_caption_quotes_toxic_cell(self):
+        """Подпись к таблице объясняет разрыв среднего и медианы конкретными числами."""
+        toxic = self.K.CELL_STATS[(0, 1, 1)]
+        caption = re.search(r"<caption>(.*?)</caption>", cell_table(self.html), re.S)
+        self.assertIsNotNone(caption, "у таблицы ячеек пропала подпись")
+        text = caption.group(1)
+        for field, nd in (("mean_fwd1m_pct", 2), ("median_fwd1m_pct", 2)):
+            self.assertIn(ru_pct(toxic[field], nd), text,
+                          f"подпись рассказывает про токсичную ячейку не её числами ({field})")
+
+    def test_monitor_tiles_counted_correctly(self):
+        """Сколько тайлов на панели, столько же обещано словами и описано в списке.
+
+        Руководство говорило «Пятнадцать тайлов», а панель показывала шестнадцать
+        и описывала шестнадцать: счёт словами отстал на один тайл и никем не
+        проверялся — числительное прописью не совпадает ни с какой константой, так
+        что разъехаться оно может только молча. Считаем от кода: сколько вызовов
+        `_tile("id"` в конвейере, столько и должно быть.
+        """
+        source = (ROOT / "pipeline" / "compute" / "monitors.py").read_text(encoding="utf-8")
+        built = set(re.findall(r'_tile\(\s*"([a-z_0-9]+)"', source))
+        self.assertGreater(len(built), 5, "тайлы в конвейере не нашлись — сменился вызов?")
+
+        section = re.search(r'<section class="guide__sec" id="monitors">(.*?)</section>',
+                            self.html, re.S)
+        self.assertIsNotNone(section, "в руководстве нет раздела мониторов")
+        described = re.findall(r"<dt>(.*?)</dt>", section.group(1), re.S)
+        self.assertEqual(len(described), len(built),
+                         f"описано тайлов {len(described)}, конвейер собирает {len(built)}")
+
+        words = {12: "Двенадцать", 13: "Тринадцать", 14: "Четырнадцать", 15: "Пятнадцать",
+                 16: "Шестнадцать", 17: "Семнадцать", 18: "Восемнадцать",
+                 19: "Девятнадцать", 20: "Двадцать"}
+        word = words.get(len(built))
+        self.assertIsNotNone(word, f"числительное для {len(built)} не описано в тесте — допишите")
+        self.assertIn(f"{word} тайлов", section.group(1),
+                      f"вступление раздела обещает не {len(built)} тайлов")
 
     def test_core_windows_match(self):
         """Окно z и обрезка описаны словами — они не должны разъехаться с кодом."""

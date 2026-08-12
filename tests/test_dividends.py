@@ -22,6 +22,7 @@
 
 import json
 import unittest
+from datetime import date
 from unittest import mock
 
 from tests import fixture_text, need
@@ -151,9 +152,16 @@ class CalendarCase(unittest.TestCase):
         # точки здесь — БУДУЩИЕ отсечки. Витрина от 12.08 получала asof 2026-10-12,
         # фронт дату из будущего в подпись не пускает — и тайл с исправными числами
         # показывал «нет данных». Та же дата уезжала в блок sources.
-        self.serve(tinvest_ok=True)
-        _sid, _pts, meta = self.d.calendar(with_amounts=False)
-        self.assertEqual(meta["asof"], self.d.dates.fmt_date(self.d.dates.today_msk()))
+        #
+        # День чтения ЗАМОРОЖЕН, а не взят из тех же часов, что смотрит код: сверка
+        # `today_msk()` с `today_msk()` верна при любой поломке — включая ту самую,
+        # когда фетчер снова начнёт брать дату из точек, если они окажутся в прошлом.
+        # Дата взята заведомо РАНЬШЕ отсечек фикстуры (июль и сентябрь 2026), то есть
+        # умолчание make_meta здесь дало бы другой ответ.
+        with mock.patch.object(self.d.dates, "today_msk", return_value=date(2026, 6, 30)):
+            self.serve(tinvest_ok=True)
+            _sid, _pts, meta = self.d.calendar(with_amounts=False)
+        self.assertEqual(meta["asof"], "2026-06-30")
         # Ловушка в чистом виде и без зависимости от календаря (правило 1 набора:
         # никаких «сегодня минус N»): умолчание make_meta на ряде из будущих точек
         # отдаёт дату из будущего, и фетчер обязан её перебить.

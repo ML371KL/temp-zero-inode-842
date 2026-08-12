@@ -18,6 +18,8 @@
 
 import json
 import os
+import random
+import time
 import unittest
 import urllib.error
 from unittest import mock
@@ -224,6 +226,36 @@ class TestBadAnswers(CommentaryCase):
             self.assertIsNone(self.mod.comments(self.events(), self.panel(), log=self.log.append))
         self.assertEqual(len(self.calls), 1, "после исчерпания бюджета цепочка обязана встать")
         self.assertTrue(any("бюджет" in m for m in self.log))
+
+    def test_broken_budget_variable_does_not_kill_the_run(self):
+        # Раньше бюджет читался на уровне модуля: `LLM_BUDGET_S=скоро` — это
+        # ValueError в момент import, то есть опечатка в окружении роняла ВЕСЬ
+        # прогон конвейера, а не комментарии. Контракт модуля обратный.
+        prev = os.environ.get("LLM_BUDGET_S")
+        self.addCleanup(lambda: os.environ.__setitem__("LLM_BUDGET_S", prev)
+                        if prev is not None else os.environ.pop("LLM_BUDGET_S", None))
+        for junk in ("скоро", "", "  ", "-5", "0"):
+            with self.subTest(value=junk):
+                os.environ["LLM_BUDGET_S"] = junk
+                self.assertEqual(self.mod.budget_s(), self.mod.BUDGET_DEFAULT_S)
+        os.environ["LLM_BUDGET_S"] = "30"
+        self.assertEqual(self.mod.budget_s(), 30.0)
+
+    def test_enormous_answer_is_checked_by_its_head(self):
+        # Поиск зацикливания квадратичен по длине: 8 тыс. знаков — 0,41 с, 100 КБ —
+        # около минуты. Интрадей-такт идёт каждые 5 минут под RuntimeMaxSec, и
+        # минута в регулярном выражении там лишняя. Проверяем ГОЛОВУ ответа.
+        rnd = random.Random(7)  # без часов: последовательность фиксирована зерном
+        def noise(n):
+            return "".join(rnd.choice("абвгдеёжзийклмнопрстуфхцчшщыьэюя ") for _ in range(n))
+
+        clean = noise(self.mod._SCAN_LIMIT)
+        loop = "одна и та же длинная фраза подряд. " * 3000
+        started = time.monotonic()
+        self.assertIsNone(self.mod._defect(clean + loop))
+        self.assertLess(time.monotonic() - started, 1.0, "разбор ответа встал в регулярке")
+        # А брак в ГОЛОВЕ по-прежнему ловится — окно урезает цену, а не строгость.
+        self.assertEqual(self.mod._defect(loop + clean), "текст зациклился")
 
     def test_every_model_down_is_silence_not_exception(self):
         with self._urlopen(urllib.error.URLError("сеть легла")):

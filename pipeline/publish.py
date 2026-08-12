@@ -290,8 +290,24 @@ def _mirror_index(store, errors):
     if store is None or not hasattr(store, "list_series"):
         return None
     try:
-        ids = sorted(store.list_series() or [])
-        r2.put_json("raw/_index.json", {"series": ids, "written_at": _iso()},
+        local = set(store.list_series() or [])
+        # ОБЪЕДИНЕНИЕ с прежним манифестом, а не перезапись. Зеркало raw/ накопительное:
+        # _mirror_raw кладёт объекты и никогда их не удаляет. А писателей двое, и у
+        # запасного (GitHub Actions) стор ПУСТОЙ — он собирает только ряды суточного
+        # режима. Перезапись вычёркивала из манифеста всё, чего у него нет: 69 рядов из
+        # 105, включая ногу ядра urals_tax и все потоки ОРФР. Следующее восстановление
+        # дало бы композит из двух ног вместо трёх, то есть ложное «композит разошёлся
+        # с эталоном» и health=dead на ровном месте.
+        previous = set()
+        try:
+            body = r2.get("raw/_index.json")
+            if body:
+                previous = set(json.loads(body.decode("utf-8")).get("series") or [])
+        except (r2.R2Error, OSError, ValueError, TypeError):
+            previous = set()  # манифеста нет или он битый — пишем то, что знаем сами
+        ids = sorted(local | previous)
+        r2.put_json("raw/_index.json",
+                    {"series": ids, "written_at": _iso(), "written_by_local": len(local)},
                     cache_control="public, max-age=300", verify=False)
         return len(ids)
     except (r2.R2Error, OSError, ValueError) as exc:

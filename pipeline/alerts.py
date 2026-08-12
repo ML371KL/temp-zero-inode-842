@@ -444,6 +444,12 @@ def dispatch(events, dry_run=False, enabled=True):
             ev["channel"] = "ops"
             outcome = telegram.deliver(ev["key"], render(ev), channel="ops")
             ev["outcome"] = outcome
+            # OFF («ERROR_* не заданы») здесь НЕ доставка. Санитарное событие больше
+            # никуда не идёт — ни в ленту витрины, ни в хаб, — поэтому непрочитанным
+            # оно исчезает совсем. Защёлка ниже (_snapshot_keeping_undelivered) держит
+            # состояние ровно на этом флаге: пока не доставлено, правило родит событие
+            # заново, и находка дождётся настроенного канала. Повторов при этом не
+            # видно никому и в сеть не ходит ни один такт: config() отвечает сразу.
             ev["delivered"] = outcome in (telegram.SENT, telegram.DUP)
         else:
             outcome = telegram.deliver(ev["key"], render(ev))
@@ -457,8 +463,14 @@ def dispatch(events, dry_run=False, enabled=True):
             # раз в канал не пишет. Отдельная очередь для зеркала не нужна.
             # OFF (канал не настроен) блокировать доставку не имеет права — иначе
             # прогон без NEXUS_* копил бы вечную очередь повторов.
+            # А ЗДЕСЬ telegram.OFF — доставка, и по обратной причине. Рыночное событие
+            # уже уехало в хаб строкой выше; считать его недоставленным значит класть
+            # в очередь и повторять — и каждый повтор снова постит его в хаб (телеграм
+            # на повторе молчит дедупом, у зеркала своего дедупа нет). Прогон без
+            # TELEGRAM_* (README называет их необязательными) дублировал бы так каждое
+            # событие раз в 5 минут сутки подряд.
             ev["nexus"] = nexus.deliver(ev)
-            ev["delivered"] = (outcome in (telegram.SENT, telegram.DUP)
+            ev["delivered"] = (outcome in (telegram.SENT, telegram.DUP, telegram.OFF)
                                and ev["nexus"] in (nexus.SENT, nexus.OFF))
     return events
 
@@ -545,28 +557,60 @@ def seed_from_payload(state, payload, now=None):
     return True
 
 
+# Санитарные события живут защёлкой в снимке: правило смотрит на прошлое состояние и
+# молчит, пока оно не изменилось. Снимок при этом писался БЕЗУСЛОВНО — то есть
+# недоставленное событие исчезало навсегда: в ленту витрины и в хаб санитарные не идут
+# (OPS_KINDS), очередь повторов живёт сутки, а заново правило его не породит, пока
+# держится та же серия. Ops-канал по умолчанию не настроен (ops/env.example оставляет
+# ERROR_* пустыми), так что путь этот не гипотетический.
+#
+# Поле-защёлка у каждого своё: у health_review_due — одноимённый флаг, у health_dead —
+# строка статуса. Тот же приём уже применён к lease_ok в after_publish.
+LATCH_FIELD = {"health_review_due": "health_review_due", "health_dead": "health"}
+
+
+def _snapshot_keeping_undelivered(payload, prev_last, batch, now):
+    """Снимок текущего состояния, но защёлки недоставленных событий откатываются назад."""
+    snap = snapshot(payload, now)
+    for event in batch:
+        field = LATCH_FIELD.get(event.get("kind"))
+        if field and not event.get("delivered") and field in prev_last:
+            snap[field] = prev_last[field]
+    return snap
+
+
 def run(payload, dry_run=False, enabled=True, now=None, seed_payload=None, log=None):
     """Полный цикл: определить переходы, повторить недоставленное, отправить, сохранить."""
     now = now or datetime.now(timezone.utc)
     state = load_state()
     if seed_payload is not None:
         seed_from_payload(state, seed_payload, now)
+    prev_last = dict(state.get("last") or {})
     events = detect(payload, state, now)
     pending = [e for e in (state.get("pending") or []) if _fresh(e, now)]
     batch = _dedup(pending + events)
     # Комментарий проставляется ДО отправки и ДО записи в ленту: он должен уехать
     # одинаковым во все три места — телеграм, хаб и журнал витрины. В dry-run в сеть
     # не ходим: прогон «на посмотреть» не должен зависеть от чужого провайдера.
+    #
+    # СПРАШИВАЕМ ТОЛЬКО ПРО НОВОЕ. Часть правил рождает событие заново на КАЖДОМ такте
+    # (cb_reminder — все 169 тактов в канун заседания), и телеграм гасит их дедупом уже
+    # после того, как комментатор сходил к модели. Модель отвечает 150–200 с, а alerts.run
+    # стоит ДО публикации при дедлайне такта 300 с — то есть лишний запрос платит не
+    # деньгами, а риском не обновить витрину. Событие, чей ключ уже лежит в ленте, своё
+    # уже получило: второй разбор ему не нужен и второй раз он никуда не уедет.
     if enabled and not dry_run:
+        known = {e.get("key") for e in (state.get("feed") or [])}
+        fresh = [e for e in batch if e.get("key") not in known]
         try:
-            commentary.annotate(batch, payload, log=log)
+            commentary.annotate(fresh, payload, log=log)
         except Exception as exc:  # noqa: BLE001 — украшение не имеет права сорвать доставку
             if log:
                 log(f"комментатор упал: {type(exc).__name__}: {exc}")
     dispatch(batch, dry_run=dry_run, enabled=enabled)
 
     _feed_add(state, events)
-    state["last"] = snapshot(payload, now)
+    state["last"] = _snapshot_keeping_undelivered(payload, prev_last, batch, now)
     state["pending"] = _requeue(batch)
     if not dry_run:
         # В dry-run состояние НЕ трогаем: иначе прогон «на посмотреть» съедает
