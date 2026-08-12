@@ -658,7 +658,8 @@ def main(argv=None):
     if not args.no_alerts:
         try:
             events = alerts.run(payload, dry_run=args.dry_run, enabled=True, now=now,
-                                seed_payload=_seed_payload(journal))
+                                seed_payload=_seed_payload(journal),
+                                log=lambda m: journal.line("alerts", m))
         except Exception as exc:  # noqa: BLE001 — граница изоляции
             journal.warn("alerts", f"правила упали: {type(exc).__name__}: {exc} "
                                    f"(публикацию это не останавливает)")
@@ -668,7 +669,10 @@ def main(argv=None):
         journal.warn("alerts", f"лента событий не собралась: {type(exc).__name__}: {exc}")
         payload["events"] = []
     delivered = sum(1 for e in events if e.get("delivered"))
-    journal.line("alerts", f"событий {len(events)}, доставлено {delivered}" +
+    commented = sum(1 for e in events if (e.get("comment") or "").strip())
+    ops = sum(1 for e in events if alerts.is_ops(e))
+    journal.line("alerts", f"событий {len(events)} (санитарных {ops} — в ops-канал), "
+                           f"доставлено {delivered}, с комментарием {commented}" +
                  ("" if not events else ": " + "; ".join(e["kind"] for e in events)))
 
     res = publish_mod.publish(payload, args.mode, store=store, dry_run=args.dry_run)

@@ -18,14 +18,29 @@ import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from pipeline.lib import constants, nexus, telegram
+from pipeline.lib import commentary, constants, nexus, telegram
 
 STATE_NAME = "alerts_state.json"
 FEED_LIMIT = 20          # столько последних событий уезжает в data.json
 PENDING_MAX_HOURS = 24   # старше — не повторяем: новость протухла
 PENDING_MAX = 40         # длина очереди повторов; режем СТАРОЕ, а не свежее
 DEPOSIT_UPTICK_PP = 0.05  # декадная ставка шумит в сотых, порог отсекает дрожь
-EVENT_FIELDS = ("key", "ts", "kind", "severity", "text")
+EVENT_FIELDS = ("key", "ts", "kind", "severity", "text", "comment")
+
+# САНИТАРНЫЕ события — отказы обвязки, а не движение рынка. Они уходят в общий
+# ops-канал панелей и НЕ попадают ни в журнал витрины, ни в ленту хаба.
+#
+# ПОЧЕМУ разделили: журнал читают как ленту рынка, а «источник moex_press: error»
+# рынку ничего не сообщает. Вперемешку они гасят друг друга — за неделю отказов
+# владелец перестаёт открывать журнал, и вместе с ними мимо проходит смена ячейки.
+# Ровно это и случилось: в журнале из четырёх записей три были про источники.
+OPS_KINDS = frozenset({
+    "source_stale", "health_dead", "lease_lost", "payload_oversize", "core_missing",
+})
+
+
+def is_ops(event):
+    return (event or {}).get("kind") in OPS_KINDS
 
 
 def state_dir():
@@ -385,7 +400,11 @@ def detect(payload, state, now=None):
 
 def render(event):
     prefix = "Внимание. " if event.get("severity") == "warn" else ""
-    return f"{prefix}{event.get('text', '')}"
+    body = f"{prefix}{event.get('text', '')}"
+    comment = (event.get("comment") or "").strip()
+    # Комментарий отделён пустой строкой и меткой — той же, что у 837/838, чтобы в
+    # общей ленте хаба разбор выглядел одинаково у всех панелей.
+    return f"{body}\n\n💬 {comment}" if comment else body
 
 
 def dispatch(events, dry_run=False, enabled=True):
@@ -394,6 +413,13 @@ def dispatch(events, dry_run=False, enabled=True):
             ev["delivered"], ev["skip"] = False, "алерты выключены"
         elif dry_run:
             ev["delivered"], ev["skip"] = False, "dry-run"
+        elif is_ops(ev):
+            # Санитарное: только в ops-канал. Ни зеркала в хаб, ни ленты — это
+            # сообщение для того, кто чинит, а не для того, кто читает рынок.
+            ev["channel"] = "ops"
+            outcome = telegram.deliver(ev["key"], render(ev), channel="ops")
+            ev["outcome"] = outcome
+            ev["delivered"] = outcome in (telegram.SENT, telegram.DUP)
         else:
             outcome = telegram.deliver(ev["key"], render(ev))
             # DUP («такой ключ уже уходил») — это ДОСТАВЛЕНО. Считать его провалом
@@ -421,17 +447,21 @@ def _fresh(ev, now):
 
 
 def payload_events(new_events=None, state=None):
-    """Лента для data.json: сохранённый хвост + события этого прогона (CONTRACT §3)."""
+    """Лента для data.json: сохранённый хвост + события этого прогона (CONTRACT §3).
+
+    Санитарные сюда не попадают — ни новые, ни осевшие в state от прежних версий.
+    """
     state = state if state is not None else load_state()
-    feed = list(state.get("feed") or [])
+    feed = [e for e in (state.get("feed") or []) if not is_ops(e)]
     seen = {e.get("key") for e in feed}
     for ev in new_events or []:
-        if ev.get("key") not in seen:
-            feed.append({k: ev[k] for k in ("key", "ts", "kind", "severity", "text") if k in ev})
-            seen.add(ev.get("key"))
+        if is_ops(ev) or ev.get("key") in seen:
+            continue
+        feed.append({k: ev[k] for k in EVENT_FIELDS if k in ev})
+        seen.add(ev.get("key"))
     feed = feed[-FEED_LIMIT:]
     return [{"ts": e.get("ts"), "kind": e.get("kind"), "severity": e.get("severity"),
-             "text": e.get("text")} for e in feed]
+             "text": e.get("text"), "comment": e.get("comment") or None} for e in feed]
 
 
 def _dedup(events):
@@ -454,12 +484,14 @@ def _requeue(batch):
 
 
 def _feed_add(state, events):
-    feed = list(state.get("feed") or [])
+    """Лента копится только из рыночных событий: санитарные живут в ops-канале."""
+    feed = [e for e in (state.get("feed") or []) if not is_ops(e)]
     seen = {e.get("key") for e in feed}
     for ev in events:
-        if ev.get("key") not in seen:
-            feed.append({k: ev[k] for k in EVENT_FIELDS if k in ev})
-            seen.add(ev.get("key"))
+        if is_ops(ev) or ev.get("key") in seen:
+            continue
+        feed.append({k: ev[k] for k in EVENT_FIELDS if k in ev})
+        seen.add(ev.get("key"))
     state["feed"] = feed[-FEED_LIMIT:]
     return state
 
@@ -488,7 +520,7 @@ def seed_from_payload(state, payload, now=None):
     return True
 
 
-def run(payload, dry_run=False, enabled=True, now=None, seed_payload=None):
+def run(payload, dry_run=False, enabled=True, now=None, seed_payload=None, log=None):
     """Полный цикл: определить переходы, повторить недоставленное, отправить, сохранить."""
     now = now or datetime.now(timezone.utc)
     state = load_state()
@@ -497,6 +529,15 @@ def run(payload, dry_run=False, enabled=True, now=None, seed_payload=None):
     events = detect(payload, state, now)
     pending = [e for e in (state.get("pending") or []) if _fresh(e, now)]
     batch = _dedup(pending + events)
+    # Комментарий проставляется ДО отправки и ДО записи в ленту: он должен уехать
+    # одинаковым во все три места — телеграм, хаб и журнал витрины. В dry-run в сеть
+    # не ходим: прогон «на посмотреть» не должен зависеть от чужого провайдера.
+    if enabled and not dry_run:
+        try:
+            commentary.annotate(batch, payload, log=log)
+        except Exception as exc:  # noqa: BLE001 — украшение не имеет права сорвать доставку
+            if log:
+                log(f"комментатор упал: {type(exc).__name__}: {exc}")
     dispatch(batch, dry_run=dry_run, enabled=enabled)
 
     _feed_add(state, events)

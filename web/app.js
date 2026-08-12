@@ -746,11 +746,16 @@
     // списки панели идут от свежих к старым; сортируем здесь, а не полагаемся на
     // порядок источника, заодно slice(0,40) начинает резать старое, а не свежее.
     var ordered = evs.slice().sort(function (a, b) { return String(b.ts).localeCompare(String(a.ts)); });
-    return section('Журнал', 'события конвейера и переходы состояний', [
+    // Отказы обвязки («источник отдаёт 503») из ленты убраны и уходят в общий
+    // телеграм-канал панелей: журнал читают как ленту рынка, и вперемешку с
+    // санитарными записями она перестаёт читаться вовсе (alerts.py: OPS_KINDS).
+    return section('Журнал', 'события рынка и переходы состояний', [
       h('article', { 'class': 'card' }, ordered.slice(0, 40).map(function (e) {
+        var body = [h('span', { 'class': 'evt__t', text: ruText(e.text) })];
+        if (e.comment) body.push(h('p', { 'class': 'evt__c', text: ruText(e.comment) }));
         return h('div', { 'class': 'evt' }, [
           h('span', { 'class': 'evt__ts', text: (e.ts || '').slice(5, 16).replace('T', ' ') }),
-          h('span', { 'class': 'evt__t', text: ruText(e.text) })
+          h('div', { 'class': 'evt__body' }, body)
         ]);
       }))
     ]);

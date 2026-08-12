@@ -198,6 +198,11 @@ jobs:
           # канал нужен и здесь. Пустые значения = зеркала нет, шаг не падает.
           NEXUS_EVENTS_URL: ${{ vars.NEXUS_EVENTS_URL }}
           NEXUS_INGEST_TOKEN: ${{ secrets.NEXUS_INGEST_TOKEN }}
+          # Общий канал отказов панелей и разбор событий моделью. Пустые значения
+          # выключают соответствующий канал и шаг не роняют.
+          ERROR_BOT_TOKEN: ${{ secrets.ERROR_BOT_TOKEN }}
+          ERROR_CHAT_ID: ${{ secrets.ERROR_CHAT_ID }}
+          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
         run: |
           set -euo pipefail
           mkdir -p "$STATE_DIR"

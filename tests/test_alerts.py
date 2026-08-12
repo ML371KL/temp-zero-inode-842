@@ -71,25 +71,29 @@ class AlertsCase(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.prev_env = {k: os.environ.get(k) for k in
                          ("STATE_DIR", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
-                          "NEXUS_EVENTS_URL", "NEXUS_INGEST_TOKEN")}
+                          "NEXUS_EVENTS_URL", "NEXUS_INGEST_TOKEN",
+                          "ERROR_BOT_TOKEN", "ERROR_CHAT_ID", "OPENROUTER_KEY")}
         os.environ.update(STATE_DIR=self.tmp.name, TELEGRAM_BOT_TOKEN="тест",
-                          TELEGRAM_CHAT_ID="-100")
-        # Зеркало NEXUS гасим явно (правило 2 набора: в сеть не ходим). На VPS эти
+                          TELEGRAM_CHAT_ID="-100", ERROR_BOT_TOKEN="тест-ops",
+                          ERROR_CHAT_ID="-200")
+        # Внешние каналы гасим явно (правило 2 набора: в сеть не ходим). На VPS эти
         # переменные заданы, и без снятия набор, запущенный там, постучался бы в хаб
-        # настоящим POST на каждое событие.
-        os.environ.pop("NEXUS_EVENTS_URL", None)
-        os.environ.pop("NEXUS_INGEST_TOKEN", None)
+        # и в OpenRouter настоящими запросами на каждое событие.
+        for key in ("NEXUS_EVENTS_URL", "NEXUS_INGEST_TOKEN", "OPENROUTER_KEY"):
+            os.environ.pop(key, None)
         self.addCleanup(self._restore_env)
         self.sent = []
+        self.by_channel = {}
         self.online = True
         patcher = mock.patch.object(self.telegram, "send", self._send)
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def _send(self, text, silent=False, retries=2):
+    def _send(self, text, silent=False, retries=2, channel="alerts"):
         if not self.online:
             return False, "телеграм лежит"
         self.sent.append(text)
+        self.by_channel.setdefault(channel, []).append(text)
         return True, None
 
     def _restore_env(self):
@@ -466,8 +470,88 @@ class TestPayloadFeed(AlertsCase):
         feed = self.alerts.payload_events()
         self.assertTrue(feed)
         for row in feed:
-            self.assertEqual(set(row), {"ts", "kind", "severity", "text"})
+            self.assertEqual(set(row), {"ts", "kind", "severity", "text", "comment"})
         self.assertLessEqual(len(feed), self.alerts.FEED_LIMIT)
+
+
+class TestOpsSplit(AlertsCase):
+    """Санитарные события живут в ops-канале и в ленту не попадают (контракт §6)."""
+
+    def stale(self, now=NOW):
+        """Прогон, который рождает и рыночное событие, и санитарное разом."""
+        return self.alerts.run(
+            payload(bond=0, cell="bear|stress|ok",
+                    sources={"iss": {"status": "ok"}, "moex_press": {"status": "error",
+                                                                     "asof": "2026-06-30"}}),
+            dry_run=False, now=now)
+
+    def test_ops_event_goes_to_the_ops_channel_only(self):
+        # мутация: слать санитарные тем же каналом -> лента рынка тонет в отказах
+        # источников, ровно как это выглядело в проде 12 августа.
+        self.seed(payload(bond=1))
+        events = self.stale()
+        kinds = {e["kind"] for e in events}
+        self.assertIn("source_stale", kinds, "проверка бессмысленна без санитарного события")
+        ops = self.by_channel.get("ops") or []
+        self.assertTrue(any("moex_press" in t for t in ops))
+        self.assertFalse(any("moex_press" in t for t in self.by_channel.get("alerts") or []))
+
+    def test_ops_event_never_reaches_the_feed(self):
+        self.seed(payload(bond=1))
+        self.stale()
+        feed = self.alerts.payload_events()
+        self.assertTrue(feed, "рыночные события в ленте остаться обязаны")
+        self.assertFalse([e for e in feed if "moex_press" in (e.get("text") or "")])
+        self.assertFalse([e for e in feed if e.get("kind") in self.alerts.OPS_KINDS])
+
+    def test_old_ops_events_are_swept_out_of_a_saved_feed(self):
+        # Состояние переживает обновление кода: до разделения санитарные лежали в
+        # feed, и без вычистки они висели бы в журнале ещё двадцать событий.
+        self.seed(payload(bond=1))
+        state = self.state()
+        state["feed"] = [{"key": "source_stale:iss:x", "kind": "source_stale",
+                          "ts": "2026-08-10T00:00:00Z", "severity": "warn", "text": "старьё"}]
+        self.alerts.save_state(state)
+        self.assertEqual(self.alerts.payload_events(), [])
+
+    def test_ops_events_are_not_mirrored_to_the_hub(self):
+        self.seed(payload(bond=1))
+        mirrored = []
+        nexus = need(self, "pipeline.lib.nexus", "deliver", "SENT")
+        with mock.patch.object(nexus, "deliver",
+                               lambda ev: mirrored.append(ev["key"]) or nexus.SENT):
+            self.stale()
+        self.assertFalse([k for k in mirrored if k.startswith("source_stale")])
+
+
+class TestComment(AlertsCase):
+    """Комментарий модели: одинаковый во всех трёх местах, необязательный везде."""
+
+    def test_comment_reaches_telegram_and_feed(self):
+        self.seed(payload(bond=1))
+        with mock.patch.object(self.alerts.commentary, "annotate",
+                               lambda evs, pl, log=None: [e.update(comment="разбор") for e in evs
+                                                          if not self.alerts.is_ops(e)]):
+            self.alerts.run(payload(bond=0, cell="bear|stress|ok"), dry_run=False, now=NOW)
+        self.assertTrue(any("💬 разбор" in t for t in self.sent))
+        self.assertTrue(all(e.get("comment") == "разбор" for e in self.alerts.payload_events()))
+
+    def test_event_without_comment_is_a_plain_fact(self):
+        # Ключа нет — комментатор возвращает None, и это НЕ отказ доставки.
+        self.seed(payload(bond=1))
+        self.alerts.run(payload(bond=0, cell="bear|stress|ok"), dry_run=False, now=NOW)
+        self.assertTrue(self.sent)
+        self.assertFalse(any("💬" in t for t in self.sent))
+        self.assertEqual(self.pending_keys(), [])
+
+    def test_dry_run_does_not_call_the_model(self):
+        # Прогон «на посмотреть» не должен зависеть от чужого провайдера.
+        self.seed(payload(bond=1))
+        calls = []
+        with mock.patch.object(self.alerts.commentary, "annotate",
+                               lambda *a, **k: calls.append(1)):
+            self.alerts.run(payload(bond=0, cell="bear|stress|ok"), dry_run=True, now=NOW)
+        self.assertEqual(calls, [])
 
 
 class TestNexusMirror(AlertsCase):

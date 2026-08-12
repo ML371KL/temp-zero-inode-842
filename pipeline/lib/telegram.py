@@ -23,6 +23,19 @@ API = "https://api.telegram.org"
 TIMEOUT = 15
 _SAFE_KEY = re.compile(r"[^0-9A-Za-z._=-]+")
 
+# ДВА КАНАЛА, а не один. «Рынок развернулся» и «источник отдаёт 503» — новости для
+# разных читателей и с разной судьбой: первую читают как ленту и хранят, вторую
+# чинят и забывают. Смешанные в одном чате, они гасят друг друга: за неделю
+# санитарных сообщений владелец перестаёт открывать канал, и вместе с ними мимо
+# проходит смена ячейки.
+#
+# ops-канал — ОБЩИЙ для всех панелей (тот же бот, что зовёт /usr/local/sbin/dash-notify
+# на VPS), поэтому отказы 842 приходят туда же, где отказы 837/838/839.
+CHANNELS = {
+    "alerts": ("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"),
+    "ops": ("ERROR_BOT_TOKEN", "ERROR_CHAT_ID"),
+}
+
 # Три исхода доставки. ПОЧЕМУ не bool: «уже отправляли» и «не доставили» — разные
 # вещи, а notify() возвращал на них одинаковый False. Из-за этого alerts.run считал
 # доставленное событие потерянным и клал его в очередь повторов: за день накануне
@@ -41,24 +54,29 @@ def state_dir():
     return Path(env) if env else Path(__file__).resolve().parents[2] / ".state"
 
 
-def config():
-    token = (os.environ.get("TELEGRAM_BOT_TOKEN") or "").strip()
-    chat = (os.environ.get("TELEGRAM_CHAT_ID") or "").strip()
+def config(channel="alerts"):
+    token_env, chat_env = CHANNELS.get(channel) or CHANNELS["alerts"]
+    token = (os.environ.get(token_env) or "").strip()
+    chat = (os.environ.get(chat_env) or "").strip()
     return {"token": token, "chat": chat} if token and chat else None
 
 
-def configured():
-    return config() is not None
+def configured(channel="alerts"):
+    return config(channel) is not None
 
 
-def _marker_path(key):
+def _marker_path(key, channel="alerts"):
     safe = _SAFE_KEY.sub("_", str(key))[:120] or "empty"
-    return state_dir() / "notify" / f"{safe}.json"
+    # Маркеры разведены по каналам: один и тот же ключ, отправленный в другой чат,
+    # обязан уйти заново. Каталог основного канала оставлен прежним — иначе смена
+    # раскладки заставила бы его переслать всё, о чём уже сообщали.
+    base = state_dir() / "notify"
+    return (base if channel == "alerts" else base / channel) / f"{safe}.json"
 
 
-def already_sent(key, cooldown_hours=None):
+def already_sent(key, cooldown_hours=None, channel="alerts"):
     """Был ли ключ доставлен. cooldown_hours позволяет повторить старое событие."""
-    path = _marker_path(key)
+    path = _marker_path(key, channel)
     if not path.exists():
         return False
     if cooldown_hours is None:
@@ -73,8 +91,8 @@ def already_sent(key, cooldown_hours=None):
     return datetime.now(timezone.utc) - sent < timedelta(hours=cooldown_hours)
 
 
-def _mark(key, text):
-    path = _marker_path(key)
+def _mark(key, text, channel="alerts"):
+    path = _marker_path(key, channel)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(
@@ -89,11 +107,11 @@ def _mark(key, text):
         pass
 
 
-def send(text, silent=False, retries=2):
+def send(text, silent=False, retries=2, channel="alerts"):
     """(ok, ошибка). Никогда не бросает."""
-    cfg = config()
+    cfg = config(channel)
     if cfg is None:
-        return False, "нет TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID"
+        return False, "не заданы " + "/".join(CHANNELS.get(channel) or CHANNELS["alerts"])
     body = json.dumps({"chat_id": cfg["chat"], "text": text[:4000],
                        "disable_web_page_preview": True,
                        "disable_notification": bool(silent)}, ensure_ascii=False)
@@ -122,27 +140,28 @@ def send(text, silent=False, retries=2):
     return False, last
 
 
-def deliver(key, text, silent=False, cooldown_hours=None):
+def deliver(key, text, silent=False, cooldown_hours=None, channel="alerts"):
     """Отправить с дедупом по ключу: SENT (ушло сейчас) | DUP (уже отправляли) | FAIL.
 
     Вызывающему важно отличать DUP от FAIL: на DUP событие считается доставленным
     и в очередь повторов НЕ кладётся, на FAIL — кладётся и повторяется.
     """
     try:
-        if already_sent(key, cooldown_hours):
+        if already_sent(key, cooldown_hours, channel):
             return DUP
-        ok, _err = send(text, silent=silent)
+        ok, _err = send(text, silent=silent, channel=channel)
         if ok:
-            _mark(key, text)
+            _mark(key, text, channel)
             return SENT
         return FAIL
     except Exception:  # noqa: BLE001 — контракт модуля: уведомление не роняет прогон
         return FAIL
 
 
-def notify(key, text, silent=False, cooldown_hours=None):
+def notify(key, text, silent=False, cooldown_hours=None, channel="alerts"):
     """Совместимость: True — сообщение ушло ИМЕННО СЕЙЧАС (DUP и FAIL дают False)."""
-    return deliver(key, text, silent=silent, cooldown_hours=cooldown_hours) == SENT
+    return deliver(key, text, silent=silent, cooldown_hours=cooldown_hours,
+                   channel=channel) == SENT
 
 
 def prune_markers(days=45):
@@ -150,7 +169,9 @@ def prune_markers(days=45):
     cutoff = time.time() - days * 86400
     removed = 0
     try:
-        for path in (state_dir() / "notify").glob("*.json"):
+        # rglob, а не glob: маркеры ops-канала лежат подкаталогом, и обычный glob
+        # чистил бы только основной — второй рос бы вечно.
+        for path in (state_dir() / "notify").rglob("*.json"):
             try:
                 if path.stat().st_mtime < cutoff:
                     path.unlink()

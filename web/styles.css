@@ -472,6 +472,11 @@ button { font: inherit; color: inherit; }
 .evt:first-child { border-top: 0; }
 .evt__ts { color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 13px; }
 .evt__t { line-height: 1.45; max-width: 78ch; }
+/* Разбор события. Отделён от факта отступом и полосой слева: читатель обязан
+   видеть, где кончается то, что случилось, и начинается то, что об этом думают. */
+.evt__body { display: flex; flex-direction: column; gap: 8px; }
+.evt__c { max-width: 78ch; padding-left: 12px; border-left: 2px solid var(--hair);
+          color: var(--ink-2); line-height: 1.45; font-size: 13px; text-wrap: pretty; }
 
 /* ────────────────────────────────────────────────── таблица (a11y) */
 
