@@ -181,6 +181,26 @@ class TestBadAnswers(CommentaryCase):
             got = self.mod.comments(self.events(), self.panel(), log=self.log.append)
         self.assertIn("ОФЗ", got[0])
 
+    def test_transliterating_model_is_dropped(self):
+        # Из первого же боевого ответа: «atractтивными». Промпт запрещает смешивать
+        # алфавиты внутри слова, но требование можно и проигнорировать.
+        mixed = ("===0===\nДоходности выглядят atractтивными, а рынок фondовый остаётся "
+                 "под давлением ставки и слабого рубля в течение месяца.\n")
+        with self._urlopen(chat(mixed), chat(ANSWER)):
+            got = self.mod.comments(self.events(), self.panel(), log=self.log.append)
+        self.assertIn("ОФЗ", got[0])
+        self.assertEqual(len(self.calls), 2)
+
+    def test_single_slip_is_tolerated(self):
+        # Одна описка в длинном разборе — не повод выбрасывать разумный текст:
+        # следующая бесплатная модель почти наверняка ответит хуже.
+        one = ("===0===\nДоходности выглядят atractтивными на фоне ставки 14%, и это "
+               "меняет расклад для длинных облигаций в ближайшие месяцы.\n")
+        with self._urlopen(chat(one)):
+            got = self.mod.comments(self.events(), self.panel())
+        self.assertIn("atract", got[0])
+        self.assertEqual(len(self.calls), 1)
+
     def test_looping_answer_is_dropped(self):
         loop = "===0===\n" + "рынок падает и падает, " * 12 + "\n"
         with self._urlopen(chat(loop), chat(ANSWER)):
