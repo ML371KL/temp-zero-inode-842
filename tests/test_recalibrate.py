@@ -79,8 +79,9 @@ class NotifyCase(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def call(self, verdicts=(), review_due=False, when=FEB, mode="auto"):
-        health = {"review_due": review_due, "below_zero_months": 7 if review_due else 0}
+    def call(self, verdicts=(), review_due=False, when=FEB, mode="auto", streak=7):
+        """verdicts — пары (имя находки, текст): ключ строится по ИМЕНАМ."""
+        health = {"review_due": review_due, "below_zero_months": streak if review_due else 0}
         return self.rc.notify(list(verdicts), health, mode, "/tmp/r.md", now=when)
 
     def test_молчит_когда_нечего_сказать(self):
@@ -102,19 +103,32 @@ class NotifyCase(unittest.TestCase):
 
     def test_одна_и_та_же_находка_не_повторяется(self):
         # Ключ по СОДЕРЖАНИЮ: телеграм дедупит по нему и второй раз промолчит.
-        self.call(verdicts=["bear|stress|stress: -3.14% против -2.94%"], when=FEB)
-        self.call(verdicts=["bear|stress|stress: -3.14% против -2.94%"], when=MAR)
+        self.call(verdicts=[("cell:bear|stress|stress", "-3.14% против -2.94%")], when=FEB)
+        self.call(verdicts=[("cell:bear|stress|stress", "-3.14% против -2.94%")], when=MAR)
         self.assertEqual(len({m["key"] for m in self.sent}), 1,
                          "та же находка в другом месяце обязана дать ТОТ ЖЕ ключ")
 
+    def test_растущий_счётчик_не_плодит_сообщения(self):
+        # У порога §7 в тексте счётчик месяцев, он растёт ПО ПОСТРОЕНИЮ. Ключ по
+        # тексту слал бы сообщение каждый месяц до самой реколибровки.
+        self.call(review_due=True, streak=7, when=FEB)
+        self.call(review_due=True, streak=8, when=MAR)
+        self.assertEqual(len({m["key"] for m in self.sent}), 1)
+
+    def test_дрейф_чисел_в_тексте_не_плодит_сообщения(self):
+        # Числа ячейки уточняются каждый месяц; проблема при этом та же самая.
+        self.call(verdicts=[("cell:x", "-3.14% против -2.94%")], when=FEB)
+        self.call(verdicts=[("cell:x", "-3.31% против -2.94%")], when=MAR)
+        self.assertEqual(len({m["key"] for m in self.sent}), 1)
+
     def test_изменившаяся_находка_говорит_заново(self):
-        self.call(verdicts=["bear|stress|stress: -3.14% против -2.94%"], when=FEB)
-        self.call(verdicts=["bear|stress|stress: -3.60% против -2.94%"], when=MAR)
+        self.call(verdicts=[("cell:bear|stress|stress", "-3.14% против -2.94%")], when=FEB)
+        self.call(verdicts=[("cell:bull|calm|ok", "другая ячейка")], when=MAR)
         self.assertEqual(len({m["key"] for m in self.sent}), 2)
 
     def test_порядок_находок_не_меняет_ключ(self):
-        self.call(verdicts=["а", "б"], when=FEB)
-        self.call(verdicts=["б", "а"], when=MAR)
+        self.call(verdicts=[("а", "текст а"), ("б", "текст б")], when=FEB)
+        self.call(verdicts=[("б", "текст б"), ("а", "текст а")], when=MAR)
         self.assertEqual(len({m["key"] for m in self.sent}), 1)
 
     def test_порог_регламента_это_находка(self):
@@ -125,11 +139,11 @@ class NotifyCase(unittest.TestCase):
     def test_уходит_в_ops_канал(self):
         # Это сообщение про обслуживание модели, а не про рынок: в ленте витрины
         # ему не место (contract §6, OPS_KINDS).
-        self.call(verdicts=["что-то"], when=FEB)
+        self.call(verdicts=[("что-то", "текст")], when=FEB)
         self.assertEqual(self.sent[0]["channel"], "ops")
 
     def test_режим_never_молчит_всегда(self):
-        self.assertEqual(self.call(verdicts=["что-то"], when=JAN, mode="never"), "выключено")
+        self.assertEqual(self.call(verdicts=[("что-то", "текст")], when=JAN, mode="never"), "выключено")
         self.assertEqual(self.sent, [])
 
 

@@ -252,7 +252,9 @@ def section_cells(labels, fwd, cells, out):
         flagged, why = cell_flagged(mean, ref_mean, se_pp)
         mark = " ⚠️" if flagged else ""
         if flagged:
-            drift.append(f"{code}: {mean:+.2f}% против {ref_mean:+.2f}% ({why})")
+            # Имя находки — сама ячейка: её числа дрейфуют, а проблема та же.
+            drift.append((f"cell:{code}",
+                          f"{code}: {mean:+.2f}% против {ref_mean:+.2f}% ({why})"))
         out.append(f"| {code} | {n} / {ref.get('n')} | {mean:+.2f}% / "
                    f"{ref_mean:+.2f}%{mark} | {ratio:.2f} | {med:+.2f}% | {pc(v[0]):+.1f}% |")
     out.append("")
@@ -263,7 +265,7 @@ def section_cells(labels, fwd, cells, out):
                f"переход через {TONE_CRIT_PCT}% (по нему фронт красит ячейку).")
     out.append("")
     if drift:
-        out.append("Разошлись: " + "; ".join(drift) + ".")
+        out.append("Разошлись: " + "; ".join(text for _, text in drift) + ".")
         out.append("")
         out.append("Числа в коде менять только целиком и осознанно: они калибровались "
                    "разом, и правка одной строки рассогласует таблицу с руководством "
@@ -406,34 +408,39 @@ def notify(verdicts, health, mode, out_path, now=None):
     расхождение. Поэтому тревога уходит СРАЗУ, а рутинное подтверждение — только в
     квартальные месяцы, чтобы раз в квартал было видно: проверка жива и прошла.
 
-    ПОЧЕМУ КЛЮЧ ИЗ СОДЕРЖАНИЯ, А НЕ ИЗ ДАТЫ. Расхождение живёт МЕСЯЦАМИ: пока
-    константы не пересчитаны целиком, та же строка «−3,14% против −2,94%» верна и
-    в сентябре, и в октябре. С ключом по дате она приходила бы каждый месяц заново —
-    то самое «состояние вместо перехода», против которого построен весь остальной
-    алертинг панели (pipeline/alerts.py). Ключ по набору находок означает: повтор
-    молчит, изменение набора говорит.
+    ПОЧЕМУ КЛЮЧ ИЗ ТОЖДЕСТВА НАХОДКИ, А НЕ ИЗ ЕЁ ТЕКСТА И НЕ ИЗ ДАТЫ. Находка живёт
+    МЕСЯЦАМИ: пока константы не пересчитаны целиком, расхождение ячейки верно и в
+    сентябре, и в октябре. Ключ по дате слал бы его заново каждый месяц — «состояние
+    вместо перехода», против чего построен весь остальной алертинг панели.
+    Ключ по ТЕКСТУ не спасает: в тексте живут числа, и они дрейфуют. У порога §7 в
+    тексте вообще счётчик («ниже нуля 7 мес подряд»), который растёт ежемесячно по
+    построению, — сообщение приходило бы каждый месяц до самой реколибровки.
+    Поэтому у каждой находки есть неизменное имя (`cell:bear|stress|stress`,
+    `invariant`, `health_review`), и хеш считается по НАБОРУ ИМЁН: пока состав
+    проблем тот же — тишина, появилась или ушла проблема — сообщение.
     """
     if mode == "never":
         return "выключено"
     from pipeline.lib import telegram
 
     now = now or datetime.now(timezone.utc)
-    findings = list(verdicts)
+    findings = [(i, t) for i, t in verdicts]
     if health.get("review_due"):
-        findings.append(f"здоровье ниже нуля {health.get('below_zero_months')} мес подряд — "
-                        f"порог §7 на пересмотр состава достигнут")
+        findings.append(("health_review",
+                         f"здоровье ниже нуля {health.get('below_zero_months')} мес подряд — "
+                         f"порог §7 на пересмотр состава достигнут"))
     quarter = now.month in QUARTER_MONTHS
     if mode == "auto" and not findings and not quarter:
         return "молчу: расхождений нет, месяц не квартальный"
 
     head = "Реколибровка: есть расхождения" if findings else "Реколибровка: расхождений нет"
-    lines = [head] + [f"• {f}" for f in findings]
+    lines = [head] + [f"• {text}" for _, text in findings]
     if out_path:
         lines.append(f"Полный отчёт: {out_path}")
 
     if findings:
-        # Один и тот же набор находок — одно сообщение, сколько бы месяцев он ни жил.
-        digest = hashlib.sha256("\n".join(sorted(findings)).encode("utf-8")).hexdigest()[:16]
+        idents = "\n".join(sorted(ident for ident, _ in findings))
+        digest = hashlib.sha256(idents.encode("utf-8")).hexdigest()[:16]
         key = f"recalibrate:{digest}"
     else:
         # Подтверждение «всё чисто» — не находка, а сердцебиение: ровно одно на квартал.
@@ -508,7 +515,7 @@ def main():
 
     verdicts = list(drift)
     if not invariant_ok:
-        verdicts.insert(0, "композит разошёлся с эталоном исследования")
+        verdicts.insert(0, ("invariant", "композит разошёлся с эталоном исследования"))
     print("уведомление:", notify(verdicts, health, args.notify, args.out))
     return 0
 
