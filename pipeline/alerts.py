@@ -35,7 +35,8 @@ EVENT_FIELDS = ("key", "ts", "kind", "severity", "text", "comment")
 # владелец перестаёт открывать журнал, и вместе с ними мимо проходит смена ячейки.
 # Ровно это и случилось: в журнале из четырёх записей три были про источники.
 OPS_KINDS = frozenset({
-    "source_stale", "health_dead", "lease_lost", "payload_oversize", "core_missing",
+    "source_stale", "health_dead", "health_review_due", "lease_lost", "payload_oversize",
+    "core_missing",
 })
 
 
@@ -119,6 +120,7 @@ def snapshot(payload, now=None):
         "cell": (payload.get("verdict") or {}).get("cell_code"),
         "trend": cur.get("trend"), "vol": cur.get("vol"), "bond": cur.get("bond"),
         "health": (core.get("health") or {}).get("status"),
+        "health_review_due": bool((core.get("health") or {}).get("review_due")),
         "key_rate": _mp(mons, "cb_meeting", "key_rate"),
         "deposit": _mp(mons, "deposit_spread", "deposit_pct"),
         "orfr_asof": (mons.get("orfr") or {}).get("asof"),
@@ -351,6 +353,28 @@ def _health(payload, prev, now):
                 f"статус dead. Композит не использовать до разбора.", "warn", now)]
 
 
+def _health_review(payload, prev, now):
+    """Регламентный порог пересмотра состава: IC ниже нуля два квартала подряд.
+
+    ПОЧЕМУ ОТДЕЛЬНО ОТ health_dead: тот срабатывает на ПЕРВЫЙ месяц ниже нуля и
+    больше не возвращается, а регламент (docs/ARCHITECTURE.md §7) требует шести
+    месяцев подряд. Между этими двумя моментами полгода, и без своего события
+    порог наступал молча — ровно то, ради чего регламент и писали.
+
+    Сообщение не говорит «меняй состав»: вторая половина условия (механизм у
+    кандидата) человеческая, панель её не измеряет.
+    """
+    health = ((payload.get("core") or {}).get("health") or {})
+    if not health.get("review_due") or prev.get("health_review_due"):
+        return []
+    return [_ev(f"health_review_due:{health.get('below_since')}", "health_review_due",
+                f"Здоровье ядра ниже нуля {health.get('below_zero_months')} мес подряд "
+                f"(с {health.get('below_since')}), IC {_num(health.get('ic_24m'), 2, True)} — "
+                f"достигнут порог регламента §7 на пересмотр состава. Это повод запустить "
+                f"реколибровку (ops/recalibrate.py), а не менять ноги: второе условие "
+                f"регламента — механизм у кандидата — проверяется человеком.", "warn", now)]
+
+
 def _core_missing(payload, prev, now):
     """Вчера был вердикт, сегодня «нет данных» — это авария, а не состояние рынка.
 
@@ -392,6 +416,7 @@ def detect(payload, state, now=None):
     events += _deposit(payload, prev, now)
     events += _sources(payload, prev, now)
     events += _health(payload, prev, now)
+    events += _health_review(payload, prev, now)
     events += _core_missing(payload, prev, now)
     return events
 

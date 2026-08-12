@@ -93,6 +93,17 @@ def compute_health(panel, mf=None, sign_since=None):
     with_data = sum(1 for v in tail_comp if calc.is_num(v))
     coverage = round(with_data / len(tail_months), 3) if tail_months else 0.0
 
+    # Сколько ЗАКРЫТЫХ месяцев подряд скользящий IC держится ниже нуля. Это и есть
+    # величина, на которую ссылается регламент пересмотра состава (§7: «health<0 два
+    # квартала подряд»): до сих пор условие было записано словами, но не измерялось —
+    # алерт срабатывал на первый день статуса dead и молчал дальше.
+    streak, since = 0, None
+    for month, value in reversed(series):
+        if value >= 0:
+            break
+        streak += 1
+        since = month
+
     asof = labels[-1] if labels else None
     out = {
         "ic_24m": round(ic, 3) if ic is not None else None,
@@ -101,6 +112,13 @@ def compute_health(panel, mf=None, sign_since=None):
         "window_months": win,
         "coverage": coverage,
         "months_total": len(pairs),
+        "below_zero_months": streak,
+        "below_since": since,
+        "review_months": constants.HEALTH_REVIEW_MONTHS,
+        # Достигнут ПОРОГ ЗДОРОВЬЯ, а не решение о пересмотре: регламент требует ещё и
+        # механизм у кандидата, а это человеческая половина условия — измерить её
+        # панель не может и притворяться не должна.
+        "review_due": streak >= constants.HEALTH_REVIEW_MONTHS,
         "sign_since": sign_since,
         "sign_age_days": _days_between(sign_since, asof) if sign_since and asof else None,
         "asof_month": pairs[-1][0] if pairs else None,
@@ -119,6 +137,11 @@ def _note(h):
         txt += " — ядро не работает на свежей истории, доверять знаку нельзя"
     elif h["status"] == "warn":
         txt += " — слабо, держать в уме широкие доверительные интервалы"
+    if h.get("below_zero_months"):
+        txt += (f"; ниже нуля {h['below_zero_months']} мес подряд "
+                f"(с {h['below_since']}), порог регламента — {h['review_months']}")
+    if h.get("review_due"):
+        txt += ". Порог здоровья для пересмотра состава достигнут — нужна реколибровка"
     if h["coverage"] < 0.8:
         txt += f"; данных только за {h['coverage'] * 100:.0f}% окна"
     return txt

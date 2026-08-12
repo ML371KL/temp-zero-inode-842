@@ -279,6 +279,26 @@ def read_local_payload():
         return None
 
 
+def _mirror_index(store, errors):
+    """Список рядов зеркала: raw/_index.json.
+
+    Зеркало было НЕПЕРЕЧИСЛИМЫМ: объекты пишутся по одному, подпись S3 в lib/r2.py
+    не поддерживает запрос со списком, и восстановить стор из бакета было нельзя —
+    надо было заранее знать все 106 имён. Манифест закрывает это одной строкой и
+    делает возможной реколибровку на пустом раннере (ops/recalibrate.py).
+    """
+    if store is None or not hasattr(store, "list_series"):
+        return None
+    try:
+        ids = sorted(store.list_series() or [])
+        r2.put_json("raw/_index.json", {"series": ids, "written_at": _iso()},
+                    cache_control="public, max-age=300", verify=False)
+        return len(ids)
+    except (r2.R2Error, OSError, ValueError) as exc:
+        errors.append(f"raw/_index.json: {exc}")
+        return None
+
+
 def _mirror_raw(store, errors, limit=100):
     """Зеркалирование грязных рядов в raw/. Без обратной вычитки: их десятки, а
     критичен только data.json — цена лишней пары запросов выше пользы."""
@@ -439,6 +459,7 @@ def publish(payload, mode="daily", store=None, dry_run=False, history=None):
                 result["errors"].append(f"{HISTORY_MONITORS_KEY}: {exc}")
 
     result["raw_mirrored"] = _mirror_raw(store, result["errors"])
+    result["raw_indexed"] = _mirror_index(store, result["errors"])
 
     try:
         lease.refresh_heartbeat(mode=mode)

@@ -79,7 +79,9 @@ list_dirty() -> [series_id]                        # для выгрузки в 
        "spark": [[date, z], …]}
     ],
     "series": [["2004-01-31", 0.4], …],
-    "health": {"ic_24m": 0.18, "n": 24, "status": "ok|warn|dead"}
+    "health": {"ic_24m": 0.18, "n": 24, "status": "ok|warn|dead",
+               "below_zero_months": 0, "below_since": null,
+               "review_months": 6, "review_due": false}
   },
   "states": {
     "current": {"trend": 0, "vol": 1, "bond": 1, "rate_phase": -1,
@@ -145,9 +147,9 @@ publish(payload, mode) -> None    # лиз → PUT data.json → PUT history/* �
 
 ## 6. События (`alerts.py`)
 
-Только переходы, дедуп по ключу в состоянии: `core_flip`, `state_cell_change`, `bond_flag_on/off`, `buy_window_open` (vol=1 & bond=0), `cb_decision` (сюрприз/в линию), `cb_reminder` (за день), `orfr_published`, `auction_failed`, `deposit_uptick`, санитарные (`source_stale`, `lease_lost`, `health_dead`).
+Только переходы, дедуп по ключу в состоянии: `core_flip`, `state_cell_change`, `bond_flag_on/off`, `buy_window_open` (vol=1 & bond=0), `cb_decision` (сюрприз/в линию), `cb_reminder` (за день), `orfr_published`, `auction_failed`, `deposit_uptick`, санитарные (`source_stale`, `lease_lost`, `health_dead`, `health_review_due`).
 
-**Два рода событий, и они не смешиваются.** Рыночные (`core_flip`, `state_cell_change`, `bond_flag_*`, `buy_window_open`, `cb_*`, `orfr_published`, `auction_failed`, `deposit_uptick`) идут в ленту: журнал витрины, хаб NEXUS, телеграм-канал панели. Санитарные — `OPS_KINDS` в `alerts.py` (`source_stale`, `health_dead`, `lease_lost`, `payload_oversize`, `core_missing`) — идут ТОЛЬКО в общий ops-канал панелей (`ERROR_BOT_TOKEN`/`ERROR_CHAT_ID`, тот же бот, что у `dash-notify` на VPS) и в `events` витрины не попадают. Причина: журнал читают как ленту рынка, а «источник отдаёт 503» рынку ничего не сообщает — вперемешку они гасят друг друга.
+**Два рода событий, и они не смешиваются.** Рыночные (`core_flip`, `state_cell_change`, `bond_flag_*`, `buy_window_open`, `cb_*`, `orfr_published`, `auction_failed`, `deposit_uptick`) идут в ленту: журнал витрины, хаб NEXUS, телеграм-канал панели. Санитарные — `OPS_KINDS` в `alerts.py` (`source_stale`, `health_dead`, `health_review_due`, `lease_lost`, `payload_oversize`, `core_missing`) — идут ТОЛЬКО в общий ops-канал панелей (`ERROR_BOT_TOKEN`/`ERROR_CHAT_ID`, тот же бот, что у `dash-notify` на VPS) и в `events` витрины не попадают. Причина: журнал читают как ленту рынка, а «источник отдаёт 503» рынку ничего не сообщает — вперемешку они гасят друг друга.
 
 **Комментарий (`comment`)** — разбор события бесплатной моделью через OpenRouter (`lib/commentary.py`). Проставляется до отправки и уезжает одинаковым во все три места; в телеграме и в хабе — отдельным абзацем после «💬», как у 837/838. Отсутствие комментария (нет ключа, лежит провайдер) — законный режим: событие уходит голым фактом.
 

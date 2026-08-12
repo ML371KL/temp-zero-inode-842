@@ -1,0 +1,88 @@
+name: Реколибровка (квартальная, вручную)
+
+# Регламент §7 docs/ARCHITECTURE.md: раз в квартал пересчитать опоры панели на
+# удлинённой истории и посмотреть на дифф. Здесь — только пересчёт и отчёт.
+#
+# ПОЧЕМУ РУЧНОЙ ЗАПУСК, А НЕ РАСПИСАНИЕ. Реколибровка — повод сесть и подумать, а
+# не фоновая задача: её ценность в том, что человек читает дифф. Робот, открывающий
+# PR каждый квартал в тишине, за год приучает закрывать эти PR не глядя.
+#
+# ПОЧЕМУ ОТЧЁТ, А НЕ ПРАВКА. Автоматический пересмотр состава ядра по свежей
+# результативности — проверенный и проигравший подход (REGIME.md §4: адаптивный
+# отбор дал OOS IC −0,018 против +0,227 у фиксированного композита). Скрипт не
+# меняет ни одного числа; решение остаётся человеку.
+
+on:
+  workflow_dispatch:
+    inputs:
+      open_pr:
+        description: "Открыть PR с отчётом (иначе только артефакт и сводка)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: moex-radar-recalibrate
+  cancel-in-progress: false
+
+jobs:
+  recalibrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Пересчёт и отчёт
+        env:
+          # Стор живёт на VPS, у раннера его нет — восстанавливаем из зеркала raw/
+          # в R2 по манифесту raw/_index.json (его пишет publish._mirror_index).
+          # Те же секреты, что у fallback.yml.
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ vars.R2_BUCKET || 'moex-radar' }}
+          STATE_DIR: ${{ runner.temp }}/moex-radar-state
+          PYTHONPATH: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          if [ -z "${R2_ACCESS_KEY_ID:-}" ] || [ -z "${R2_SECRET_ACCESS_KEY:-}" ]; then
+            echo "::error::нет секретов R2_* — восстанавливать стор нечем. Запустите"
+            echo "::error::реколибровку на VPS: PYTHONPATH=. python3 ops/recalibrate.py"
+            exit 1
+          fi
+          mkdir -p "$STATE_DIR"
+          report="docs/recalibration/$(date -u +%Y-%m-%d).md"
+          python ops/recalibrate.py --restore --out "$report"
+          echo "REPORT=$report" >> "$GITHUB_ENV"
+          # Отчёт сразу в сводку прогона: чаще всего его читают ровно там и
+          # закрывают, не открывая PR.
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: recalibration-report
+          path: ${{ env.REPORT }}
+
+      - name: PR с отчётом
+        if: ${{ inputs.open_pr }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          branch="recalibration/$(date -u +%Y-%m-%d)-${{ github.run_id }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add "$REPORT"
+          git commit -m "Реколибровка $(date -u +%Y-%m-%d): отчёт-дифф"
+          git push origin "$branch"
+          gh pr create --title "Реколибровка $(date -u +%Y-%m-%d)" \
+            --body "Пересчёт опор панели на удлинённой истории (регламент §7). Отчёт ничего не меняет — решение о составе ядра принимает человек." \
+            --head "$branch" --base main

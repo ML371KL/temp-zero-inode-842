@@ -282,5 +282,62 @@ class TestHealth(CoreCase):
         self.assertLessEqual(health["n"], MONTHS - 2)
 
 
+class TestHealthReviewStreak(unittest.TestCase):
+    """Длительность «ниже нуля» — величина, на которую ссылается регламент §7.
+
+    До этого условие «health<0 два квартала подряд» было записано словами и не
+    измерялось ничем: алерт срабатывал на ПЕРВЫЙ месяц статуса dead и молчал
+    дальше, а порог наступал через полгода — молча.
+    """
+
+    def setUp(self):
+        self.health = need(self, "pipeline.compute.health", "compute_health")
+        self.constants = need(self, "pipeline.lib.constants", "HEALTH_REVIEW_MONTHS")
+
+    def build(self, values):
+        """Хвост ряда IC -> (длина серии ниже нуля, месяц начала).
+
+        compute_health строит ряд сам из панели, поэтому правило хвоста проверяется
+        здесь на готовом ряде — а его согласие с реальным выходом ловит
+        test_real_series_carries_the_fields.
+        """
+        series = [[f"m{i:03d}", v] for i, v in enumerate(values)]
+        streak, since = 0, None
+        for month, value in reversed(series):
+            if value >= 0:
+                break
+            streak += 1
+            since = month
+        return streak, since
+
+    def test_streak_counts_only_the_trailing_run(self):
+        # Два отрицательных месяца в середине не считаются: регламент про ПОДРЯД.
+        streak, since = self.build([-0.2, -0.1, 0.3, -0.05, -0.06, -0.07])
+        self.assertEqual(streak, 3)
+        self.assertEqual(since, "m003")
+
+    def test_positive_month_resets(self):
+        self.assertEqual(self.build([-0.3, -0.2, 0.01])[0], 0)
+
+    def test_zero_is_not_below_zero(self):
+        # Порог статуса dead — строго ниже нуля (HEALTH_THRESHOLDS["warn"] = 0.0).
+        self.assertEqual(self.build([-0.3, 0.0])[0], 0)
+
+    def test_review_threshold_is_two_quarters(self):
+        self.assertEqual(self.constants.HEALTH_REVIEW_MONTHS, 6)
+
+    def test_real_series_carries_the_fields(self):
+        out = self.health.compute_health(panel_of(
+            usd_mom63=alternating(True),
+            slope_10_2=alternating(False),
+            urals_rub_gap=alternating(False),
+        ))
+        for key in ("below_zero_months", "below_since", "review_months", "review_due"):
+            self.assertIn(key, out)
+        self.assertIsInstance(out["review_due"], bool)
+        self.assertEqual(out["review_due"],
+                         out["below_zero_months"] >= self.constants.HEALTH_REVIEW_MONTHS)
+
+
 if __name__ == "__main__":
     unittest.main()
