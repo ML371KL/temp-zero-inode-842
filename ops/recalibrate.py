@@ -22,6 +22,7 @@
 
 import argparse
 import csv
+import hashlib
 import json
 import math
 import os
@@ -351,31 +352,46 @@ def section_second_layer(labels, fwd, cells, panel, out):
 QUARTER_MONTHS = (1, 4, 7, 10)
 
 
-def notify(verdicts, health, mode, out_path):
+def notify(verdicts, health, mode, out_path, now=None):
     """Одна строка в ops-канал. Молчим, когда сказать нечего.
 
     ПОЧЕМУ НЕ КАЖДЫЙ РАЗ: отчёт «расхождений нет» ежемесячно за год приучает не
     открывать сообщения от панели вовсе — и вместе с ними мимо проходит настоящее
     расхождение. Поэтому тревога уходит СРАЗУ, а рутинное подтверждение — только в
     квартальные месяцы, чтобы раз в квартал было видно: проверка жива и прошла.
+
+    ПОЧЕМУ КЛЮЧ ИЗ СОДЕРЖАНИЯ, А НЕ ИЗ ДАТЫ. Расхождение живёт МЕСЯЦАМИ: пока
+    константы не пересчитаны целиком, та же строка «−3,14% против −2,94%» верна и
+    в сентябре, и в октябре. С ключом по дате она приходила бы каждый месяц заново —
+    то самое «состояние вместо перехода», против которого построен весь остальной
+    алертинг панели (pipeline/alerts.py). Ключ по набору находок означает: повтор
+    молчит, изменение набора говорит.
     """
     if mode == "never":
         return "выключено"
     from pipeline.lib import telegram
 
-    news = bool(verdicts) or bool(health.get("review_due"))
-    quarter = datetime.now(timezone.utc).month in QUARTER_MONTHS
-    if mode == "auto" and not news and not quarter:
+    now = now or datetime.now(timezone.utc)
+    findings = list(verdicts)
+    if health.get("review_due"):
+        findings.append(f"здоровье ниже нуля {health.get('below_zero_months')} мес подряд — "
+                        f"порог §7 на пересмотр состава достигнут")
+    quarter = now.month in QUARTER_MONTHS
+    if mode == "auto" and not findings and not quarter:
         return "молчу: расхождений нет, месяц не квартальный"
 
-    head = "Реколибровка: расхождений нет" if not news else "Реколибровка: есть расхождения"
-    lines = [head] + [f"• {v}" for v in verdicts]
-    if health.get("review_due"):
-        lines.append(f"• здоровье ниже нуля {health.get('below_zero_months')} мес подряд — "
-                     f"порог §7 на пересмотр состава достигнут")
+    head = "Реколибровка: есть расхождения" if findings else "Реколибровка: расхождений нет"
+    lines = [head] + [f"• {f}" for f in findings]
     if out_path:
         lines.append(f"Полный отчёт: {out_path}")
-    key = f"recalibrate:{datetime.now(timezone.utc):%Y-%m-%d}"
+
+    if findings:
+        # Один и тот же набор находок — одно сообщение, сколько бы месяцев он ни жил.
+        digest = hashlib.sha256("\n".join(sorted(findings)).encode("utf-8")).hexdigest()[:16]
+        key = f"recalibrate:{digest}"
+    else:
+        # Подтверждение «всё чисто» — не находка, а сердцебиение: ровно одно на квартал.
+        key = f"recalibrate-ok:{now.year}Q{(now.month - 1) // 3 + 1}"
     outcome = telegram.deliver(key, "\n".join(lines), channel="ops")
     return f"telegram({outcome})"
 
