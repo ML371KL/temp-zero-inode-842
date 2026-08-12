@@ -193,6 +193,11 @@ jobs:
           RADAR_WRITER_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # Зеркало событий в ленту хаба NEXUS. Фолбэк поднимается ровно в аварии
+          # VPS — когда владелец смотрит на ленту внимательнее обычного, поэтому
+          # канал нужен и здесь. Пустые значения = зеркала нет, шаг не падает.
+          NEXUS_EVENTS_URL: ${{ vars.NEXUS_EVENTS_URL }}
+          NEXUS_INGEST_TOKEN: ${{ secrets.NEXUS_INGEST_TOKEN }}
         run: |
           set -euo pipefail
           mkdir -p "$STATE_DIR"

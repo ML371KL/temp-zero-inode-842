@@ -1,4 +1,5 @@
-"""События в телеграм (docs/CONTRACT.md §6): ТОЛЬКО переходы, не состояния.
+"""События в телеграм и в ленту хаба NEXUS (docs/CONTRACT.md §6): ТОЛЬКО переходы,
+не состояния.
 
 ПОЧЕМУ только переходы: панель и так показывает состояние; уведомление ценно ровно
 в момент смены. Ежедневное «сегодня по-прежнему токсичная ячейка» читатель выключает
@@ -17,7 +18,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from pipeline.lib import constants, telegram
+from pipeline.lib import constants, nexus, telegram
 
 STATE_NAME = "alerts_state.json"
 FEED_LIMIT = 20          # столько последних событий уезжает в data.json
@@ -369,8 +370,16 @@ def dispatch(events, dry_run=False, enabled=True):
             # DUP («такой ключ уже уходил») — это ДОСТАВЛЕНО. Считать его провалом
             # значит вечно держать событие в очереди повторов: cb_reminder рождается
             # на каждом из 56 интрадей-тактов и один вытеснял из очереди всё живое.
-            ev["delivered"] = outcome in (telegram.SENT, telegram.DUP)
             ev["outcome"] = outcome
+            # Копия события уходит в ленту хаба NEXUS. Доставленным событие
+            # считается, только когда прошли ОБА канала: недоставленное ложится в
+            # pending и повторяется, а телеграм на повторе отвечает DUP и второй
+            # раз в канал не пишет. Отдельная очередь для зеркала не нужна.
+            # OFF (канал не настроен) блокировать доставку не имеет права — иначе
+            # прогон без NEXUS_* копил бы вечную очередь повторов.
+            ev["nexus"] = nexus.deliver(ev)
+            ev["delivered"] = (outcome in (telegram.SENT, telegram.DUP)
+                               and ev["nexus"] in (nexus.SENT, nexus.OFF))
     return events
 
 

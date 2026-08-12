@@ -117,7 +117,7 @@ list_dirty() -> [series_id]                        # для выгрузки в 
 ```
 pipeline/
   run.py                 # CLI: --mode intraday|daily|weekly|monthly|event|bootstrap
-  lib/{http,store,dates,calc,constants,registry,r2,lease,telegram}.py
+  lib/{http,store,dates,calc,constants,registry,r2,lease,telegram,nexus}.py
   fetch/{iss,cbr,minfin,rosstat,investfunds,polymarket,orfr,moex_press}.py
   compute/{panel,core,states,monitors,health}.py
   publish.py  alerts.py
@@ -143,9 +143,16 @@ publish(payload, mode) -> None    # лиз → PUT data.json → PUT history/* �
 Объект `lease.json`: `{"writer":"vps|gha","holder_id":"…","heartbeat":"ISO","ttl_seconds":5400}`.
 Правила: VPS пишет всегда и обновляет heartbeat. GHA-фолбэк публикует, только если `now - heartbeat > ttl` ИЛИ `writer == "gha"`; при возвращении VPS перехватывает лиз (пишет `writer:"vps"`). Никаких блокировок: разрешение конфликта по приоритету VPS.
 
-## 6. Телеграм-события (`alerts.py`)
+## 6. События (`alerts.py`)
 
 Только переходы, дедуп по ключу в состоянии: `core_flip`, `state_cell_change`, `bond_flag_on/off`, `buy_window_open` (vol=1 & bond=0), `cb_decision` (сюрприз/в линию), `cb_reminder` (за день), `orfr_published`, `auction_failed`, `deposit_uptick`, санитарные (`source_stale`, `lease_lost`, `health_dead`).
+
+Каналов два, событие одно и то же:
+
+- **телеграм** (`lib/telegram.py`) — дедуп маркером в `STATE_DIR/notify/*.json`;
+- **лента хаба NEXUS** (`lib/nexus.py`) — POST `{source:"842", text, eventId, occurredAt}` на `NEXUS_EVENTS_URL` с `Authorization: Bearer NEXUS_INGEST_TOKEN`; дедуп на стороне хаба по паре (`source`, `eventId`), где `eventId` — тот же ключ события. Первая фраза текста становится заголовком ленты, остаток — подписью.
+
+Событие считается доставленным, только когда прошли **оба** канала; недоставленное лежит в `pending` и повторяется до суток. Повтор безопасен: телеграм отвечает `DUP`, хаб гасит дубль по `eventId`. Незаполненные `NEXUS_*` — законный режим «зеркала нет»: канал возвращает `OFF` и доставку не блокирует.
 
 ## 7. Статусы источников
 

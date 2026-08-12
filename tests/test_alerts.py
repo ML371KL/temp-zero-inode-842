@@ -70,9 +70,15 @@ class AlertsCase(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.prev_env = {k: os.environ.get(k) for k in
-                         ("STATE_DIR", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID")}
+                         ("STATE_DIR", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
+                          "NEXUS_EVENTS_URL", "NEXUS_INGEST_TOKEN")}
         os.environ.update(STATE_DIR=self.tmp.name, TELEGRAM_BOT_TOKEN="тест",
                           TELEGRAM_CHAT_ID="-100")
+        # Зеркало NEXUS гасим явно (правило 2 набора: в сеть не ходим). На VPS эти
+        # переменные заданы, и без снятия набор, запущенный там, постучался бы в хаб
+        # настоящим POST на каждое событие.
+        os.environ.pop("NEXUS_EVENTS_URL", None)
+        os.environ.pop("NEXUS_INGEST_TOKEN", None)
         self.addCleanup(self._restore_env)
         self.sent = []
         self.online = True
@@ -418,6 +424,68 @@ class TestPayloadFeed(AlertsCase):
         for row in feed:
             self.assertEqual(set(row), {"ts", "kind", "severity", "text"})
         self.assertLessEqual(len(feed), self.alerts.FEED_LIMIT)
+
+
+class TestNexusMirror(AlertsCase):
+    """Копия события в ленту хаба. Сам POST проверяется в test_nexus.py — здесь
+    только сцепка с очередью повторов, которая живёт в alerts.dispatch."""
+
+    def setUp(self):
+        super().setUp()
+        self.nexus = need(self, "pipeline.lib.nexus", "deliver", "SENT", "OFF", "FAIL")
+        self.hub_outcome = self.nexus.SENT
+        self.mirrored = []
+        patcher = mock.patch.object(self.nexus, "deliver", self._deliver)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _deliver(self, event):
+        self.mirrored.append(event["key"])
+        return self.hub_outcome
+
+    def seed(self, *args, **kwargs):
+        super().seed(*args, **kwargs)
+        self.mirrored.clear()
+
+    def bond_off(self, now=NOW):
+        return self.alerts.run(payload(bond=0, cell="bear|stress|ok"), dry_run=False, now=now)
+
+    def test_event_reaches_the_hub_under_its_own_key(self):
+        self.seed(payload(bond=1))
+        events = self.bond_off()
+        # Снятие флага тянет за собой смену ячейки и окно входа — в ленту уезжают
+        # все три, по одному ключу на событие.
+        self.assertEqual(sorted(self.mirrored), sorted(e["key"] for e in events))
+        self.assertIn("bond_off:" + ASOF, self.mirrored)
+        self.assertEqual(self.pending_keys(), [])
+
+    def test_dead_hub_retries_without_a_second_telegram_message(self):
+        # мутация: считать событие доставленным по одному телеграму -> упавший хаб
+        # теряет событие навсегда, повторить его уже некому.
+        self.seed(payload(bond=1))
+        self.hub_outcome = self.nexus.FAIL
+        self.bond_off()
+        self.assertIn("bond_off:" + ASOF, self.pending_keys())
+        self.hub_outcome = self.nexus.SENT
+        self.bond_off(NOW + timedelta(hours=1))
+        self.assertEqual(self.pending_keys(), [])
+        self.assertEqual(self.mirrored.count("bond_off:" + ASOF), 2)
+        # Телеграм на повторе отвечает DUP: второго сообщения в канал не уходит.
+        self.assertEqual(len([t for t in self.sent if "Облигационный флаг снят" in t]), 1)
+
+    def test_unconfigured_hub_never_blocks_delivery(self):
+        # мутация: OFF трактовать как FAIL -> на машине без NEXUS_* очередь повторов
+        # растёт вечно, а телеграм на каждом прогоне отвечает DUP впустую.
+        self.seed(payload(bond=1))
+        self.hub_outcome = self.nexus.OFF
+        self.bond_off()
+        self.assertEqual(self.pending_keys(), [])
+
+    def test_dry_run_touches_neither_channel(self):
+        self.seed(payload(bond=1))
+        self.alerts.run(payload(bond=0, cell="bear|stress|ok"), dry_run=True, now=NOW)
+        self.assertEqual(self.mirrored, [])
+        self.assertEqual(self.sent, [])
 
 
 if __name__ == "__main__":
