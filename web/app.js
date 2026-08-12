@@ -306,9 +306,20 @@
       h('div', { 'class': 'bits' }, bits),
       h('div', { 'class': 'cellname' }, [cellIco, h('span', { text: v.cell_label || 'ячейка не определена' })]),
       h('div', { 'class': 'cellcode', text: (v.cell_code || '').split('|').join(' · ') }),
+      /* Среднее по ячейке — ХВОСТОВАЯ статистика: у токсичной оно −2,94% при
+       * медиане +0,64% и 13 плюсовых месяцах из 24. Одно среднее читается как
+       * прогноз на месяц, читатель получает +5% и перестаёт верить панели. Рядом
+       * со средним обязаны стоять медиана (типичный месяц) и худший месяц (то,
+       * ради чего ворота закрыты). */
       h('div', { 'class': 'stats' }, [
+        stat('Медиана месяца', isNum((v.cell_stats || {}).median_fwd1m_pct)
+          ? fmtNum(v.cell_stats.median_fwd1m_pct, 2, true) + '%' : '—',
+          'типичный исход', toneOf((v.cell_stats || {}).median_fwd1m_pct)),
         stat('Средний форвардный месяц', isNum(mean) ? fmtNum(mean, 2, true) + '%' : '—',
-          'на истории 2004–2026', toneOf(mean)),
+          'среднее тянут хвосты', toneOf(mean)),
+        stat('Худший месяц', isNum((v.cell_stats || {}).worst_pct)
+          ? fmtNum(v.cell_stats.worst_pct, 1, true) + '%' : '—',
+          'за что закрыты ворота', toneOf((v.cell_stats || {}).worst_pct)),
         stat('Доля плюсовых', isNum((v.cell_stats || {}).hit) ? Math.round(v.cell_stats.hit * 100) + '%' : '—'),
         stat('Наблюдений', isNum((v.cell_stats || {}).n) ? String(v.cell_stats.n) : '—', 'месяцев в ячейке')
       ])

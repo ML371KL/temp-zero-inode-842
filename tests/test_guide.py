@@ -93,6 +93,21 @@ class TestGuideMatchesConstants(unittest.TestCase):
                 self.assertIn(shown, self.html,
                               f"средняя ячейки «{cell['label']}» ({shown}%) не найдена в руководстве")
 
+    def test_cell_distribution_present(self):
+        """Рядом со средним стоят медиана и худший месяц: одно среднее лжёт.
+
+        Среднее по ячейке — хвостовая статистика (у токсичной −2,94% при медиане
+        +0,64%), и читатель, увидевший только его, ждёт «примерно −3% в следующем
+        месяце». Он получит +5% и перестанет верить панели — хотя панель говорила
+        о хвосте, а не о типичном месяце.
+        """
+        for key, cell in self.K.CELL_STATS.items():
+            with self.subTest(cell=cell["label"]):
+                for field, nd in (("median_fwd1m_pct", 2), ("worst_pct", 1)):
+                    shown = f"{abs(cell[field]):.{nd}f}".replace(".", ",")
+                    self.assertIn(shown, self.html,
+                                  f"{field} ячейки «{cell['label']}» ({shown}%) нет в руководстве")
+
     def test_cell_counts_present(self):
         for key, cell in self.K.CELL_STATS.items():
             with self.subTest(cell=cell["label"]):

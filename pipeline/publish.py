@@ -75,8 +75,11 @@ def build_verdict(core, states):
     verdict = {
         "cell_code": _cell_code(cur),
         "cell_label": (stats or {}).get("label"),
-        "cell_stats": ({"mean_fwd1m_pct": stats["mean_fwd1m_pct"], "hit": stats["hit"],
-                        "n": stats["n"]} if stats else None),
+        # Среднее по ячейке — хвостовая статистика, поэтому рядом с ним обязаны ехать
+        # медиана и края: одно среднее читается как прогноз на месяц (constants §CELL_STATS).
+        "cell_stats": ({k: stats[k] for k in
+                        ("mean_fwd1m_pct", "hit", "n", "median_fwd1m_pct",
+                         "worst_pct", "best_pct") if k in stats} if stats else None),
         "rule": constants.CELL_RULES.get(
             key, "Ячейка без исторической статистики: правила дня нет, смотреть на ядро."),
         "core_value": value,

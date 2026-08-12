@@ -224,35 +224,36 @@
 
     <div class="guide__table-wrap">
       <table class="data guide__table">
-        <caption>Ячейки отсортированы по средней доходности следующего месяца.</caption>
+        <caption>Ячейки отсортированы по средней доходности следующего месяца. Медиана — типичный исход, среднее тянут хвосты: у токсичной ячейки среднее −2,94% при медиане +0,64%, потому что четыре месяца из 24 дали от −16% до −30%.</caption>
         <thead>
-          <tr><th scope="col">Ячейка</th><th scope="col">Средний месяц</th>
+          <tr><th scope="col">Ячейка</th><th scope="col">Медиана месяца</th>
+              <th scope="col">Средний месяц</th><th scope="col">Худший месяц</th>
               <th scope="col">Доля плюсовых</th><th scope="col">Наблюдений</th><th scope="col">Как читать</th></tr>
         </thead>
         <tbody>
           <tr><th scope="row">Окно входа<br><span class="guide__dim">бык · стресс · облигации ок</span></th>
-            <td class="tone-pos">+3,83%</td><td>75%</td><td>8</td>
+            <td class="tone-pos">+3,78%</td><td class="tone-pos">+3,83%</td><td class="tone-neg">−4,7%</td><td>75%</td><td>8</td>
             <td>Лучшее, что бывает: паника в акциях при здоровом долге. Наблюдений мало — восемь месяцев за 22 года.</td></tr>
           <tr><th scope="row">Окно входа<br><span class="guide__dim">медведь · стресс · облигации ок</span></th>
-            <td class="tone-pos">+1,42%</td><td>60%</td><td>10</td>
+            <td class="tone-pos">+0,48%</td><td class="tone-pos">+1,42%</td><td class="tone-neg">−9,9%</td><td>60%</td><td>10</td>
             <td>Тот же механизм в медвежьем тренде. Именно эту ячейку ищут, когда «ловят дно».</td></tr>
           <tr><th scope="row">Рабочий режим<br><span class="guide__dim">бык · спокойно · ок</span></th>
-            <td class="tone-pos">+0,93%</td><td>59%</td><td>110</td>
+            <td class="tone-pos">+1,22%</td><td class="tone-pos">+0,93%</td><td class="tone-neg">−16,7%</td><td>59%</td><td>110</td>
             <td>Самый частый режим. Ворота открыты, наклон задаёт ядро.</td></tr>
           <tr><th scope="row">Бык с долговой тенью<br><span class="guide__dim">бык · спокойно · стресс</span></th>
-            <td class="tone-pos">+0,85%</td><td>61%</td><td>54</td>
+            <td class="tone-pos">+1,28%</td><td class="tone-pos">+0,85%</td><td class="tone-neg">−8,9%</td><td>61%</td><td>54</td>
             <td>Статистически как рабочий режим. Отдельного правила исследование не даёт.</td></tr>
           <tr><th scope="row">Вялый медведь<br><span class="guide__dim">медведь · спокойно · ок</span></th>
-            <td class="tone-pos">+0,54%</td><td>61%</td><td>31</td>
+            <td class="tone-pos">+1,13%</td><td class="tone-pos">+0,54%</td><td class="tone-neg">−14,7%</td><td>61%</td><td>31</td>
             <td>Слабые ставки в обе стороны. Ждать сигнала ядра.</td></tr>
           <tr><th scope="row">Медведь с долговой тенью<br><span class="guide__dim">медведь · спокойно · стресс</span></th>
-            <td class="tone-pos">+0,51%</td><td>64%</td><td>25</td>
+            <td class="tone-pos">+1,53%</td><td class="tone-pos">+0,51%</td><td class="tone-neg">−18,4%</td><td>64%</td><td>25</td>
             <td>Приоритет — облигационный флаг: он снимается первым.</td></tr>
           <tr><th scope="row">Перегрев на стрессе<br><span class="guide__dim">бык · стресс · стресс</span></th>
-            <td class="tone-neg">−0,80%</td><td>50%</td><td>8</td>
+            <td class="tone-neg">−0,51%</td><td class="tone-neg">−0,80%</td><td class="tone-neg">−9,8%</td><td>50%</td><td>8</td>
             <td>Растянутый рынок и долговой стресс. Риск асимметричен вниз.</td></tr>
           <tr><th scope="row">Токсичная ячейка<br><span class="guide__dim">медведь · стресс · стресс</span></th>
-            <td class="tone-neg">−2,94%</td><td>56%</td><td>25</td>
+            <td class="tone-pos">+0,64%</td><td class="tone-neg">−2,94%</td><td class="tone-neg">−30,0%</td><td>56%</td><td>25</td>
             <td>Худший режим истории: 2008, 2022, часть 2024 и 2026. Покупать только по подтверждению.</td></tr>
         </tbody>
       </table>
@@ -370,7 +371,11 @@
     <ol class="guide__steps">
       <li><b>Сначала ворота, потом наклон.</b> Ячейка отвечает, можно ли вообще увеличивать
         риск. Если ячейка токсичная, положительный композит не повод покупать — он повод
-        готовиться и ждать подтверждения.</li>
+        готовиться и ждать подтверждения. <b>Ворота закрыты ради хвоста, а не ради среднего:</b>
+        больше половины токсичных месяцев закрывались в плюс, но четыре из 24 дали от −16%
+        до −30%. И главное — ядро обвал не видит: с августа по октябрь 2008 композит стоял
+        на максимуме (+3,0), пока индекс терял по 16–29% в месяц. Без ворот просадка модели
+        на полной истории −57,9% вместо −19,9%.</li>
       <li><b>Смотрите на расстояние до переключения.</b> Оно говорит, какого события ждать:
         «RGBI выйдет из просадки», «индекс вернётся выше 200-дневной». Это и есть
         подтверждение из правила дня.</li>

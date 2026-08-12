@@ -20,7 +20,7 @@ from tests import need, panel_small
 class StatesCase(unittest.TestCase):
     def setUp(self):
         self.states = need(self, "pipeline.compute.states", "compute_states", "cell_code")
-        self.constants = need(self, "pipeline.lib.constants", "CELL_STATS", "STATE_RULES")
+        self.constants = need(self, "pipeline.lib.constants", "CELL_STATS", "STATE_RULES", "CELL_RULES")
         self.panel = panel_small()
         self.expect = self.panel["expect"]
         self.out = self.states.compute_states(
@@ -107,6 +107,33 @@ class TestCell(StatesCase):
 
     def test_rule_of_the_day_is_not_empty(self):
         self.assertTrue(self.out["cell"]["rule"].strip())
+
+    def test_every_cell_carries_its_distribution(self):
+        """Среднее без медианы и края — хвостовая статистика, выданная за прогноз.
+
+        Аудит 12.08.2026: у токсичной ячейки среднее −2,94%, а медиана +0,64% и
+        13 плюсовых месяцев из 24; минус создают четыре обвала. Витрина, где стоит
+        одно среднее, обещает «примерно −3% в следующем месяце» — читатель получает
+        +5% и перестаёт верить панели, хотя панель говорила о хвосте.
+        """
+        for key, cell in self.constants.CELL_STATS.items():
+            with self.subTest(cell=cell["label"]):
+                for field in ("median_fwd1m_pct", "worst_pct", "best_pct"):
+                    self.assertIn(field, cell)
+                self.assertLessEqual(cell["worst_pct"], cell["median_fwd1m_pct"])
+                self.assertLessEqual(cell["median_fwd1m_pct"], cell["best_pct"])
+                self.assertLessEqual(cell["worst_pct"], cell["mean_fwd1m_pct"])
+
+    def test_toxic_cell_median_is_positive(self):
+        # Именно этот факт правило дня обязано называть: ворота закрыты ради хвоста
+        # (худший месяц −30%), а не потому что «обычно тут падают».
+        toxic = self.constants.CELL_STATS[(0, 1, 1)]
+        self.assertGreater(toxic["median_fwd1m_pct"], 0)
+        self.assertLess(toxic["mean_fwd1m_pct"], 0)
+        self.assertLess(toxic["worst_pct"], -25)
+        rule = self.constants.CELL_RULES[(0, 1, 1)]
+        self.assertIn("медиана", rule.lower())
+        self.assertIn("2008", rule, "правило обязано называть отказ ядра, а не только ячейку")
 
     def test_all_eight_cells_listed_once(self):
         cells = self.out["cells"]
