@@ -160,11 +160,13 @@ SERIES = {
     "dividends": dict(fetcher="dividends.calendar", args={}, cadence="weekly",
                       pub_lag_days=0, sla=None, required=False, role="monitor",
                       label="Дивидендный календарь",
-                      note="календарь smart-lab, отфильтрованный по составу IMOEX с "
-                           "весами (ISS analytics) — веса дают ожидаемый гэп индекса. "
-                           "Датасет биржи securities/{sec}/dividends мёртв (у всех "
-                           "бумаг записи кончаются 2025), T-Invest API с прод-машины "
-                           "не отвечает. inputs/dividends.yml остался резервом"),
+                      note="календарь T-Invest API (резерв — smart-lab), отфильтрованный "
+                           "по составу IMOEX с весами (ISS analytics): веса дают "
+                           "ожидаемый гэп индекса. Датасет биржи "
+                           "securities/{sec}/dividends мёртв (у всех бумаг записи "
+                           "кончаются 2025). inputs/dividends.yml остался резервом. "
+                           "asof ряда — день ЧТЕНИЯ календаря: точки лежат в будущем, "
+                           "и умолчание make_meta по последней точке здесь неверно"),
 }
 
 # Что тянет каждый режим прогона.

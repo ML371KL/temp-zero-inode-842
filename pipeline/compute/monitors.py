@@ -513,7 +513,12 @@ def _t_dividends(store, now):
         money = (f", выплат {_n(total, 0)} млрд, реинвест ≈{_n(total * share, 0)} млрд"
                  if total is not None else "")
         headline = f"Ближайшая отсечка: {nxt['ticker']} {_ddmm(nxt['ex_date'])}{y}{gap}{money}"
-    return _tile("dividends", status, meta.get("asof") or (upcoming[0]["ex_date"] if upcoming else None),
+    # Запасная дата — день последнего успешного чтения, а НЕ ближайшая отсечка.
+    # Отсечка лежит в будущем, и подпись «данные: 21.09.2026» означала бы, что
+    # витрина знает больше, чем произошло. Ручной резерв (fetch/manual.py) asof не
+    # ставит вовсе — без этой строки тайл снова уехал бы в будущее.
+    asof = meta.get("asof") or (str(meta.get("fetched_at") or "")[:10] or None)
+    return _tile("dividends", status, asof,
                  headline, payload,
                  f"Оценка реинвеста — допущение: возвращается {int(share * 100)}% выплат "
                  "(диапазон оценок ЦБ 40–60%), это не измеренная величина.",

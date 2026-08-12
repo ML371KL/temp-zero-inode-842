@@ -146,6 +146,20 @@ class CalendarCase(unittest.TestCase):
         self.assertEqual(meta["origin"], "smartlab")
         self.assertTrue(meta["items"], "скрейп не дал ни одной записи")
 
+    def test_asof_это_день_чтения_а_не_будущая_отсечка(self):
+        # ОПЛАЧЕНО ПРОДОМ: make_meta по умолчанию берёт максимальную дату точек, а
+        # точки здесь — БУДУЩИЕ отсечки. Витрина от 12.08 получала asof 2026-10-12,
+        # фронт дату из будущего в подпись не пускает — и тайл с исправными числами
+        # показывал «нет данных». Та же дата уезжала в блок sources.
+        self.serve(tinvest_ok=True)
+        _sid, _pts, meta = self.d.calendar(with_amounts=False)
+        self.assertEqual(meta["asof"], self.d.dates.fmt_date(self.d.dates.today_msk()))
+        # Ловушка в чистом виде и без зависимости от календаря (правило 1 набора:
+        # никаких «сегодня минус N»): умолчание make_meta на ряде из будущих точек
+        # отдаёт дату из будущего, и фетчер обязан её перебить.
+        self.assertEqual(self.d.make_meta("x", "u", {"2099-01-01": 1.0})["asof"],
+                         "2099-01-01")
+
     def test_гэп_индекса_это_вес_на_доходность(self):
         # мутация: взять доходность бумаги как просадку индекса -> 13,5% вместо 1,7%.
         self.serve(tinvest_ok=True)
@@ -193,6 +207,40 @@ class SmartlabParsingCase(unittest.TestCase):
     def test_смена_вёрстки_это_отказ_а_не_мусор(self):
         with self.assertRaises(self.d.FetchError):
             self.d.parse_calendar("<table><tr><th>Что-то</th></tr></table>")
+
+
+class TileAsofCase(unittest.TestCase):
+    """Подпись тайла не имеет права уехать в будущее ни по одному из путей."""
+
+    def setUp(self):
+        self.m = need(self, "pipeline.compute.monitors", "BUILDERS")
+
+    def tile(self, meta):
+        class Store:
+            def load_series(self, sid):
+                return {"points": {}, "meta": meta} if sid == "dividends" else None
+
+        builder = dict(self.m.BUILDERS)["dividends"]
+        # Фиксированный момент: правило 1 набора запрещает считать от «сегодня».
+        return builder(Store(), self.m.datetime(2026, 8, 12, 9, 0, tzinfo=self.m.timezone.utc))
+
+    def test_ручной_резерв_без_asof_берёт_день_чтения(self):
+        # fetch/manual.py asof не ставит вовсе, а прежний запасной вариант брал
+        # БЛИЖАЙШУЮ ОТСЕЧКУ — то есть будущее, которое фронт печатать отказывается.
+        tile = self.tile({"status": "ok", "fetched_at": "2026-08-12T07:56:42Z",
+                          "items": [{"ticker": "YDEX", "ex_date": "2026-09-21",
+                                     "yield_pct": 2.74, "amount_bn": 43.6,
+                                     "index_drag_pct": 0.189, "weight_pct": 6.89}]})
+        self.assertEqual(tile["asof"], "2026-08-12")
+        self.assertIn("YDEX", tile["headline"], "числа тайла при этом не меняются")
+
+    def test_asof_из_meta_уважается(self):
+        tile = self.tile({"status": "ok", "asof": "2026-08-11",
+                          "fetched_at": "2026-08-12T07:56:42Z",
+                          "items": [{"ticker": "T", "ex_date": "2026-10-12",
+                                     "yield_pct": 1.66, "amount_bn": 12.6,
+                                     "index_drag_pct": 0.086, "weight_pct": 5.17}]})
+        self.assertEqual(tile["asof"], "2026-08-11")
 
 
 if __name__ == "__main__":
