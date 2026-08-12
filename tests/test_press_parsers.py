@@ -200,6 +200,42 @@ class TestMoexFeedDepth(unittest.TestCase):
         self.assertLess(fake.call_count, self.press.MAX_PAGES,
                         "обход должен останавливаться по датам, а не упираться в потолок")
 
+    def test_retail_вызывается_целиком(self):
+        """Регрессия 12.08.2026: сигнатуру `_candidates` расширили ПЕРВЫМ параметром.
+
+        `retail()` зовёт её позиционно (`_candidates(scan_pages)`), и число 20 встало
+        на место регулярки: прогон падал с «'int' object has no attribute 'search'»,
+        ряд простоял `error` до следующего месячного такта, а тесты этого не увидели —
+        они дёргали `_candidates()` без аргументов. Теперь проверяется ПУТЬ ЦЕЛИКОМ.
+        """
+        body = ("Количество частных инвесторов на Московской бирже в июле 2026 года "
+                "составило 41,9 млн человек (+62 тыс. за месяц). Сделки в июле "
+                "заключали 3,0 млн человек. В народный портфель вошли акции "
+                "Сбербанка (31,8% и 7,3% соответственно), ЛУКОЙЛа (11,6%).")
+
+        def feed(url, **_kw):
+            if "/sitenews/" in url:
+                return {"content": {"columns": ["id", "body"], "data": [[777, body]]}}
+            start = int(re.search(r"start=(\d+)", url).group(1))
+            rows = [] if start else [[777, "", "Частные инвесторы в июле нарастили вложения",
+                                      "2026-08-05 11:30:00", "2026-08-05 11:30:00"]]
+            return {"sitenews": {"columns": ["id", "tag", "title", "published_at",
+                                             "modified_at"], "data": rows}}
+
+        with mock.patch.object(self.press, "get_json", side_effect=feed):
+            sid, points, meta = self.press.retail()
+        self.assertEqual(sid, "moex_retail")
+        self.assertEqual(meta["status"], "ok", meta.get("note"))
+        self.assertEqual(points, {"2026-07-31": 3.0})
+        self.assertEqual(meta["payload"]["clients_total_mln"], 41.9)
+
+    def test_новые_параметры_добавляются_в_конец(self):
+        # Прямая защита от повторения: первым позиционным аргументом обязана
+        # оставаться глубина обхода, а не что-то новое.
+        import inspect
+        names = list(inspect.signature(self.press._candidates).parameters)
+        self.assertEqual(names[0], "max_pages")
+
     def test_потолок_страниц_держит_ленту_без_дат(self):
         def undated(url, **_kw):
             body = {"sitenews": {"columns": ["id", "tag", "title", "published_at",

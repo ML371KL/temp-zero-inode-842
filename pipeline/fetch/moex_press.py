@@ -187,10 +187,15 @@ def scan_news(pattern, max_pages=MAX_PAGES, max_age_days=MAX_AGE_DAYS):
     ищут в ней анонс «О проведении … аукциона по размещению ОФЗ»), а логика глубины
     обхода должна быть одна — она нетривиальна и уже была источником тихого отказа.
     """
-    return _candidates(pattern, max_pages, max_age_days)[0]
+    return _candidates(max_pages, max_age_days, pattern)[0]
 
 
-def _candidates(pattern=None, max_pages=MAX_PAGES, max_age_days=MAX_AGE_DAYS):
+def _candidates(max_pages=MAX_PAGES, max_age_days=MAX_AGE_DAYS, pattern=None):
+    # ВНИМАНИЕ к порядку аргументов. Здесь он не косметика: retail() зовёт эту
+    # функцию ПОЗИЦИОННО (`_candidates(scan_pages)`), и когда 12.08.2026 сюда
+    # первым параметром добавили `pattern`, число 20 встало на место регулярки —
+    # прогон падал с «'int' object has no attribute 'search'», а ряд простоял
+    # error до первого месячного такта. Новые параметры добавлять только В КОНЕЦ.
     """id новостей-кандидатов (свежие сверху) + ошибки списка.
 
     Глубина обхода считается ПО ДАТАМ, а не по числу страниц, и вот почему. Раньше
