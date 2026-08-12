@@ -71,6 +71,34 @@ class TimerCase(unittest.TestCase):
                                  start <= run + LOCK_WAIT_MIN,
                                  f"такт {line} упирается в суточный прогон {run // 60}:{run % 60:02d} UTC")
 
+    def test_реколибровка_не_лезет_в_окно_сборки(self):
+        """Сверка может подождать, витринный такт — нет.
+
+        Столкновение не сломало бы ничего (flock разведёт, интрадей честно пропустит
+        такт), но обмен «пропущенный такт витрины ради сверки, которая ждёт месяц»
+        невыгоден. Первая редакция таймера стояла на 20:40 UTC — внутри окна
+        витринных тактов (Mon–Fri 07:00–20:55 каждые пять минут).
+        """
+        unit = "moex-radar-recalibrate.timer"
+        jitter = self._jitter(unit)
+        intraday_end = 20 * 60 + 55
+        for line in calendars(unit):
+            hh, mm, _ss = (int(x) for x in line.split()[-2].split(":"))
+            start = hh * 60 + mm
+            self.assertGreater(start, intraday_end,
+                               f"{line}: попадает в окно витринных тактов")
+            for run in DAILY_RUNS_UTC:
+                self.assertFalse(run - LOCK_WAIT_MIN <= start + jitter and
+                                 start <= run + LOCK_WAIT_MIN,
+                                 f"такт {line} упирается в суточный прогон")
+
+    def test_у_реколибровки_есть_юнит_и_таймер(self):
+        # Юнит без таймера — молчаливый отказ: файл есть, запускать некому
+        # (ровно так пять рядов не обновлялись с установки, ops/check_schedule.py).
+        for name in ("moex-radar-recalibrate.service", "moex-radar-recalibrate.timer"):
+            self.assertTrue(os.path.exists(os.path.join(OPS, name)), name)
+        self.assertIn("moex-radar recalibrate", unit_text("moex-radar-recalibrate.service"))
+
     def _jitter(self, unit):
         m = re.search(r"^RandomizedDelaySec=(\d+)", unit_text(unit), re.M)
         return int(m.group(1)) // 60 if m else 0

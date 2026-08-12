@@ -348,11 +348,45 @@ def section_second_layer(labels, fwd, cells, panel, out):
 
 # ------------------------------------------------------------------------ main
 
+QUARTER_MONTHS = (1, 4, 7, 10)
+
+
+def notify(verdicts, health, mode, out_path):
+    """Одна строка в ops-канал. Молчим, когда сказать нечего.
+
+    ПОЧЕМУ НЕ КАЖДЫЙ РАЗ: отчёт «расхождений нет» ежемесячно за год приучает не
+    открывать сообщения от панели вовсе — и вместе с ними мимо проходит настоящее
+    расхождение. Поэтому тревога уходит СРАЗУ, а рутинное подтверждение — только в
+    квартальные месяцы, чтобы раз в квартал было видно: проверка жива и прошла.
+    """
+    if mode == "never":
+        return "выключено"
+    from pipeline.lib import telegram
+
+    news = bool(verdicts) or bool(health.get("review_due"))
+    quarter = datetime.now(timezone.utc).month in QUARTER_MONTHS
+    if mode == "auto" and not news and not quarter:
+        return "молчу: расхождений нет, месяц не квартальный"
+
+    head = "Реколибровка: расхождений нет" if not news else "Реколибровка: есть расхождения"
+    lines = [head] + [f"• {v}" for v in verdicts]
+    if health.get("review_due"):
+        lines.append(f"• здоровье ниже нуля {health.get('below_zero_months')} мес подряд — "
+                     f"порог §7 на пересмотр состава достигнут")
+    if out_path:
+        lines.append(f"Полный отчёт: {out_path}")
+    key = f"recalibrate:{datetime.now(timezone.utc):%Y-%m-%d}"
+    outcome = telegram.deliver(key, "\n".join(lines), channel="ops")
+    return f"telegram({outcome})"
+
+
 def main():
     ap = argparse.ArgumentParser(description="Квартальная реколибровка панели")
     ap.add_argument("--out", help="куда положить markdown-отчёт")
     ap.add_argument("--restore", action="store_true",
                     help="скачать стор из зеркала R2 (для пустого раннера)")
+    ap.add_argument("--notify", choices=("auto", "always", "never"), default="never",
+                    help="строка вердикта в ops-канал: auto — только когда есть что сказать")
     args = ap.parse_args()
 
     raw = Path(store.raw_dir())
@@ -409,6 +443,11 @@ def main():
         print(f"отчёт: {path}")
     else:
         print(text)
+
+    verdicts = list(drift)
+    if not invariant_ok:
+        verdicts.insert(0, "композит разошёлся с эталоном исследования")
+    print("уведомление:", notify(verdicts, health, args.notify, args.out))
     return 0
 
 

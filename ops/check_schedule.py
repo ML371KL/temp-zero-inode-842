@@ -38,6 +38,11 @@ from pipeline.lib import registry  # noqa: E402  (после sys.path)
 # установке, selftest — из установщика сразу после неё.
 MANUAL_ONLY_MODES = {"bootstrap", "selftest"}
 
+# Режимы обвязки, которые НЕ собирают данные: у них нет рядов, и требовать
+# от них покрытия реестра бессмысленно. Таймер им при этом всё равно нужен —
+# проверка №1 ниже за этим следит.
+NON_PIPELINE_MODES = {"recalibrate"}
+
 EXEC_START = re.compile(r"^ExecStart=.*?/moex-radar\s+(\w+)\s*$", re.M)
 
 
@@ -78,6 +83,8 @@ def main(argv=None):
     # никто не запускает, — это и есть исходный дефект.
     covered = set()
     for mode in scheduled:
+        if mode in NON_PIPELINE_MODES:
+            continue
         covered |= {sid for sid, _ in registry.series_for_mode(mode)}
     orphans = sorted(set(registry.SERIES) - covered)
     if orphans:

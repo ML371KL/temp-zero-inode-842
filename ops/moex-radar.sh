@@ -18,9 +18,9 @@ mode="${1:-}"
 # Список режимов — из pipeline/run.py (MODES). Проверяем здесь, чтобы опечатка в юните
 # ловилась до git fetch и до запуска питона, а не argparse-ошибкой в середине журнала.
 case "$mode" in
-  intraday|daily|weekly|monthly|manual|bootstrap|selftest) ;;
+  intraday|daily|weekly|monthly|manual|bootstrap|selftest|recalibrate) ;;
   *)
-    echo "использование: moex-radar <intraday|daily|weekly|monthly|manual|bootstrap|selftest>" >&2
+    echo "использование: moex-radar <intraday|daily|weekly|monthly|manual|bootstrap|selftest|recalibrate>" >&2
     exit 2
     ;;
 esac
@@ -59,6 +59,7 @@ case "$mode" in
   monthly|manual)        deadline=1200;;
   bootstrap)             deadline=3600;;
   selftest)              deadline=120;;
+  recalibrate)           deadline=900;;
 esac
 
 mkdir -p "$STATE_DIR"
@@ -118,8 +119,18 @@ status=0
 # перенос означает «дальше аргументы», поэтому комментарий уезжает
 # в АРГУМЕНТЫ timeout — тот падает с кодом 125 (Try 'timeout --help'),
 # а systemd после пары рестартов глушит юнит. Оплачено на живом таймере.
-timeout --kill-after=30 "$deadline" \
-  "$python" -u pipeline/run.py --mode "$mode" || status=$?
+# Реколибровка — не режим конвейера: она ничего не собирает и не публикует, только
+# читает стор и печатает дифф. Отдельная ветка, а не --mode, потому что pipeline/run.py
+# про неё не знает и знать не должен: у неё нет ни лиза, ни витрины, ни алертов.
+if [[ "$mode" == "recalibrate" ]]; then
+  report_dir="$STATE_DIR/recalibration"
+  mkdir -p "$report_dir"
+  timeout --kill-after=30 "$deadline" \
+    "$python" -u ops/recalibrate.py --notify auto --out "$report_dir/$(date -u +%Y-%m-%d).md" || status=$?
+else
+  timeout --kill-after=30 "$deadline" \
+    "$python" -u pipeline/run.py --mode "$mode" || status=$?
+fi
 
 elapsed=$(( $(date -u +%s) - started ))
 case "$status" in

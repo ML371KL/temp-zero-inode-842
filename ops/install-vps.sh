@@ -23,7 +23,8 @@ STATE_DIR="${STATE_DIR:-/var/lib/moex-radar}"
 # (SLA считается от fetched_at, и «никто не спрашивал» неотличимо от «источник свежий»).
 # Так пять рядов из тридцати шести не обновлялись с установки. Инвариант «каждый режим
 # из registry.MODES стоит в чьём-то ExecStart» проверяется в .github/workflows/ci.yml.
-UNITS=(moex-radar-daily moex-radar-intraday moex-radar-manual moex-radar-monthly moex-radar-weekly)
+UNITS=(moex-radar-daily moex-radar-intraday moex-radar-manual moex-radar-monthly
+       moex-radar-weekly moex-radar-recalibrate)
 
 say() { printf '\n== %s\n' "$*"; }
 note() { printf '   %s\n' "$*"; }

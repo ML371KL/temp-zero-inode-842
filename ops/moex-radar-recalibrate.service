@@ -1,0 +1,32 @@
+[Unit]
+Description=MOEX Radar · реколибровка (сверка замороженных чисел с историей)
+Documentation=https://github.com/ML371KL/temp-zero-inode-842/blob/main/docs/ARCHITECTURE.md
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=3600
+StartLimitBurst=3
+
+[Service]
+# Здесь oneshot законен, в отличие от сборочных юнитов: повторять реколибровку при
+# отказе незачем. Она ничего не собирает и не публикует — читает стор и печатает дифф,
+# и её пропуск стоит одного месяца ожидания, а не пропущенных данных.
+Type=oneshot
+User=dash
+Group=dash
+WorkingDirectory=/srv/dash/repo-842
+EnvironmentFile=/usr/local/etc/moex-radar/env
+Environment=PYTHONUNBUFFERED=1
+# Опорные числа панели (статистика восьми ячеек, условные IC второго слоя, эталон
+# walk-forward) заморожены в constants.py и в validation/data/, а история растёт
+# каждый месяц. Дрейф идёт МОЛЧА: внеплановый аудит 12.08.2026 нашёл среднее токсичной
+# ячейки −3,14% против замороженных −2,94% и hit 0,54, недостижимый при n=25. Юнит
+# делает эту сверку регулярной; решение о составе ядра он не принимает и принять не
+# может — автоматический отбор по свежей результативности проигран в walk-forward
+# (REGIME.md §4: OOS IC −0,018 против +0,227).
+ExecStart=/usr/local/sbin/moex-radar recalibrate
+# Дедлайн обвязки — 900 с, здесь потолок выше: юнит ждёт ещё и замок стора (240 с).
+TimeoutStartSec=1500
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
