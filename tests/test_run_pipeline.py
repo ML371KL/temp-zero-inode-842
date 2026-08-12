@@ -48,6 +48,65 @@ class RunCase(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
 
+class TestSourceFamilyRanking(RunCase):
+    """Статус семьи источников: «не собирали» не должно быть хуже «отказал».
+
+    Аудит 12.08.2026: вся семья Минфина светилась `missing` из-за одного `ngd`,
+    который в тот день просто не попадал в окно опроса, — при том что
+    `budget_deficit` в ней собирался, а `fnb` и `ofz_auctions` честно падали.
+    Читатель видел «у Минфина не собрано ничего», то есть ровно наоборот. Заодно
+    строка теперь называет РЯД, который решил статус: без этого догадаться,
+    кто именно тянет семью вниз, нельзя.
+    """
+
+    def sources(self, states):
+        """states: {series_id: статус|None}. None = ряда в сторе нет вовсе."""
+        fake_registry = {sid: {"fetcher": "demo.%s" % sid, "args": {}}
+                         for sid in states}
+
+        def points(_store, cand):
+            status = states.get(cand)
+            if status is None:
+                return [], {}
+            return ([("2026-08-11", 1.0)] if status != "missing" else [],
+                    {"fetched_at": FETCHED, "asof": "2026-08-11", "status": status})
+
+        with mock.patch.object(self.run.registry, "SERIES", fake_registry), \
+             mock.patch.object(self.run.store, "list_series", return_value=list(states)), \
+             mock.patch.object(self.run.monitors_mod, "series_points", points), \
+             mock.patch.object(self.run.monitors_mod, "series_status",
+                               lambda cand, pts, meta, now: states.get(cand) or "missing"):
+            return self.run._sources_fallback(NOW)
+
+    def test_отказ_перевешивает_несобранное(self):
+        got = self.sources({"budget": "ok", "ngd": None, "fnb": "error"})
+        self.assertEqual(got["demo"]["status"], "error")
+        self.assertEqual(got["demo"]["series"], "fnb")
+
+    def test_несобранное_не_топит_живую_семью(self):
+        # мутация: вернуть прежний порядок -> «missing» поверх исправного ряда.
+        got = self.sources({"budget": "ok", "ngd": None})
+        self.assertEqual(got["demo"]["status"], "ok")
+        self.assertEqual(got["demo"]["series"], "budget")
+
+    def test_семья_без_единого_ряда_остаётся_missing(self):
+        got = self.sources({"ngd": None, "fnb": None})
+        self.assertEqual(got["demo"]["status"], "missing")
+
+    def test_порядок_худшести_целиком(self):
+        self.assertEqual(self.sources({"a": "ok", "b": "stale"})["demo"]["status"], "stale")
+        self.assertEqual(self.sources({"a": "stale", "b": "missing"})["demo"]["status"],
+                         "missing")
+        self.assertEqual(self.sources({"a": "missing", "b": "error"})["demo"]["status"],
+                         "error")
+
+    def test_неизвестный_статус_не_выдаётся_за_дефект(self):
+        # Незнакомое слово приравнивается к missing: выдумывать отказ хуже, чем
+        # промолчать. Проверяем через сам компаратор — он и есть правило.
+        self.assertFalse(self.run._worse("что-то новое", "error"))
+        self.assertTrue(self.run._worse("error", "что-то новое"))
+
+
 class TestFetchReportTellsTheTruth(RunCase):
     def test_meta_status_error_is_a_failure(self):
         # мутация: считать провалом только исключение -> «[fetch] fnb ok точек=0»,

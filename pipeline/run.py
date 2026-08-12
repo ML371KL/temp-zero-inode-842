@@ -304,11 +304,34 @@ def _sources(now, journal):
     return _sources_fallback(now)
 
 
+# Порядок «худшести» статуса источника. Неизвестный статус приравнивается к
+# missing, а не к error: выдумывать дефект по незнакомому слову хуже, чем
+# промолчать (CONTRACT §7 перечисляет ровно эти четыре).
+STATUS_RANK = {"ok": 0, "stale": 1, "missing": 2, "error": 3}
+
+
+def _worse(status, than):
+    return STATUS_RANK.get(status, 2) > STATUS_RANK.get(than, 2)
+
+
 def _sources_fallback(now):
-    """Минимальная сводка из meta рядов, если health-модуль назвал функцию иначе."""
-    rank = {"ok": 0, "stale": 1, "error": 2, "missing": 3}
+    """Минимальная сводка из meta рядов, если health-модуль назвал функцию иначе.
+
+    Семье присваивается статус ХУДШЕГО её ряда, и порядок «худшести» тут не
+    косметика. `error` — «спросили и получили отказ», это дефект. `missing` —
+    «ещё не собирали», а у месячных рядов это штатное состояние одиннадцать
+    месяцев из двенадцати. Пока missing стоял хуже error, вся семья Минфина
+    светилась «missing» из-за одного `ngd` вне окна опроса — при том что
+    `budget_deficit` в ней собирался, а `fnb` с `ofz_auctions` честно падали.
+    Читалось это как «у Минфина не собрано ничего», то есть ровно наоборот.
+
+    Второй слой той же ошибки — ниже: ряд, которого в сторе нет ВООБЩЕ, не
+    должен определять статус семьи, пока в ней есть собранные ряды. Оговорка
+    «он не повод топить семью» уже стояла для рядов стора, но для записей
+    реестра терялась.
+    """
     stored = set(store.list_series()) if hasattr(store, "list_series") else set()
-    out = {}
+    known, empty = {}, {}
     for sid, spec in registry.SERIES.items():
         family = str(spec.get("fetcher", "")).split(".")[0]
         # Ряд реестра может разворачиваться в НЕСКОЛЬКО рядов стора: zcyc -> zcyc_y1…,
@@ -328,16 +351,24 @@ def _sources_fallback(now):
             row = {"asof": meta.get("asof") or (pts[-1][0] if pts else None),
                    "fetched_at": meta.get("fetched_at"),
                    "status": status,
-                   "lag_min": _age_min(meta.get("fetched_at"), now)}
-            if best is None or rank.get(status, 3) > rank.get(best["status"], 3):
+                   "lag_min": _age_min(meta.get("fetched_at"), now),
+                   "series": cand}
+            if best is None or _worse(status, best["status"]):
                 best = row
         if best is None:
-            # Ни одного ряда семьи в сторе: показываем missing, но это «ещё не
-            # собирали», а не «сломалось» — фронт красит серым, не жёлтым.
-            best = {"asof": None, "fetched_at": None, "status": "missing", "lag_min": None}
-        cur = out.get(family)
-        if cur is None or rank.get(best["status"], 3) > rank.get(cur["status"], 3):
-            out[family] = best
+            # Ряда нет в сторе вовсе. Это «ещё не собирали» — он запоминается
+            # отдельно и станет статусом семьи, только если в ней вообще ничего
+            # не собрано.
+            empty.setdefault(family, sid)
+            continue
+        cur = known.get(family)
+        if cur is None or _worse(best["status"], cur["status"]):
+            known[family] = best
+    out = dict(known)
+    for family, sid in empty.items():
+        # Фронт красит missing серым, не жёлтым: «не собирали» — не поломка.
+        out.setdefault(family, {"asof": None, "fetched_at": None, "status": "missing",
+                                "lag_min": None, "series": sid})
     return out
 
 
