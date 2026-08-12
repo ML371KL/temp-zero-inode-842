@@ -352,9 +352,13 @@ button { font: inherit; color: inherit; }
   font-size: 11px; font-weight: 600; letter-spacing: .1em;
   text-transform: uppercase; color: var(--ink-3); margin-bottom: 4px;
 }
-/* Единственный текст на панели, который говорит, ЧТО ДЕЛАТЬ, шёл строкой в 114
- * знаков — на такой длине глаз теряет начало следующей строки. */
-.rule__t { font-size: 15px; line-height: 1.55; max-width: 62ch; }
+/* Правило дня занимает ВСЮ ширину блока. Прежний потолок в 62 знака ставился
+ * против строки в 114 знаков, но с тех пор текст правила вырос вдвое: при узкой
+ * колонке он разъезжался на пять строк, правая половина карточки пустовала, и
+ * блок вытягивался вниз сильнее, чем читался. Длину строки теперь держит только
+ * ширина страницы (1180px, около 145 знаков) — сознательный размен: короткий
+ * широкий блок против узкого высокого. */
+.rule__t { font-size: 15px; line-height: 1.55; max-width: 100%; }
 
 .gaugeval { display: flex; align-items: baseline; gap: 10px; margin-bottom: 2px; }
 .gaugeval__n { font-size: clamp(26px, 5.2vw, 46px); font-weight: 700; letter-spacing: -.03em; line-height: 1; }
