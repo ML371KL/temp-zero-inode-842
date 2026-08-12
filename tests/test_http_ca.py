@@ -19,10 +19,16 @@ import unittest
 
 from tests import need
 
-# Отпечатки из docs/LATENCY.md §5 и шапки самого бандла. Подмена файла (или тихая
-# «оптимизация» вида «положим сюда ещё один корень») обязана валить набор.
-ROOT_SHA256 = ("D26D2D0231B7C39F92CC738512BA54103519E4405D68B5BD703E9788CA8ECF31")
-SUB_SHA256 = ("BBBDE2103E790B999EC62BD03CF625A5A2E7C316E10AFE6A490EEDEAD8B3FD9B")
+# Отпечатки из шапки самого бандла. Подмена файла (или тихая «оптимизация» вида
+# «положим сюда ещё один корень») обязана валить набор.
+#
+# Промежуточных ДВА, и это не запас: файл с gu-st.ru отдаёт выпуск 2022 года, а лист
+# rosstat.gov.ru подписан выпуском 2024-го. С одним лишь gu-st-бандлом прод падал
+# ровно так же, как без него, — «unable to get local issuer certificate», и обнаружить
+# это удалось только живым запросом с прод-машины.
+ROOT_SHA256 = "D26D2D0231B7C39F92CC738512BA54103519E4405D68B5BD703E9788CA8ECF31"
+SUB_2022_SHA256 = "BBBDE2103E790B999EC62BD03CF625A5A2E7C316E10AFE6A490EEDEAD8B3FD9B"
+SUB_2024_SHA256 = "2155785036C900DBB5F1BB2A1569C80C55595BD6BF94867A29BBDDBC7D88A3F2"
 
 
 class CaBundleCase(unittest.TestCase):
@@ -41,7 +47,7 @@ class CaBundleCase(unittest.TestCase):
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.load_verify_locations(cafile=path)   # падает, если PEM склеен неправильно
         certs = ctx.get_ca_certs(binary_form=True)
-        self.assertEqual(len(certs), 2, "в бандле ровно два сертификата: корень и Sub")
+        self.assertEqual(len(certs), 3, "в бандле корень и ОБА промежуточных (2022 и 2024)")
 
     def test_отпечатки_совпадают_с_объявленными(self):
         import hashlib
@@ -50,7 +56,23 @@ class CaBundleCase(unittest.TestCase):
         got = {hashlib.sha256(der).hexdigest().upper()
                for der in ctx.get_ca_certs(binary_form=True)}
         self.assertIn(ROOT_SHA256, got, "корневой сертификат Минцифры подменён")
-        self.assertIn(SUB_SHA256, got, "промежуточный сертификат Минцифры подменён")
+        self.assertIn(SUB_2022_SHA256, got, "промежуточный 2022 подменён")
+        self.assertIn(SUB_2024_SHA256, got,
+                      "промежуточный 2024 подменён — именно им подписан лист Росстата")
+
+    def test_оба_промежуточных_подписаны_корнем(self):
+        # Промежуточный, не выводящийся на корень из этого же файла, — мусор в бандле:
+        # цепочка не соберётся, а ошибка будет выглядеть как «сертификат не тот».
+        import ssl as _ssl
+        ctx = _ssl.SSLContext(_ssl.PROTOCOL_TLS_CLIENT)
+        ctx.load_verify_locations(cafile=self.bundle_path())
+        certs = ctx.get_ca_certs()
+        roots = [c for c in certs if "Russian Trusted Root CA" in str(c["subject"])]
+        subs = [c for c in certs if "Russian Trusted Sub CA" in str(c["subject"])]
+        self.assertEqual(len(roots), 1)
+        self.assertEqual(len(subs), 2)
+        for sub in subs:
+            self.assertIn("Russian Trusted Root CA", str(sub["issuer"]))
 
     def test_контекст_даётся_только_своим_хостам(self):
         self.assertIsNotNone(self.http.ssl_context("rosstat.gov.ru"))
