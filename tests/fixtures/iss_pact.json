@@ -1,0 +1,146 @@
+{
+ "2026-05-20": {
+  "_что": "два выпуска + ДРПА у Минфина",
+  "columns": [
+   "TRADEDATE",
+   "SECID",
+   "SHORTNAME",
+   "VOLUME",
+   "VALUE",
+   "NUMTRADES",
+   "FACEVALUE",
+   "YIELDCLOSE",
+   "CLOSE",
+   "LASTTRADEDATE"
+  ],
+  "data": [
+   [
+    "2026-05-20",
+    "SU26228RMFS5",
+    "ОФЗ 26228",
+    64459755,
+    53373064137.36,
+    177,
+    1000,
+    13.92,
+    82.8006,
+    "2026-05-20"
+   ],
+   [
+    "2026-05-20",
+    "SU26252RMFS5",
+    "ОФЗ 26252",
+    95836341,
+    88730272649.73,
+    830,
+    1000,
+    14.64,
+    92.5851,
+    "2026-05-20"
+   ]
+  ]
+ },
+ "2026-07-01": {
+  "_что": "обычный аукцион",
+  "columns": [
+   "TRADEDATE",
+   "SECID",
+   "SHORTNAME",
+   "VOLUME",
+   "VALUE",
+   "NUMTRADES",
+   "FACEVALUE",
+   "YIELDCLOSE",
+   "CLOSE",
+   "LASTTRADEDATE"
+  ],
+  "data": [
+   [
+    "2026-07-01",
+    "SU26251RMFS7",
+    "ОФЗ 26251",
+    10364891,
+    8802051295.8,
+    175,
+    1000,
+    14.96,
+    84.9218,
+    "2026-07-01"
+   ]
+  ]
+ },
+ "2026-07-02": {
+  "_что": "эхо: выпуск ещё висит с нулём",
+  "columns": [
+   "TRADEDATE",
+   "SECID",
+   "SHORTNAME",
+   "VOLUME",
+   "VALUE",
+   "NUMTRADES",
+   "FACEVALUE",
+   "YIELDCLOSE",
+   "CLOSE",
+   "LASTTRADEDATE"
+  ],
+  "data": [
+   [
+    "2026-07-02",
+    "SU26251RMFS7",
+    "ОФЗ 26251",
+    0,
+    0,
+    0,
+    1000,
+    null,
+    null,
+    "2026-07-01"
+   ]
+  ]
+ },
+ "2026-07-15": {
+  "_что": "аукцион провалился",
+  "columns": [
+   "TRADEDATE",
+   "SECID",
+   "SHORTNAME",
+   "VOLUME",
+   "VALUE",
+   "NUMTRADES",
+   "FACEVALUE",
+   "YIELDCLOSE",
+   "CLOSE",
+   "LASTTRADEDATE"
+  ],
+  "data": [
+   [
+    "2026-07-15",
+    "SU29028RMFS6",
+    "ОФЗ 29028",
+    0,
+    0,
+    0,
+    1000,
+    null,
+    null,
+    "2025-11-12"
+   ]
+  ]
+ },
+ "2026-07-22": {
+  "_что": "аукциона не было",
+  "columns": [
+   "TRADEDATE",
+   "SECID",
+   "SHORTNAME",
+   "VOLUME",
+   "VALUE",
+   "NUMTRADES",
+   "FACEVALUE",
+   "YIELDCLOSE",
+   "CLOSE",
+   "LASTTRADEDATE"
+  ],
+  "data": []
+ }
+}

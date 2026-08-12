@@ -638,6 +638,8 @@ def _t_ofz_auctions(store, now):
         failed = bool((placed is not None and placed <= 0)
                       or (btc is not None and placed is not None and btc < 1.0))
     status = _st("ofz_auctions", pts, meta, now)
+    weeks = meta.get("weeks_since")
+    ahead = meta.get("next_auction")
     payload = {
         "date": asof,
         "issue": last_meta.get("issue"),
@@ -646,24 +648,39 @@ def _t_ofz_auctions(store, now):
         "bid_to_cover": _r(btc, 2),
         "premium_bp": last_meta.get("premium_bp"),
         "failed": bool(failed),
+        "weeks_since": weeks,
+        "next_auction": ahead,
+        "method": meta.get("method"),
         "recent": [[d, _r(v, 1)] for d, v in pts[-12:]],
     }
+    # Спрос теперь бывает пустым штатно: биржа его не раскрывает, а сайт Минфина с
+    # прод-машины недоступен. Молчание про спрос — это «нет данных», и печатать
+    # «при спросе н/д млрд» нельзя: единица, приклеенная к отсутствующему числу.
+    demand_txt = f" при спросе {_n(demand, 1)} млрд" if demand is not None else ""
+    btc_txt = f", bid-to-cover {_n(btc, 2)}" if btc is not None else ""
     if failed and (placed is None or placed <= 0):
         # «размещено 0,0 млрд» крупным кеглем неотличимо от аукциона, где ноль реально
-        # разместили, а при пустом объёме получалось «размещено н/д млрд» — единица,
-        # приклеенная к отсутствующему числу. Провал по нулю называем словами.
+        # разместили. Провал по нулю называем словами.
         headline = f"Аукцион {_ddmm(asof)} не состоялся: размещения не было"
     elif failed:
-        # Провал по спросу (bid-to-cover < 1) — здесь числа как раз содержательны.
-        headline = (f"Аукцион {_ddmm(asof)} провален: размещено {_n(placed, 1)} млрд "
-                    f"при спросе {_n(demand, 1)} млрд, bid-to-cover {_n(btc, 2)}")
+        headline = (f"Аукцион {_ddmm(asof)} провален: размещено {_n(placed, 1)} млрд"
+                    f"{demand_txt}{btc_txt}")
     else:
-        btc_txt = f", bid-to-cover {_n(btc, 2)}" if btc is not None else ""
-        headline = (f"Аукцион {_ddmm(asof)}: размещено {_n(placed, 1)} млрд при спросе "
-                    f"{_n(demand, 1)} млрд{btc_txt}")
+        headline = (f"Аукцион {_ddmm(asof)}: размещено {_n(placed, 1)} млрд"
+                    f"{demand_txt}{btc_txt}")
+    # Пауза в размещениях — самостоятельное состояние рынка, а не «старые данные».
+    # С 20.07.2026 аукционы приостановлены, и заголовок без этой оговорки читался бы
+    # как свежая новость про аукцион месячной давности.
+    if isinstance(weeks, int) and weeks >= 2:
+        headline = (f"Аукционов нет {weeks} нед. Последний — {headline[8:]}"
+                    if headline.startswith("Аукцион ") else headline)
+    if ahead:
+        headline += f". Назначен следующий: {_ddmm(ahead)}"
     return _tile("ofz_auctions", status, asof, headline, payload,
                  "Провал аукциона читаем как индикатор фискальной премии в длинном конце, "
-                 "а не как торговый сигнал для акций.",
+                 "а не как торговый сигнал для акций. Объём — биржевой (доска PACT), без "
+                 "доразмещения после аукциона; спрос биржа не раскрывает, а сайт Минфина "
+                 "с прод-машины недоступен.",
                  meta.get("fetched_at"))
 
 

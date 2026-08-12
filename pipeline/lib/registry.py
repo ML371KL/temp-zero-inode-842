@@ -101,9 +101,13 @@ SERIES = {
                            "economy.gov.ru недоступен, а зеркала СМИ держат релиз на "
                            "первой странице ленты считанные дни — лишние попытки "
                            "ничего не стоят, а пропуск месяца стоит ноги ядра"),
-    "ofz_auctions": dict(fetcher="minfin.auctions", args={}, cadence="weekly", pub_lag_days=0,
-                         sla="minfin_monthly", required=False, role="monitor",
-                         label="Аукционы ОФЗ"),
+    "ofz_auctions": dict(fetcher="auctions.auctions", args={}, cadence="weekly",
+                         pub_lag_days=0, sla="iss_daily", required=False, role="monitor",
+                         label="Аукционы ОФЗ",
+                         note="источник — биржевая доска PACT, а не Минфин: minfin.gov.ru "
+                              "отдаёт 503 с прод-машины даже на статику. Биржа даёт "
+                              "размещение и различает «провалился»/«не проводился», но НЕ "
+                              "даёт спрос и не включает ДРПА (docs/SOURCES.md)"),
     "ngd": dict(fetcher="minfin.ngd", args={}, cadence="monthly", pub_lag_days=5,
                 poll_window=(3, 10), sla="minfin_monthly", required=False, role="monitor",
                 label="Нефтегазовые доходы и операции по бюджетному правилу"),

@@ -180,7 +180,17 @@ def parse_portfolio(text):
     return out[:12]
 
 
-def _candidates(max_pages=MAX_PAGES, max_age_days=MAX_AGE_DAYS):
+def scan_news(pattern, max_pages=MAX_PAGES, max_age_days=MAX_AGE_DAYS):
+    """[(id, заголовок, дата)] новостей ленты ISS, чей заголовок подошёл под pattern.
+
+    Публичная обёртка над обходом: ленту читает не только этот модуль (аукционы ОФЗ
+    ищут в ней анонс «О проведении … аукциона по размещению ОФЗ»), а логика глубины
+    обхода должна быть одна — она нетривиальна и уже была источником тихого отказа.
+    """
+    return _candidates(pattern, max_pages, max_age_days)[0]
+
+
+def _candidates(pattern=None, max_pages=MAX_PAGES, max_age_days=MAX_AGE_DAYS):
     """id новостей-кандидатов (свежие сверху) + ошибки списка.
 
     Глубина обхода считается ПО ДАТАМ, а не по числу страниц, и вот почему. Раньше
@@ -195,6 +205,7 @@ def _candidates(max_pages=MAX_PAGES, max_age_days=MAX_AGE_DAYS):
     Потолок max_pages остаётся: если ISS однажды начнёт отдавать даты мусором,
     обход обязан кончиться, а не листать ленту до 2014 года.
     """
+    title_re = pattern or _TITLE_RE
     ids, errors = [], []
     newest = None          # верх ленты: от него, а не от «сегодня», считается возраст
     for page in range(max(1, int(max_pages))):
@@ -219,7 +230,7 @@ def _candidates(max_pages=MAX_PAGES, max_age_days=MAX_AGE_DAYS):
             published = str(row[pos_date])[:10] if len(row) > pos_date else None
             newest = newest or published
             oldest = published or oldest
-            if _TITLE_RE.search(title):
+            if title_re.search(title):
                 try:
                     ids.append((int(row[pos_id]), title, published))
                 except (TypeError, ValueError):
