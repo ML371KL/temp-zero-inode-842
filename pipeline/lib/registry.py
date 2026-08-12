@@ -94,6 +94,14 @@ SERIES = {
                        label="Brent (фьючерс BR на МосБирже)"),
 
     # ------------------------------------------------------------------ Минфин
+    # ngd (нефтегазовые доходы) и fnb (ликвидная часть ФНБ) УБРАНЫ из реестра
+    # 12.08.2026. Причина не в источниках, а в потребителях: их нет. Проверено
+    # grep по pipeline/compute/ и web/ — ни тайла, ни колонки панели, ни строки
+    # фронта. Ряд, который никто не читает, — это не «контекст», а расход: он
+    # ходит в сеть трижды в сутки, а его неудача красит семью источников и
+    # поднимает алерт. Из-за одного fnb семья minfin вечно светилась missing.
+    # Фетчеры minfin.ngd()/minfin.fnb() НЕ удалены и покрыты тестами: если для
+    # них появится тайл, хватит вернуть сюда две строки.
     "urals_tax": dict(fetcher="minfin.urals", args={}, cadence="monthly", pub_lag_days=5,
                       poll_window=(1, 12), sla="minfin_monthly", required=False, role="core",
                       label="Налоговая цена Urals",
@@ -108,15 +116,9 @@ SERIES = {
                               "отдаёт 503 с прод-машины даже на статику. Биржа даёт "
                               "размещение и различает «провалился»/«не проводился», но НЕ "
                               "даёт спрос и не включает ДРПА (docs/SOURCES.md)"),
-    "ngd": dict(fetcher="minfin.ngd", args={}, cadence="monthly", pub_lag_days=5,
-                poll_window=(3, 10), sla="minfin_monthly", required=False, role="monitor",
-                label="Нефтегазовые доходы и операции по бюджетному правилу"),
     "budget_deficit": dict(fetcher="minfin.budget", args={}, cadence="monthly", pub_lag_days=12,
                            poll_window=(9, 16), sla="minfin_monthly", required=False,
                            role="monitor", label="Исполнение федерального бюджета"),
-    "fnb": dict(fetcher="minfin.fnb", args={}, cadence="monthly", pub_lag_days=10,
-                poll_window=(3, 14), sla="minfin_monthly", required=False, role="monitor",
-                label="Ликвидная часть ФНБ"),
 
     # ----------------------------------------------------------------- Росстат
     "cpi_weekly": dict(fetcher="rosstat.cpi_weekly", args={}, cadence="weekly", pub_lag_days=2,
