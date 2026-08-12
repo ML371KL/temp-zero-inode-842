@@ -61,8 +61,11 @@ SERIES = {
     "futoi_mx": dict(fetcher="iss.futoi", args={"ticker": "MX"}, cadence="daily",
                      pub_lag_days=0, sla="iss_daily", required=False, role="monitor",
                      label="Открытые позиции физлиц (фьючерс на индекс)",
-                     note="бесплатный ISS отдаёт с задержкой 14 дней; свежий срез — скрейп "
-                          "moex.com/ru/derivatives/open-positions.aspx"),
+                     note="без подписки ISS отдаёт с запретом на последние 14 суток; "
+                          "с ключом ALGOPACK (env MOEX_ALGOPACK_TOKEN) тот же путь идёт "
+                          "через apim.moex.com и приходит без задержки. Скрейпа нет: "
+                          "moex.com/ru/derivatives/open-positions рисуется скриптом, "
+                          "а open-positions-csv.aspx отвечает 200 и НОЛЬ байт"),
     "breadth": dict(fetcher="iss.breadth", args={}, cadence="daily", pub_lag_days=0,
                     sla="iss_daily", required=False, role="monitor",
                     label="Доля бумаг выше 200-дневной"),

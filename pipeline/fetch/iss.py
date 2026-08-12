@@ -23,6 +23,10 @@ from . import (FetchError, RETRO_DAYS, dates, empty_is_fatal, http,
                incremental_start, make_meta, store)
 
 ISS = "https://iss.moex.com/iss"
+# Платный шлюз МосБиржи. Те же пути ISS, но данные без задержки — при наличии
+# подписки ALGOPACK. Ключ живёт в окружении (см. http.HOST_AUTH_ENV), заголовок
+# ставит HTTP-слой; здесь только выбор базы.
+ALGOPACK = "https://apim.moex.com/iss"
 PAGE = 100  # размер страницы history у ISS
 FUTOI_ROW_CAP = 1000  # жёсткий предел ответа analyticalproducts/futoi
 # Задержка бесплатного потока ISS по ИНСТРУМЕНТАМ (валюта, золото, фьючерсы, акции).
@@ -65,10 +69,16 @@ BREADTH_MIN_TICKERS = 15
 
 
 # --------------------------------------------------------------- низкий уровень
-def _url(path, params):
+def _url(path, params, base=ISS):
     query = dict(params or {})
     query.setdefault("iss.meta", "off")
-    return f"{ISS}/{path}.json?{urlencode(query)}"
+    return f"{base}/{path}.json?{urlencode(query)}"
+
+
+def algopack_ready():
+    """Есть ли ключ подписки. Проверяется на каждый вызов: ключ, вписанный в
+    env-файл, начинает работать со следующего такта, без перезапуска сервиса."""
+    return bool(http.auth_token("apim.moex.com"))
 
 
 def _history(path, params, columns=None, max_pages=500):
@@ -368,7 +378,13 @@ def futoi(ticker="MX", series_prefix=None, start=None, end=None, chunk_days=3,
     # это не отказ источника, а его нормальный режим. А вот отказ HTTP — отказ, и он
     # обязан быть виден: раньше _futoi_window глотал любой FetchError, и прогон, где
     # 7 окон из 7 вернули 403, рапортовал ok с этой же успокаивающей запиской.
-    note = "бесплатный ISS публикует с задержкой ~14 дней"
+    #
+    # Записка обязана меняться вместе с режимом: если подписка есть, а в meta
+    # по-прежнему «задержка 14 дней», то возраст сигнала на панели врёт в другую
+    # сторону — теперь занижая свежесть (states.py подписывает lag_days по данным).
+    paid = algopack_ready()
+    note = ("ALGOPACK: позиции без задержки" if paid
+            else "бесплатный ISS публикует с задержкой ~14 дней")
     status = "ok"
     if failed:
         note = f"окон опрошено {asked}, отказов {failed}; " + note
@@ -381,22 +397,36 @@ def futoi(ticker="MX", series_prefix=None, start=None, end=None, chunk_days=3,
     # рядов, и путать их нельзя (из них считается средний размер позиции).
     return [(sid, points[sid],
              make_meta("iss", url, points[sid], status=status, note=note, ticker=ticker,
-                       fetch_failed=failed,
+                       fetch_failed=failed, algopack=paid,
                        unit="persons" if "holders" in sid else "contracts"))
             for sid in sorted(points)]
 
 
-def _futoi_window(ticker, day_from, day_till):
-    """(строки, колонки, url, 1 если запрос провалился)."""
-    url = _url(f"analyticalproducts/futoi/securities/{ticker}",
-               {"from": dates.fmt_date(day_from), "till": dates.fmt_date(day_till)})
-    try:
-        payload = http.get_json(url)
-    except FetchError as e:
-        http.LOG(f"futoi {ticker} {day_from}..{day_till}: {e}")
-        return [], [], url, 1
-    block = payload.get("futoi") or {}
-    return (block.get("data") or []), list(block.get("columns") or []), url, 0
+def _futoi_window(ticker, day_from, day_till, base=None):
+    """(строки, колонки, url, 1 если запрос провалился).
+
+    База выбирается на каждое окно: с ключом ALGOPACK идём в платный шлюз, без
+    ключа — в бесплатный ISS. При отказе платного шлюза (истёк ключ, подписка не
+    на срочный рынок, шлюз лёг) окно ПЕРЕСПРАШИВАЕТСЯ бесплатно: деградация до
+    четырнадцатидневной задержки лучше пустого ряда, и она видна в журнале.
+    """
+    path = f"analyticalproducts/futoi/securities/{ticker}"
+    params = {"from": dates.fmt_date(day_from), "till": dates.fmt_date(day_till)}
+    bases = [base] if base else ([ALGOPACK, ISS] if algopack_ready() else [ISS])
+    url = _url(path, params, bases[0])
+    for attempt, host_base in enumerate(bases):
+        url = _url(path, params, host_base)
+        try:
+            payload = http.get_json(url)
+        except FetchError as e:
+            http.LOG(f"futoi {ticker} {day_from}..{day_till}"
+                     f"{' (ALGOPACK)' if host_base == ALGOPACK else ''}: {e}")
+            if attempt + 1 < len(bases):
+                continue
+            return [], [], url, 1
+        block = payload.get("futoi") or {}
+        return (block.get("data") or []), list(block.get("columns") or []), url, 0
+    return [], [], url, 1
 
 
 def _futoi_absorb(rows, cols, best, lo=None, hi=None):

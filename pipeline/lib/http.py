@@ -62,6 +62,19 @@ HOST_CA_BUNDLE = {
 }
 CA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ca")
 
+# Хосты с платным доступом: имя переменной окружения, откуда берётся токен.
+#
+# ALGOPACK (подписка МосБиржи) авторизуется статическим ключом из личного кабинета
+# data.moex.com: `Authorization: Bearer <ключ>` к базе https://apim.moex.com/iss.
+# Второй способ — логин/пароль через passport.moex.com — нам недоступен в принципе:
+# этот хост не отвечает НИ с прод-машины, НИ с ноутбука (замер 12.08.2026, 20 с
+# таймаута при живом DNS), тогда как apim.moex.com честно отдаёт 401. То есть выбора
+# между способами нет, и хранить пароль от биржевого кабинета не нужно — только ключ.
+#
+# Пустая или отсутствующая переменная = подписки нет. Это ЗАКОННЫЙ режим: фетчеры
+# обязаны работать по бесплатному ISS и лишь помечать, что данные с задержкой.
+HOST_AUTH_ENV = {"apim.moex.com": "MOEX_ALGOPACK_TOKEN"}
+
 _slot_lock = threading.Lock()
 _next_slot = {}  # host -> момент (time.monotonic), раньше которого стучаться нельзя
 _ctx_lock = threading.Lock()
@@ -137,6 +150,15 @@ def ssl_context(host):
         return ctx
 
 
+def auth_token(host):
+    """Токен подписки для хоста или None. Читается из окружения на КАЖДЫЙ запрос:
+    ключ, вписанный в env-файл, начинает работать со следующего такта, без рестарта."""
+    name = HOST_AUTH_ENV.get(host)
+    if not name:
+        return None
+    return (os.environ.get(name) or "").strip() or None
+
+
 def get_bytes(url, timeout=DEFAULT_TIMEOUT, retries=DEFAULT_RETRIES,
               headers=None, accept_gzip=True, data=None):
     """Скачать тело ответа. Кидает FetchError, если не вышло за `retries` попыток.
@@ -151,6 +173,11 @@ def get_bytes(url, timeout=DEFAULT_TIMEOUT, retries=DEFAULT_RETRIES,
     hdrs = {"User-Agent": USER_AGENT, "Accept": "*/*"}
     if accept_gzip:
         hdrs["Accept-Encoding"] = "gzip"
+    token = auth_token(host)
+    if token:
+        # Ставим ДО заголовков вызывающего: фетчер может переопределить нарочно,
+        # но случайный `headers=_UA` не должен сбивать авторизацию.
+        hdrs["Authorization"] = "Bearer " + token
     if headers:
         hdrs.update(headers)
 
