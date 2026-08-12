@@ -289,6 +289,41 @@ class TestCbrTables(FetcherCase):
         super().setUp()
         self.cbr = need(self, "pipeline.fetch.cbr", "keyrate", "deposit", "decade_end")
 
+    def soap_or_page(self, soap=None, page=None):
+        """Транспорт, различающий SOAP-сервис ЦБ и страницу hd_base.
+
+        Оба ответа замороженные и РАЗНЫЕ (14,0 против 17,0), иначе тест не отличит,
+        откуда пришло число, — а весь смысл резерва в том, что источников два.
+        """
+        def responder(url):
+            if "DailyInfoWebServ" in url:
+                if soap is None:
+                    raise self.cbr.FetchError("SOAP недоступен", url=url)
+                return soap.encode("utf-8")
+            if page is None:
+                raise AssertionError("страница hd_base не должна была понадобиться")
+            return page.encode("utf-8")
+        self.serve(responder)
+
+    def test_keyrate_берётся_из_soap(self):
+        # Ряд опрашивается каждым пятиминутным тактом ради скорости решения по
+        # ставке; SOAP-ответ ~1,8 КБ против ~92 КБ у страницы.
+        self.soap_or_page(soap=fixture_text("cbr_keyrate_soap.xml"))
+        sid, points, meta = self.cbr.keyrate(start="2026-08-03", end="2026-08-11")
+        self.assertEqual(sid, "key_rate")
+        self.assertEqual(points["2026-08-11"], 14.0)
+        self.assertIn("DailyInfoWebServ", meta["url"])
+        self.assertIsNone(meta["note"], "резерв не должен объявляться при живом SOAP")
+
+    def test_keyrate_падает_на_страницу_когда_soap_молчит(self):
+        # мутация: убрать резерв -> ряд, по которому строится «сюрприз против
+        # консенсуса», умирает вместе с одним эндпоинтом.
+        self.soap_or_page(soap=None, page=fixture_text("cbr_keyrate.html"))
+        _sid, points, meta = self.cbr.keyrate(start="2026-08-03", end="2026-08-11")
+        self.assertEqual(points["2026-08-11"], 17.0)
+        self.assertIn("hd_base", meta["url"])
+        self.assertIn("SOAP", meta["note"])
+
     def test_keyrate_table_is_picked_by_header(self):
         # На странице выше лежит вёрстка с вложенными таблицами; «первая таблица»
         # давно перестала быть нужной. мутация: брать tables[0] -> в ряд поедут

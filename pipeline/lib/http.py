@@ -16,6 +16,7 @@
 
 import gzip
 import json
+import os
 import random
 import ssl
 import sys
@@ -42,8 +43,29 @@ HOST_MIN_INTERVAL = {
 }
 DEFAULT_MIN_INTERVAL = 0.25
 
+# Хосты, которым нужен ДОПОЛНИТЕЛЬНЫЙ корень доверия, и файл с ним (в lib/ca/).
+#
+# rosstat.gov.ru выдан УЦ Минцифры и не отдаёт промежуточный сертификат в
+# рукопожатии: на машине без этого якоря запрос падает с CERTIFICATE_VERIFY_FAILED,
+# и ряд ИПЦ молча уезжает на зеркало inflation-monitor.ru (у которого первая
+# колонка — прогноз чужой модели, docs/SOURCES.md §2.5). Именно так и было на
+# проде с самой установки — с ноутбука Росстат открывался, поэтому провал не
+# видели.
+#
+# Доверие точечное и ДОПОЛНИТЕЛЬНОЕ: системные корни остаются, чужой УЦ действует
+# только для перечисленных хостов и только внутри процесса конвейера. Класть его в
+# системное хранилище машины нельзя — там он начнёт подтверждать любой домен для
+# всех процессов, а машина общая (docs/LATENCY.md §5).
+HOST_CA_BUNDLE = {
+    "rosstat.gov.ru": "russian_trusted.pem",
+    "www.rosstat.gov.ru": "russian_trusted.pem",
+}
+CA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ca")
+
 _slot_lock = threading.Lock()
 _next_slot = {}  # host -> момент (time.monotonic), раньше которого стучаться нельзя
+_ctx_lock = threading.Lock()
+_ctx_cache = {}  # имя файла -> SSLContext | None (None = бандл не читается)
 
 
 class FetchError(RuntimeError):
@@ -87,10 +109,45 @@ def _reserve(host):
     return slot - time.monotonic()
 
 
+def ssl_context(host):
+    """SSLContext с дополнительным корнем для хоста или None (обычный контекст).
+
+    Отказ чтения бандла НЕ валит запрос: без якоря соединение упадёт само и с
+    внятной ошибкой TLS, а вот падение на отсутствующем файле выглядело бы как
+    поломка всего HTTP-слоя.
+    """
+    name = HOST_CA_BUNDLE.get(host)
+    if not name:
+        return None
+    with _ctx_lock:
+        if name in _ctx_cache:
+            return _ctx_cache[name]
+        path = os.path.join(CA_DIR, name)
+        ctx = None
+        try:
+            # create_default_context() уже подтягивает СИСТЕМНЫЕ корни, наш файл
+            # добавляется к ним, а не заменяет их: если хост однажды переедет на
+            # обычный УЦ, проверка продолжит работать.
+            ctx = ssl.create_default_context()
+            ctx.load_verify_locations(cafile=path)
+        except (OSError, ssl.SSLError) as e:
+            LOG(f"не прочитан CA-бандл {path}: {type(e).__name__}: {e}")
+            ctx = None
+        _ctx_cache[name] = ctx
+        return ctx
+
+
 def get_bytes(url, timeout=DEFAULT_TIMEOUT, retries=DEFAULT_RETRIES,
-              headers=None, accept_gzip=True):
-    """Скачать тело ответа. Кидает FetchError, если не вышло за `retries` попыток."""
+              headers=None, accept_gzip=True, data=None):
+    """Скачать тело ответа. Кидает FetchError, если не вышло за `retries` попыток.
+
+    `data` (bytes) превращает запрос в POST. Нужен ровно для одного случая: у ЦБ
+    ключевая ставка есть в SOAP-сервисе DailyInfo, который отвечает только на POST,
+    и его ответ в полсотни раз меньше HTML-страницы с той же таблицей. Ретраить
+    такой POST безопасно — это запрос на чтение, а не изменение.
+    """
     host = urlsplit(url).netloc
+    context = ssl_context(host)
     hdrs = {"User-Agent": USER_AGENT, "Accept": "*/*"}
     if accept_gzip:
         hdrs["Accept-Encoding"] = "gzip"
@@ -103,8 +160,8 @@ def get_bytes(url, timeout=DEFAULT_TIMEOUT, retries=DEFAULT_RETRIES,
         if wait > 0:
             time.sleep(wait)
         try:
-            req = urllib.request.Request(url, headers=hdrs)
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            req = urllib.request.Request(url, headers=hdrs, data=data)
+            with urllib.request.urlopen(req, timeout=timeout, context=context) as resp:
                 raw = resp.read()
                 enc = (resp.headers.get("Content-Encoding") or "").lower()
             if "gzip" in enc:

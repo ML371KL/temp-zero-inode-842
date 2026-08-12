@@ -19,6 +19,19 @@ from . import (FetchError, dates, empty_is_fatal, http, incremental_start,
 FX_URL = "https://www.cbr.ru/scripts/XML_dynamic.asp"
 KEYRATE_URL = "https://www.cbr.ru/hd_base/keyrate/"
 DEPOSIT_URL = "https://www.cbr.ru/statistics/avgprocstav/"
+# Ключевая ставка есть и в SOAP-сервисе ЦБ. Он предпочтителен по двум причинам:
+# ответ на то же окно — ~1,8 КБ против ~92 КБ у HTML-страницы (ряд опрашивается
+# каждым интрадей-тактом, чтобы решение по ставке было видно за минуты, а не через
+# пять часов), и это структурированный XML, а не таблица, которую держит вёрстка.
+# Отвечает только на POST: GET-вариант сервиса выключен (проверено 12.08.2026 —
+# «Формат запроса не распознан»).
+KEYRATE_SOAP = "https://www.cbr.ru/DailyInfoWebServ/DailyInfo.asmx"
+_KEYRATE_ENVELOPE = (
+    '<?xml version="1.0" encoding="utf-8"?>'
+    '<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">'
+    "<soap:Body><KeyRate xmlns=\"http://web.cbr.ru/\">"
+    "<fromDate>%s</fromDate><ToDate>%s</ToDate>"
+    "</KeyRate></soap:Body></soap:Envelope>")
 
 # Коды валют ЦБ -> id рядов реестра.
 FX_IDS = {"R01235": "usd_cbr", "R01375": "cny_cbr", "R01239": "eur_cbr"}
@@ -79,30 +92,65 @@ def _fx_value(body):
 
 
 # ------------------------------------------------------------- ключевая ставка
+_KR_ROW = re.compile(r"<KR\b[^>]*>\s*<DT>([^<]+)</DT>\s*<Rate>([^<]+)</Rate>", re.S)
+
+
+def _keyrate_soap(frm, till):
+    """{дата: ставка} из SOAP-сервиса ЦБ. Пусто — значит сервис не дал данных."""
+    body = (_KEYRATE_ENVELOPE % (dates.fmt_date(frm), dates.fmt_date(till))).encode("utf-8")
+    text = http.get_text(KEYRATE_SOAP, data=body, retries=2,
+                         headers={"Content-Type": "text/xml; charset=utf-8",
+                                  "SOAPAction": '"http://web.cbr.ru/KeyRate"'})
+    points = {}
+    for raw_day, raw_rate in _KR_ROW.findall(text):
+        try:
+            day = dates.fmt_date(str(raw_day)[:10])
+        except ValueError:
+            continue
+        value = to_float(raw_rate)
+        if value is not None:
+            points[day] = value
+    return points
+
+
 def keyrate(series_id="key_rate", start=None, end=None, bootstrap=False):
     """Ключевая ставка, % годовых. ЦБ отдаёт значение на каждый рабочий день —
-    так и храним (реестр зовёт ряд событийным, но событие видно как изменение)."""
+    так и храним (реестр зовёт ряд событийным, но событие видно как изменение).
+
+    Сначала SOAP (лёгкий XML), при отказе — та же таблица со страницы hd_base.
+    Резерв не декоративный: страница переживёт смену SOAP-контракта, а SOAP —
+    смену вёрстки, и ряд, по которому строится «сюрприз против консенсуса», не
+    должен зависеть от одного из двух.
+    """
     frm = dates.parse_date(start or incremental_start(series_id, 5,
                                                       KEYRATE_DEFAULT_START, bootstrap))
     till = dates.parse_date(end or dates.today_msk())
-    url = f"{KEYRATE_URL}?" + urlencode({"UniDbQuery.Posted": "True",
-                                         "UniDbQuery.From": dates.fmt_ru(frm),
-                                         "UniDbQuery.To": dates.fmt_ru(till)})
-    rows = _data_rows(http.get_text(url), url, want="Дата")
-    points = {}
-    for row in rows:
-        if len(row) < 2:
-            continue
-        try:
-            day = dates.fmt_date(row[0])
-        except ValueError:
-            continue  # строка заголовка/итога
-        value = to_float(row[1])
-        if value is not None:
-            points[day] = value
+    url = KEYRATE_SOAP
+    note = None
+    try:
+        points = _keyrate_soap(frm, till)
+    except FetchError as exc:
+        points, note = {}, f"SOAP не ответил ({exc}); взята страница hd_base"
+    if not points:
+        note = note or "SOAP вернул пусто; взята страница hd_base"
+        url = f"{KEYRATE_URL}?" + urlencode({"UniDbQuery.Posted": "True",
+                                             "UniDbQuery.From": dates.fmt_ru(frm),
+                                             "UniDbQuery.To": dates.fmt_ru(till)})
+        rows = _data_rows(http.get_text(url), url, want="Дата")
+        points = {}
+        for row in rows:
+            if len(row) < 2:
+                continue
+            try:
+                day = dates.fmt_date(row[0])
+            except ValueError:
+                continue  # строка заголовка/итога
+            value = to_float(row[1])
+            if value is not None:
+                points[day] = value
     if not points and empty_is_fatal(series_id):
-        raise FetchError(f"ЦБ: таблица ключевой ставки пуста за {frm}..{till}", url=url)
-    return series_id, points, make_meta("cbr", url, points, unit="pct")
+        raise FetchError(f"ЦБ: ключевая ставка пуста за {frm}..{till}", url=url)
+    return series_id, points, make_meta("cbr", url, points, unit="pct", note=note)
 
 
 # --------------------------------------------------------- депозитные декады

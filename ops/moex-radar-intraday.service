@@ -3,7 +3,7 @@ Description=MOEX Radar · витринный такт (свежие котиро
 Documentation=https://github.com/ML371KL/temp-zero-inode-842/blob/main/docs/ARCHITECTURE.md
 Wants=network-online.target
 After=network-online.target
-# Такт повторяется каждые 15 минут, и это уже перезапуск. Две попытки за окно — потолок,
+# Такт повторяется каждые пять минут, и это уже перезапуск. Две попытки за окно — потолок,
 # после которого честнее дождаться следующего такта, чем молотить по лежащему ISS.
 StartLimitIntervalSec=900
 StartLimitBurst=2

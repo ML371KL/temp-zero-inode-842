@@ -43,6 +43,10 @@ SERIES_ID = "moex_retail"
 NEWS_LIST = "https://iss.moex.com/iss/sitenews.json?start=%d"
 NEWS_ITEM = "https://iss.moex.com/iss/sitenews/%d.json"
 PAGE_SIZE = 100
+# Глубина обхода ленты: 45 суток покрывают месячный цикл релиза с запасом, потолок
+# в 20 страниц (2000 новостей) держит худший случай в разумных двух секундах.
+MAX_AGE_DAYS = 45
+MAX_PAGES = 20
 
 _TITLE_RE = re.compile(r"частн\w+\s+инвестор", re.I)
 _MONTHS = {"январ": 1, "феврал": 2, "март": 3, "апрел": 4, "ма": 5, "июн": 6,
@@ -176,26 +180,71 @@ def parse_portfolio(text):
     return out[:12]
 
 
-def _candidates(scan_pages=3):
-    """id новостей-кандидатов (свежие сверху) + ошибки списка."""
+def _candidates(max_pages=MAX_PAGES, max_age_days=MAX_AGE_DAYS):
+    """id новостей-кандидатов (свежие сверху) + ошибки списка.
+
+    Глубина обхода считается ПО ДАТАМ, а не по числу страниц, и вот почему. Раньше
+    здесь стояло `scan_pages=3` — триста новостей. МосБиржа публикует около сотни
+    новостей в СУТКИ (риск-параметры, регистрации выпусков, депозитные аукционы),
+    то есть три страницы — это примерно трое суток ленты. Релиз про частных
+    инвесторов месячный: в окно он попадал только если прогон случался в те самые
+    двое-трое суток после публикации, а в остальные дни фетчер честно докладывал
+    «релизов не нашлось» и ряд не собрался ни разу (замер 12.08.2026: в ленте лежит
+    релиз от 08.07, до него 15 страниц).
+
+    Потолок max_pages остаётся: если ISS однажды начнёт отдавать даты мусором,
+    обход обязан кончиться, а не листать ленту до 2014 года.
+    """
     ids, errors = [], []
-    for page in range(scan_pages):
+    newest = None          # верх ленты: от него, а не от «сегодня», считается возраст
+    for page in range(max(1, int(max_pages))):
         try:
             data = get_json(NEWS_LIST % (page * PAGE_SIZE))
         except FetchError as exc:
             errors.append(str(exc))
             break
-        rows = (data.get("sitenews") or {}).get("data") or []
+        block = (data.get("sitenews") or {})
+        rows = block.get("data") or []
         if not rows:
             break
+        # Колонки ищем по ИМЕНИ: у ISS схема блоков плавает между эндпоинтами, и
+        # позиционный доступ однажды тихо подставит дату вместо заголовка.
+        idx = {name: n for n, name in enumerate(block.get("columns") or [])}
+        pos_id = idx.get("id", 0)
+        pos_title = idx.get("title", 2)
+        pos_date = idx.get("published_at", 3)
+        oldest = None
         for row in rows:
-            title = str(row[2]) if len(row) > 2 else ""
+            title = str(row[pos_title]) if len(row) > pos_title else ""
+            published = str(row[pos_date])[:10] if len(row) > pos_date else None
+            newest = newest or published
+            oldest = published or oldest
             if _TITLE_RE.search(title):
-                ids.append((int(row[0]), title, str(row[3])[:10] if len(row) > 3 else None))
+                try:
+                    ids.append((int(row[pos_id]), title, published))
+                except (TypeError, ValueError):
+                    continue
+        if _age_days(newest, oldest) > max_age_days:
+            break
     return ids, errors
 
 
-def retail(scan_pages=3, max_open=4):
+def _age_days(newest, oldest):
+    """Насколько лента уже отлистана назад, в сутках. -1, если дат нет.
+
+    Точка отсчёта — САМАЯ СВЕЖАЯ новость ленты, а не «сегодня»: тест с замороженной
+    фикстурой иначе был бы зелёным ровно до того дня, когда перестанет им быть
+    (правило набора №1, tests/__init__.py).
+    """
+    if not newest or not oldest:
+        return -1
+    try:
+        return (date.fromisoformat(newest) - date.fromisoformat(oldest)).days
+    except ValueError:
+        return -1
+
+
+def retail(scan_pages=MAX_PAGES, max_open=4):
     """-> ("moex_retail", {последний день месяца: активных клиентов, млн}, meta).
 
     Скаляром в ряду — активные клиенты (сколько людей реально торговали): это

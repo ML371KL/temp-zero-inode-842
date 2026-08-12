@@ -21,6 +21,19 @@
    status="error" с пустым словарём — прогон не валится (CONTRACT.md §0).
 3. Пресс-центр Минфина отдаёт дату и текст прямо в HTML — ngd/budget/fnb берём
    оттуда; заголовок ищем по подстроке, а не по id, потому что id меняются.
+4. С ПРОД-МАШИНЫ САЙТ МИНФИНА НЕДОСТУПЕН (замер 12.08.2026): minfin.gov.ru отдаёт
+   503 на любые заголовки с VPS Hetzner и 200 с ноутбука пользователя — режет WAF по
+   диапазонам датацентров, TLS при этом в порядке. Поэтому у пресс-центра появился
+   запасной транспорт: телеграм-канал ведомства (`fetch/tg.py`). Он включается
+   ТОЛЬКО когда сайт не дал ни одного кандидата, и что число пришло из зеркала,
+   видно в `meta.source`/`meta.mirror`.
+   Чего зеркало НЕ закрывает (проверено на живых релизах):
+     * `fnb` — в телеграме печатают ОБЩИЙ объём фонда, а ряд хранит ЛИКВИДНУЮ часть
+       (12 720,8 против 3 692,8 млрд руб.). Шаблоны требуют слова «ликвидн», поэтому
+       сообщение не подойдёт и ряд честно останется пустым — подменять величину
+       втрое большей нельзя;
+     * `urals` — цены Юралс нет ни в канале Минфина, ни у Минэка (проверено на
+       месяце сообщений трёх каналов), там остаются только зеркала СМИ.
 """
 
 import re
@@ -48,6 +61,14 @@ except ImportError:
                 raw = gzip.decompress(raw)
             return raw.decode("utf-8", "replace")
 
+try:                                       # запасной транспорт (грабля 4)
+    from . import tg
+except ImportError:                        # автономный запуск из каталога fetch
+    try:
+        import tg
+    except ImportError:
+        tg = None
+
 # Грабля 11.08.2026: minfin.gov.ru отдаёт 503 на дефолтный UA пайплайна
 # («moex-radar/1.0 … python-urllib») и спокойно отвечает браузерному. Поэтому
 # заголовки передаём явно в каждый запрос — молча получать 503 хуже, чем врать
@@ -58,6 +79,9 @@ _UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.
 
 PRESS_URL = "https://minfin.gov.ru/ru/press-center/"
 MINFIN_BASE = "https://minfin.gov.ru"
+# Запасной транспорт: канал ведомства в телеграме (см. грабля 4 в шапке модуля).
+TG_CHANNEL = "minfin"
+TG_PAGES = 4          # ~80 сообщений ≈ месяц ленты: месячный релиз укладывается
 AUCTION_URL = ("https://minfin.gov.ru/ru/perfomance/public_debt/internal/"
                "operations/ofz/auction/")
 
@@ -65,9 +89,13 @@ AUCTION_URL = ("https://minfin.gov.ru/ru/perfomance/public_debt/internal/"
 # Четвёртое поле — таймаут в секундах, пятое — число попыток: economy.gov.ru из
 # части сетей просто ВИСИТ на TLS-рукопожатии, и дефолтные 3 попытки × 30 с
 # съедают три минуты прогона на источнике, который сегодня недоступен.
+# 12.08.2026 таймаут урезан с 12 с до 6: хост не отвечает НИ С ОДНОЙ из двух машин
+# (с VPS не резолвится вовсе, с ноутбука виснет на рукопожатии), а замер прогона
+# показал 26,5 с на ряд — почти всё это ожидание двух мёртвых адресов. Опрос идёт
+# трижды в сутки, и полторы минуты в день уходили в никуда.
 URALS_SOURCES = [
-    ("economy.gov.ru", "https://www.economy.gov.ru/material/press/", 12, 1),
-    ("economy.gov.ru", "https://www.economy.gov.ru/material/news/", 12, 1),
+    ("economy.gov.ru", "https://www.economy.gov.ru/material/press/", 6, 1),
+    ("economy.gov.ru", "https://www.economy.gov.ru/material/news/", 6, 1),
     ("1prime.ru", "https://1prime.ru/oil/", 30, 2),
     ("investfuture.ru", "https://investfuture.ru/news", 30, 2),
     ("mfd.ru", "https://mfd.ru/news/", 30, 2),
@@ -161,7 +189,39 @@ def _press_article(url):
     return text, pub
 
 
-def _press_number(keywords, series_id, patterns, sign_words=None, month_hint=None):
+def _candidates(keywords):
+    """(кандидаты, заметки): новости, чей ЗАГОЛОВОК содержит все ключевые слова.
+
+    Порядок жёсткий: сначала пресс-центр, и только если он не дал НИ ОДНОГО
+    кандидата — телеграм-зеркало. Правило проекта «первоисточник не перетирается
+    зеркалом» (см. urals) здесь означает: пока сайт открывается, зеркало не
+    смотрим вовсе, даже если оно свежее.
+
+    text=None означает «текст ещё не скачан» — статью пресс-центра открываем
+    только когда до неё дошла очередь: у Минфина по десятку похожих заголовков.
+    """
+    items = press_items()
+    out = [{"src": "minfin", "url": url, "title": title, "text": None, "pub": None}
+           for url, title in items if all(kw in title.lower() for kw in keywords)]
+    if out:
+        return out, []
+    notes = ["пресс-центр не открылся" if not items
+             else "в пресс-центре нет новости по ключам %s" % (keywords,)]
+    if tg is None:
+        return out, notes
+    try:
+        for msg in tg.find(TG_CHANNEL, keywords, pages=TG_PAGES):
+            # Текст сообщения разложен по строкам, а шаблоны писались под сплошной
+            # текст статьи: «[^.]{0,120}» не должен спотыкаться о перевод строки.
+            out.append({"src": "minfin_tg", "url": msg["url"], "title": msg["head"],
+                        "text": msg["text"].replace("\n", " "), "pub": msg["published"]})
+    except FetchError as exc:
+        notes.append("telegram-зеркало: %s" % exc)
+    return out, notes
+
+
+def _press_number(keywords, series_id, patterns, sign_words=None, month_hint=None,
+                  derive=None):
     """Общий каркас ngd/budget/fnb: найти новость по заголовку и число в тексте.
 
     patterns — список регулярок с группой 1 = число (в млрд руб). Необязательная
@@ -169,52 +229,69 @@ def _press_number(keywords, series_id, patterns, sign_words=None, month_hint=Non
     Минфин печатает бюджет в млрд, а ФНБ — в млн, и без нормировки в ряд уехало бы
     число в тысячу раз больше. month_hint(текст до числа) -> (год, месяц) — для
     релизов, где месяц значения не совпадает с месяцем публикации.
+    derive(текст) -> (значение, позиция, пояснение) — последняя попытка, когда сам
+    показатель в тексте не назван, но однозначно считается из соседних (бюджет).
     """
-    items = press_items()
+    items, misses = _candidates(keywords)
     if not items:
-        return series_id, {}, _meta("minfin", PRESS_URL, "error",
-                                    "пресс-центр не открылся")
-    misses = []
-    for url, title in items:
-        low = title.lower()
-        if not all(kw in low for kw in keywords):
+        return series_id, {}, _meta("minfin", PRESS_URL, "error", "; ".join(misses))
+    for item in items:
+        text, pub = item["text"], item["pub"]
+        if text is None:
+            try:
+                text, pub = _press_article(item["url"])
+            except FetchError as exc:
+                misses.append("%s: %s" % (item["title"], exc))
+                continue
+        hit = _match_number(text, patterns, sign_words)
+        if hit is None and derive is not None:
+            hit = derive(text)
+        if hit is None:
+            # заголовок подошёл, а числа нет — идём к следующей новости: у Минфина
+            # много похожих заголовков («…о результатах размещения средств ФНБ»)
+            misses.append("число не распозналось: %s" % item["title"])
             continue
-        try:
-            text, pub = _press_article(url)
-        except FetchError as exc:
-            misses.append("%s: %s" % (title, exc))
+        value, at, how = hit
+        when = (month_hint(text[:at]) if month_hint else None) or \
+            _month_from_text(text[:at] or text) or (
+                (int(pub[:4]), int(pub[5:7])) if pub else None)
+        if when is None:
+            misses.append("не определился месяц: %s" % item["title"])
             continue
-        for pattern in patterns:
-            m = re.search(pattern, text, re.I)
-            if not m:
-                continue
-            value = _num(m.group(1))
-            if value is None:
-                continue
-            if (m.groupdict().get("unit") or "").lower().startswith("млн"):
-                value = round(value / 1000.0, 4)   # ряды храним в млрд руб.
-            if sign_words:
-                window = text[max(0, m.start() - 160):m.end() + 40].lower()
-                # знак определяет слово (покупку/продажу, дефицит/профицит),
-                # а не тире перед числом — оно у Минфина разделитель
-                if any(w in window for w in sign_words):
-                    value = -value
-            when = (month_hint(text[:m.start()]) if month_hint else None) or \
-                _month_from_text(text[:m.start()] or text) or (
-                    (int(pub[:4]), int(pub[5:7])) if pub else None)
-            if when is None:
-                continue
-            key = _month_end(when[0], when[1])
-            return series_id, {key: value}, _meta(
-                "minfin", url, "ok", title,
-                {"published": pub, "asof": key,
-                 "quote": text[max(0, m.start() - 120):m.end() + 60]})
-        # заголовок подошёл, а числа нет — идём к следующей новости: у Минфина
-        # много похожих заголовков («…о результатах размещения средств ФНБ»)
-        misses.append("число не распозналось: %s" % title)
+        key = _month_end(when[0], when[1])
+        mirror = item["src"] != "minfin"
+        note = item["title"] if not how else "%s (%s)" % (item["title"], how)
+        if mirror:
+            note = "ЗЕРКАЛО t.me/%s: %s" % (TG_CHANNEL, note)
+        return series_id, {key: value}, _meta(
+            item["src"], item["url"], "ok", note,
+            {"published": pub, "asof": key, "mirror": mirror,
+             "quote": text[max(0, at - 120):at + 120],
+             "site_failed": misses or None})
     return series_id, {}, _meta("minfin", PRESS_URL, "error",
                                 "; ".join(misses) or
                                 "в пресс-центре нет новости по ключам %s" % (keywords,))
+
+
+def _match_number(text, patterns, sign_words=None):
+    """(значение, позиция в тексте, пояснение|None) по первому сработавшему шаблону."""
+    for pattern in patterns:
+        m = re.search(pattern, text, re.I)
+        if not m:
+            continue
+        value = _num(m.group(1))
+        if value is None:
+            continue
+        if (m.groupdict().get("unit") or "").lower().startswith("млн"):
+            value = round(value / 1000.0, 4)   # ряды храним в млрд руб.
+        if sign_words:
+            window = text[max(0, m.start() - 160):m.end() + 40].lower()
+            # знак определяет слово (покупку/продажу, дефицит/профицит),
+            # а не тире перед числом — оно у Минфина разделитель
+            if any(w in window for w in sign_words):
+                value = -value
+        return value, m.start(), None
+    return None
 
 
 # ------------------------------------------------------------------- Urals
@@ -398,6 +475,34 @@ def ngd():
         sign_words=("на продажу", "продаже иностранной валюты"))
 
 
+# Итог «доходы минус расходы» — только по СВОДНЫМ строкам релиза. В том же тексте
+# рядом стоят «ненефтегазовые доходы 17 518» и «нефтегазовые доходы 4 595 млрд», и
+# широкий шаблон вида «доходы … млрд» взял бы слагаемое вместо суммы.
+_BUDGET_INCOME = r"объ[её]м доходов[^.]{0,160}?составил\D{0,25}?([\d\s.,]+)\s*млрд"
+_BUDGET_SPEND = r"объ[её]м расходов[^.]{0,160}?составил\D{0,25}?([\d\s.,]+)\s*млрд"
+
+
+def _budget_from_parts(text):
+    """(дефицит, позиция, пояснение) из доходов и расходов, если итог не назван.
+
+    Нужно из-за телеграм-версии релиза: на сайте Минфин пишет «бюджет сложился с
+    дефицитом в размере 6 455 млрд рублей», а в канале печатает только доходы
+    (22 112) и расходы (28 567) — сам дефицит не называет. Это тождество, а не
+    оценка: 22 112 − 28 567 = −6 455, ровно то число, что стоит в релизе на сайте.
+    Тем не менее способ получения уходит в `meta.note`: подставлять посчитанное
+    молча — значит однажды не заметить, что Минфин сменил разбивку.
+    """
+    inc = re.search(_BUDGET_INCOME, text, re.I)
+    exp = re.search(_BUDGET_SPEND, text, re.I)
+    if not inc or not exp:
+        return None
+    income, spend = _num(inc.group(1)), _num(exp.group(1))
+    if income is None or spend is None or income <= 0 or spend <= 0:
+        return None
+    return (round(income - spend, 4), inc.start(),
+            "посчитано как доходы %.0f − расходы %.0f" % (income, spend))
+
+
 def budget():
     """Исполнение федерального бюджета: дефицит (−) / профицит (+), млрд руб.
 
@@ -412,7 +517,7 @@ def budget():
          r"профицит[^.]{0,160}?составил[^.]{0,60}?([\d\s.,]+)\s*млрд",
          r"сложился с (?:дефицитом|профицитом)[^.]{0,60}?([\d\s.,]+)\s*млрд",
          r"(?:дефицит|профицит)[^.]{0,60}?в размере\s*([\d\s.,]+)\s*млрд"],
-        sign_words=("дефицит",))
+        sign_words=("дефицит",), derive=_budget_from_parts)
 
 
 def _fnb_month(text_before):

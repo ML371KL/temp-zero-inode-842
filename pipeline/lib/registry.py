@@ -92,8 +92,12 @@ SERIES = {
 
     # ------------------------------------------------------------------ Минфин
     "urals_tax": dict(fetcher="minfin.urals", args={}, cadence="monthly", pub_lag_days=5,
-                      poll_window=(1, 8), sla="minfin_monthly", required=False, role="core",
-                      label="Налоговая цена Urals"),
+                      poll_window=(1, 12), sla="minfin_monthly", required=False, role="core",
+                      label="Налоговая цена Urals",
+                      note="окно шире срока публикации (1–8) намеренно: первоисточник "
+                           "economy.gov.ru недоступен, а зеркала СМИ держат релиз на "
+                           "первой странице ленты считанные дни — лишние попытки "
+                           "ничего не стоят, а пропуск месяца стоит ноги ядра"),
     "ofz_auctions": dict(fetcher="minfin.auctions", args={}, cadence="weekly", pub_lag_days=0,
                          sla="minfin_monthly", required=False, role="monitor",
                          label="Аукционы ОФЗ"),
@@ -150,8 +154,16 @@ SERIES = {
 }
 
 # Что тянет каждый режим прогона.
+#
+# key_rate и polymarket_ceasefire стоят в интрадее не ради цены, а ради СКОРОСТИ
+# события (docs/LATENCY.md §5): решение по ставке публикуется в 13:30 МСК, а
+# суточный прогон приходит в 19:05 — пять с половиной часов ждала и панель, и
+# алерт «сюрприз против консенсуса». Обе ноги дешёвые: ставка берётся SOAP-ответом
+# в ~2 КБ, Polymarket — двумя запросами к API за ~1 с. Композит и машина состояний
+# от этого не двигаются: интрадей их не пересчитывает по определению (run.py).
 MODES = {
-    "intraday": ["imoex", "imoex2", "rgbi", "rvi", "cny_tom", "gld_tom", "brent_moex"],
+    "intraday": ["imoex", "imoex2", "rgbi", "rvi", "cny_tom", "gld_tom", "brent_moex",
+                 "key_rate", "polymarket_ceasefire"],
     "daily": [k for k, v in SERIES.items()
               if v["cadence"] in ("daily", "event") and not v["fetcher"].startswith("manual")],
     "weekly": ["cpi_weekly", "ofz_auctions", "imoex2"],

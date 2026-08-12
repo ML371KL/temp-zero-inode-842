@@ -25,6 +25,9 @@ from . import (FetchError, RETRO_DAYS, dates, empty_is_fatal, http,
 ISS = "https://iss.moex.com/iss"
 PAGE = 100  # размер страницы history у ISS
 FUTOI_ROW_CAP = 1000  # жёсткий предел ответа analyticalproducts/futoi
+# Задержка бесплатного потока ISS по ИНСТРУМЕНТАМ (валюта, золото, фьючерсы, акции).
+# К индексам не относится: их МосБиржа отдаёт без задержки (см. intraday_quote).
+FREE_DELAY_MIN = 15
 
 # id рядов, которые нельзя вывести из тикера (registry.SERIES знает их как cny_tom/gld_tom)
 SELT_IDS = {"CNYRUB_TOM": "cny_tom", "GLDRUB_TOM": "gld_tom", "USD000UTSTOM": "usd_tom"}
@@ -585,8 +588,13 @@ def _drop_thin_tail(agg, tally, had_failures, keep=0.9, look_back=5):
 def intraday_quote(secs=("IMOEX",), ids=None):
     """Текущие значения для интрадей-прогона: точка на СЕГОДНЯ в тот же ряд.
 
-    Бесплатный ISS отдаёт котировки с задержкой ~15 минут — это норма, но она
-    отражена в meta (delay_min), чтобы фронт не выдавал задержку за свежесть.
+    Задержка бесплатного ISS зависит от того, ЧТО запрашивают, и раньше здесь
+    стояла константа 15 минут на всё подряд. Это было неправдой в обе стороны:
+    «Данные о фондовых индексах Группы „Московская Биржа“ … предоставляются в
+    свободном доступе (без задержки)» (moex.com/ru/orders), а вот ход торгов
+    инструментами — валютная пара, золото, фьючерс — без подписки приходит с
+    задержкой 15 минут. Панель из-за одной константы занижала собственную
+    свежесть по IMOEX/RGBI/RVI на четверть часа (docs/LATENCY.md §3.1).
     Дневной прогон потом перезапишет эту точку официальным закрытием.
     """
     mapping = ids or {}
@@ -610,9 +618,16 @@ def intraday_quote(secs=("IMOEX",), ids=None):
             errors.append(f"{sec}: пустой marketdata")
             continue
         day = _quote_date(row, idx)
-        meta = make_meta("iss", url, {day: value}, asof=day, delay_min=15, intraday=True,
-                         unit="rub" if is_fx else "points",
-                         secid=sec, note="ISS отдаёт бесплатно с задержкой ~15 минут",
+        # Ноль задержки положен ИНДЕКСУ, а не «всему, что не валюта». Сейчас это одно
+        # и то же: is_fx выбирает рынок selt, иначе идёт эндпоинт индексов. Если в
+        # LIVE_QUOTE_IDS однажды появится акция или фьючерс, сюда придётся вернуть
+        # пятнадцать минут — их поток биржа бесплатно задерживает.
+        delay = 0 if not is_fx else FREE_DELAY_MIN
+        meta = make_meta("iss", url, {day: value}, asof=day, delay_min=delay,
+                         intraday=True, unit="rub" if is_fx else "points", secid=sec,
+                         note=("ISS отдаёт ход торгов инструментом бесплатно с "
+                               "задержкой ~15 минут" if delay else
+                               "индексы МосБиржи ISS отдаёт без задержки"),
                          updatetime=_cell(row, idx, "UPDATETIME") or _cell(row, idx, "SYSTIME"))
         out.append((sid, {day: value}, meta))
     if not out:
