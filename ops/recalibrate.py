@@ -45,8 +45,21 @@ from pipeline.lib import calc, constants, r2, store  # noqa: E402
 
 REFERENCE = ROOT / "validation" / "data" / "walkforward_results.csv"
 OOS_START = "2010-01-01"          # окно walk-forward исследования (REGIME.md §4)
-DRIFT_MEAN_PP = 0.15              # п.п./мес: больше — расхождение, о котором стоит знать
-DRIFT_IC = 0.03
+
+# Порог дрейфа ячейки — ОТНОСИТЕЛЬНЫЙ, в долях её собственной ошибки среднего.
+#
+# Первая редакция ставила абсолютные 0,15 п.п. — и это был детектор, обречённый
+# кричать вечно: средняя токсичной ячейки известна с точностью ±2,9 п.п. (n=24,
+# разброс месяцев от −30% до +18%), а у самой точной ячейки ошибка 0,6 п.п. На таком
+# фоне «расхождение» в 0,20 п.п. — это 0,07 стандартной ошибки, то есть числа
+# −2,85, −2,94 и −3,14 статистически НЕРАЗЛИЧИМЫ.
+#
+# Половина ошибки среднего масштабируется правильно сама: у ячейки с n=110 порог
+# выходит 0,30 п.п., у ячейки с n=8 — около 1,1 п.п. Плюс два жёстких триггера,
+# которые от размера выборки не зависят: смена знака и переход через −1,5%, по
+# которому фронт красит ячейку в критический тон (web/app.js).
+DRIFT_SE_RATIO = 0.5
+TONE_CRIT_PCT = -1.5
 
 
 # --------------------------------------------------------------- восстановление
@@ -190,11 +203,33 @@ def section_health(health, out):
         out.append("")
 
 
+def cell_flagged(mean, ref_mean, se_pp):
+    """Новость ли расхождение ячейки. -> (флаг, причина).
+
+    Три вопроса в одном, и они разные по природе. «Сместилась ли оценка» — вопрос
+    статистический, и мерить его надо в единицах ошибки самой ячейки. «Сменился ли
+    знак» и «перешла ли она порог, по которому фронт красит ячейку в критический
+    тон» — вопросы редакционные: они меняют то, ЧТО читатель видит, и от размера
+    выборки не зависят вовсе.
+    """
+    if ref_mean is None or mean is None:
+        return False, None
+    if (mean > 0) != (ref_mean > 0):
+        return True, "смена знака"
+    if (mean <= TONE_CRIT_PCT) != (ref_mean <= TONE_CRIT_PCT):
+        return True, "переход через порог тона"
+    if not se_pp:
+        # n=1: ошибку среднего оценить нечем, но и «дрейфа» на одном наблюдении нет.
+        return False, None
+    ratio = abs(mean - ref_mean) / se_pp
+    return (ratio > DRIFT_SE_RATIO), (f"{ratio:.1f} ст.ош." if ratio > DRIFT_SE_RATIO else None)
+
+
 def section_cells(labels, fwd, cells, out):
     out.append("## 3. Статистика ячеек против `constants.CELL_STATS`")
     out.append("")
-    out.append("| ячейка | n сейчас / в коде | средн сейчас / в коде | медиана | худший |")
-    out.append("|---|---|---|---|---|")
+    out.append("| ячейка | n сейчас / в коде | средн сейчас / в коде | Δ в ст.ош. | медиана | худший |")
+    out.append("|---|---|---|---|---|---|")
     BITS = {"bull": 1, "bear": 0, "calm": 0, "stress": 1, "ok": 0}
     rows = {}
     for i in range(len(labels) - 2):
@@ -205,16 +240,27 @@ def section_cells(labels, fwd, cells, out):
     for code in sorted(rows, key=lambda c: -len(rows[c])):
         v = sorted(rows[code])
         n = len(v)
-        mean = pc(sum(v) / n)
+        raw_mean = sum(v) / n
+        mean = pc(raw_mean)
         med = pc(v[n // 2] if n % 2 else (v[n // 2 - 1] + v[n // 2]) / 2)
+        sd = math.sqrt(sum((x - raw_mean) ** 2 for x in v) / (n - 1)) if n > 1 else 0.0
+        se_pp = pc(sd / math.sqrt(n)) if n > 1 else 0.0
         p = code.split("|")
         ref = constants.CELL_STATS.get((BITS[p[0]], BITS[p[1]], BITS[p[2]])) or {}
-        d = abs(mean - (ref.get("mean_fwd1m_pct") or 0))
-        mark = " ⚠️" if d > DRIFT_MEAN_PP else ""
-        if d > DRIFT_MEAN_PP:
-            drift.append(f"{code}: {mean:+.2f}% против {ref.get('mean_fwd1m_pct'):+.2f}%")
+        ref_mean = ref.get("mean_fwd1m_pct")
+        ratio = abs(mean - (ref_mean or 0)) / se_pp if se_pp else 0.0
+        flagged, why = cell_flagged(mean, ref_mean, se_pp)
+        mark = " ⚠️" if flagged else ""
+        if flagged:
+            drift.append(f"{code}: {mean:+.2f}% против {ref_mean:+.2f}% ({why})")
         out.append(f"| {code} | {n} / {ref.get('n')} | {mean:+.2f}% / "
-                   f"{ref.get('mean_fwd1m_pct'):+.2f}%{mark} | {med:+.2f}% | {pc(v[0]):+.1f}% |")
+                   f"{ref_mean:+.2f}%{mark} | {ratio:.2f} | {med:+.2f}% | {pc(v[0]):+.1f}% |")
+    out.append("")
+    out.append(f"Порог тревоги — {DRIFT_SE_RATIO} собственной ошибки среднего ячейки, а не "
+               f"абсолютные проценты: у ячейки с n=24 эта ошибка около 2,9 п.п., и "
+               f"расхождение в 0,2 п.п. там означает 0,07 ошибки — то есть одно и то же "
+               f"число, а не дрейф. Отдельно и независимо от выборки ловятся смена знака и "
+               f"переход через {TONE_CRIT_PCT}% (по нему фронт красит ячейку).")
     out.append("")
     if drift:
         out.append("Разошлись: " + "; ".join(drift) + ".")

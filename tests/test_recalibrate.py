@@ -19,6 +19,52 @@ MAR = datetime(2027, 3, 5, 21, 30, tzinfo=timezone.utc)   # обычный
 APR = datetime(2027, 4, 5, 21, 30, tzinfo=timezone.utc)   # квартальный
 
 
+class CellDriftCase(unittest.TestCase):
+    """Порог дрейфа обязан быть относительным, иначе он кричит вечно.
+
+    Первая редакция ставила абсолютные 0,15 п.п. на величину, чья собственная
+    ошибка среднего 0,6–2,9 п.п. У токсичной ячейки «расхождение» 0,20 п.п. — это
+    0,07 стандартной ошибки, то есть числа −2,94 и −3,14 статистически одно и то же.
+    Такой детектор гарантированно срабатывает на шуме и приучает себя не читать.
+    """
+
+    def setUp(self):
+        self.rc = need(self, "ops.recalibrate", "cell_flagged", "DRIFT_SE_RATIO",
+                       "TONE_CRIT_PCT")
+
+    def test_боевой_случай_токсичной_ячейки_молчит(self):
+        # n=24, ошибка среднего 2,9 п.п. — реальные числа стора на 12.08.2026.
+        flagged, _ = self.rc.cell_flagged(-3.14, -2.94, 2.90)
+        self.assertFalse(flagged)
+
+    def test_настоящий_сдвиг_ловится(self):
+        flagged, why = self.rc.cell_flagged(-5.00, -2.94, 2.90)
+        self.assertTrue(flagged)
+        self.assertIn("ст.ош.", why)
+
+    def test_точная_ячейка_имеет_узкий_порог(self):
+        # n=110, ошибка 0,6 п.п.: тот же абсолютный сдвиг здесь уже новость.
+        self.assertFalse(self.rc.cell_flagged(0.93, 0.93, 0.60)[0])
+        self.assertTrue(self.rc.cell_flagged(1.60, 0.93, 0.60)[0])
+
+    def test_смена_знака_это_новость_при_любой_выборке(self):
+        flagged, why = self.rc.cell_flagged(0.10, -0.10, 99.0)
+        self.assertTrue(flagged, "знак меняет вывод, а не четвёртый знак")
+        self.assertIn("знак", why)
+
+    def test_переход_через_порог_тона_это_новость(self):
+        # По −1,5% фронт красит ячейку в критический тон (web/app.js).
+        flagged, why = self.rc.cell_flagged(-1.60, -1.40, 99.0)
+        self.assertTrue(flagged)
+        self.assertIn("тон", why)
+
+    def test_одно_наблюдение_не_дрейф(self):
+        self.assertFalse(self.rc.cell_flagged(-3.0, -2.9, 0.0)[0])
+
+    def test_нет_эталона_нет_претензии(self):
+        self.assertFalse(self.rc.cell_flagged(-3.0, None, 2.9)[0])
+
+
 class NotifyCase(unittest.TestCase):
     def setUp(self):
         self.rc = need(self, "ops.recalibrate", "notify", "QUARTER_MONTHS")
