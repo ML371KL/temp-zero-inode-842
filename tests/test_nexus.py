@@ -61,6 +61,7 @@ class NexusCase(unittest.TestCase):
                 "url": req.full_url,
                 "method": req.get_method(),
                 "auth": req.get_header("Authorization"),
+                "ua": req.get_header("User-agent"),
                 "body": json.loads(req.data.decode("utf-8")),
             })
             if boom is not None:
@@ -135,6 +136,16 @@ class TestDelivery(NexusCase):
         # каждый прогон, и дедуп по тексту заводил бы новую строку на повторе.
         self.assertEqual(call["body"]["eventId"], "cell:2026-08-12:bear|stress|stress")
         self.assertEqual(call["body"]["occurredAt"], "2026-08-12T09:00:00Z")
+
+    def test_request_carries_a_non_default_user_agent(self):
+        # ОПЛАЧЕНО ЖИВЫМ ПРОГОНОМ: без своего User-Agent Cloudflare перед воркером
+        # отвечает 403 «error code: 1010» и запрос до воркера не доходит вовсе —
+        # зеркало возвращает FAIL, а причина в коде ниоткуда не видна.
+        with self._urlopen():
+            self.nexus.deliver(self.event("Смена ячейки."))
+        ua = self.calls[0]["ua"]
+        self.assertTrue(ua, "без User-Agent urllib подставит свой, и Cloudflare даст 1010")
+        self.assertNotIn("urllib", ua.lower())
 
     def test_http_error_is_failure_not_exception(self):
         boom = urllib.error.HTTPError("https://hub.example/api/events", 401, "no", {}, None)

@@ -23,6 +23,14 @@ import urllib.request
 TIMEOUT = 15
 SOURCE = "842"
 
+# ОБЯЗАТЕЛЕН. Перед воркером стоит Cloudflare, и на дефолтный «Python-urllib/3.x»
+# он отвечает 403 «error code: 1010» (browser signature banned) — запрос до
+# воркера не доходит вовсе, а зеркало молча возвращает FAIL и копит очередь
+# повторов. Ловится только живым запросом С ПРОД-МАШИНЫ: curl с тем же токеном и
+# тем же env проходит, потому что у него свой User-Agent. Значение неважно, важно
+# что оно не дефолтное.
+USER_AGENT = "moex-radar/1.0 (dashboard pipeline; +https://github.com/ML371KL/temp-zero-inode-842)"
+
 # Три исхода, как в telegram.py: доставлено / канал выключен / не смогли.
 SENT, OFF, FAIL = "sent", "off", "fail"
 
@@ -79,6 +87,7 @@ def deliver(event):
     req = urllib.request.Request(cfg["url"], data=body.encode("utf-8"), method="POST")
     req.add_header("content-type", "application/json; charset=utf-8")
     req.add_header("authorization", f"Bearer {cfg['token']}")
+    req.add_header("user-agent", USER_AGENT)
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
             return SENT if 200 <= getattr(resp, "status", 0) < 300 else FAIL
