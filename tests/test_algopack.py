@@ -15,11 +15,14 @@
 
 import os
 import unittest
+from datetime import datetime, timezone
 from unittest import mock
 
 from tests import need
 
 TOKEN = "тест-ключ-подписки"
+# Фиксированный «сейчас»: правило набора №1 — никаких «сегодня минус N».
+NOW = datetime(2026, 8, 12, 9, 0, 0, tzinfo=timezone.utc)
 
 
 class AuthHeaderCase(unittest.TestCase):
@@ -214,6 +217,68 @@ class LiveQuotesCase(unittest.TestCase):
     def test_время_показывается_московское(self):
         self.assertEqual(self.tv._msk_time("2026-08-12T08:27:31Z"), "11:27:31")
         self.assertIsNone(self.tv._msk_time("не время"))
+
+    def store_stub(self, daily_secid=None, cached=None):
+        class S:
+            @staticmethod
+            def load_series(sid):
+                if sid == "brent_moex":
+                    return {"meta": {"secid": daily_secid}} if daily_secid else None
+                if sid == "live_brent_moex":
+                    return {"meta": cached} if cached else None
+                return None
+        return S
+
+    def test_контракт_берётся_из_суточного_ряда_без_запросов(self):
+        # Передний контракт уже разрешил суточный прогон, uid лежит с прошлого
+        # раза — обычный такт не имеет права ходить за справочником фьючерсов.
+        st = self.store_stub("BRU6", {"secid": "BRU6", "uid": "u-bru6",
+                                      "secid_since": "2026-07-31"})
+        with mock.patch.object(self.tv, "futures_uid") as never:
+            uid, secid, since = self.tv.front_futures(st, today="2026-08-12")
+        never.assert_not_called()
+        self.assertEqual((uid, secid, since), ("u-bru6", "BRU6", "2026-07-31"))
+
+    def test_перекат_разрешается_один_раз_и_датируется(self):
+        st = self.store_stub("BRV6", {"secid": "BRU6", "uid": "u-bru6"})
+        with mock.patch.object(self.tv, "futures_uid", return_value="u-brv6") as once:
+            uid, secid, since = self.tv.front_futures(st, today="2026-08-12")
+        once.assert_called_once_with("BRV6")
+        self.assertEqual((uid, secid, since), ("u-brv6", "BRV6", "2026-08-12"))
+
+    def test_первое_включение_не_считается_перекатом(self):
+        # мутация: ставить дату всегда -> в день подключения панель на сутки
+        # замолкает об изменении нефти, хотя контракт не менялся.
+        st = self.store_stub("BRU6", cached=None)
+        with mock.patch.object(self.tv, "futures_uid", return_value="u-bru6"):
+            _uid, _secid, since = self.tv.front_futures(st, today="2026-08-12")
+        self.assertIsNone(since)
+
+    def test_без_суточного_ряда_фьючерс_не_подключается(self):
+        st = self.store_stub(daily_secid=None)
+        with mock.patch.object(self.tv, "futures_uid") as never:
+            self.assertEqual(self.tv.front_futures(st, today="2026-08-12"),
+                             (None, None, None))
+        never.assert_not_called()
+
+    def test_изменение_за_день_гасится_на_перекате(self):
+        # Живая цена нового контракта против закрытия старого — это контанго,
+        # а не движение нефти.
+        self.run.store.upsert_points("brent_moex", {"2026-08-11": 84.0}, {})
+        self.run.store.upsert_points(
+            "live_brent_moex", {"2026-08-12": 89.3},
+            {"delay_min": 0, "secid": "BRV6", "secid_since": "2026-08-12"})
+        q = self.run._quotes(NOW)["brent_moex"]
+        self.assertIsNone(q["chg_pct"], "на перекате показано выдуманное движение")
+        self.assertEqual(q["contract"], "BRV6")
+
+    def test_вне_переката_изменение_считается(self):
+        self.run.store.upsert_points("brent_moex", {"2026-08-11": 84.0}, {})
+        self.run.store.upsert_points(
+            "live_brent_moex", {"2026-08-12": 89.3},
+            {"delay_min": 0, "secid": "BRU6", "secid_since": "2026-07-31"})
+        q = self.run._quotes(NOW)["brent_moex"]
+        self.assertAlmostEqual(q["chg_pct"], 6.31, places=2)
 
     def test_известны_все_инструменты_витрины(self):
         # Витрина показывает шесть строк, пять из них живые (шестая — фьючерс BR

@@ -237,7 +237,7 @@ def fetch_all(items, journal, bootstrap=False):
     return report
 
 
-def fetch_live_quotes(journal):
+def fetch_live_quotes(journal, now=None):
     """marketdata ISS для интрадей-такта: цена, которая действительно движется днём.
 
     Раньше режим intraday опрашивал history тех же бумаг, а history внутри дня ещё
@@ -247,6 +247,7 @@ def fetch_live_quotes(journal):
     """
     if store is None:
         return {}
+    now = now or datetime.now(timezone.utc)
     results, origin = [], "iss"
     # T-Invest первым, когда есть токен: бесплатный ISS накрывает ход торгов
     # ИНСТРУМЕНТАМИ (юань, золото) задержкой ровно в 15 минут — замерено
@@ -256,7 +257,16 @@ def fetch_live_quotes(journal):
     try:
         tinvest = importlib.import_module("pipeline.fetch.tinvest")
         if tinvest.ready():
-            results = _normalize(tinvest.live_quotes())
+            mapping, extra = dict(tinvest.LIVE_UIDS), {}
+            # Фьючерс Brent — единственный инструмент витрины с ПЛАВАЮЩИМ
+            # идентификатором: контракт катится помесячно. Передний контракт уже
+            # разрешил суточный прогон, uid лежит в meta с прошлого раза, поэтому
+            # обычный такт не делает ни одного лишнего запроса.
+            uid, secid, since = tinvest.front_futures(store, today=_msk_today(now).isoformat())
+            if uid:
+                mapping["live_brent_moex"] = uid
+                extra["live_brent_moex"] = {"secid": secid, "secid_since": since}
+            results = _normalize(tinvest.live_quotes(mapping, extra))
             origin = "tinvest"
     except Exception as exc:  # noqa: BLE001 — граница изоляции
         journal.warn("fetch", f"живые котировки T-Invest: {type(exc).__name__}: {exc} "
@@ -411,8 +421,16 @@ def _quotes(now):
             base = [p for p in pts if p[0] < d]
             prev = base[-1][1] if base else None
             meta = _meta(LIVE_PREFIX + sid)
+            # Перекат фьючерса: живая цена НОВОГО контракта против закрытия
+            # СТАРОГО — это контанго в 1–2%, а не движение нефти. Раз в месяц
+            # панель рисовала бы выдуманный скачок, поэтому в день смены
+            # контракта изменение за день не считаем вовсе.
+            since = meta.get("secid_since")
+            if since and base and base[-1][0] < since:
+                prev = None
             row = {"intraday": True, "delay_min": meta.get("delay_min"),
-                   "updatetime": meta.get("updatetime")}
+                   "updatetime": meta.get("updatetime"),
+                   "contract": meta.get("secid")}
         elif pts:
             d, v = pts[-1]
             prev = pts[-2][1] if len(pts) > 1 else None
@@ -609,7 +627,7 @@ def main(argv=None):
                          f"из {len(items)} (пропуск по окнам: {sum(1 for _, _, s in items if s)})")
     fetch_report = fetch_all(items, journal, bootstrap=(args.mode == "bootstrap"))
     if args.mode == "intraday":
-        fetch_live_quotes(journal)
+        fetch_live_quotes(journal, now)
     failed = [sid for sid, r in fetch_report.items() if r["status"] == "error"]
     if failed:
         journal.line("fetch", f"отказов {len(failed)}: {', '.join(sorted(failed)[:8])}")

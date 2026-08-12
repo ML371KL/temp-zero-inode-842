@@ -150,7 +150,56 @@ def _msk_time(iso):
             timedelta(hours=MSK_OFFSET_HOURS)).strftime("%H:%M:%S")
 
 
-def live_quotes(mapping=None):
+def futures_uid(ticker):
+    """uid фьючерса по тикеру МосБиржи ('BRU6') или None.
+
+    Через полный справочник фьючерсов (477 инструментов, ~1,5 с), а не через
+    `FuturesBy`: тот отвечает 404 на тикер с любым classCode, включая правильный
+    SPBFUT (проверено 12.08.2026). Запрос тяжёлый, поэтому вызывается ТОЛЬКО при
+    смене переднего контракта — то есть раз в месяц (см. front_futures).
+    """
+    data = call("InstrumentsService", "Futures",
+                {"instrumentStatus": "INSTRUMENT_STATUS_BASE"}, timeout=60)
+    want = str(ticker or "").upper()
+    for item in data.get("instruments") or []:
+        if str(item.get("ticker") or "").upper() == want:
+            return item.get("uid")
+    return None
+
+
+def front_futures(store_mod, daily_sid="brent_moex", live_sid="live_brent_moex",
+                  today=None):
+    """(uid, secid, дата смены контракта) для переднего фьючерса или (None, …).
+
+    Контракт НЕ разрешается заново: его уже нашёл суточный прогон
+    (`iss.futures_br` кладёт secid в meta дневного ряда), и в установившемся
+    режиме здесь ноль запросов — uid лежит в meta живого ряда с прошлого раза.
+    Один запрос случается только на перекате.
+
+    Третье значение — дата, с которой действует НОВЫЙ контракт. Она нужна не для
+    красоты: на перекате живая цена нового контракта против вчерашнего закрытия
+    старого даёт ложное движение в 1–2% контанго, и «изменение за день» в этот
+    день считать нельзя.
+    """
+    daily = (store_mod.load_series(daily_sid) or {}).get("meta") or {}
+    secid = daily.get("secid")
+    if not secid:
+        return None, None, None
+    cached = (store_mod.load_series(live_sid) or {}).get("meta") or {}
+    if cached.get("secid") == secid and cached.get("uid"):
+        return cached["uid"], secid, cached.get("secid_since")
+    uid = futures_uid(secid)
+    if not uid:
+        http.LOG("T-Invest: фьючерс %s не найден в справочнике" % secid)
+        return None, secid, None
+    # Дату смены ставим, только если РАНЬШЕ был ДРУГОЙ контракт. При первом
+    # включении мы просто впервые узнали текущий — это не перекат, и гасить
+    # изменение за день не за что (иначе панель один день молчала бы о движении
+    # нефти без всякой причины).
+    return uid, secid, (today if cached.get("secid") else None)
+
+
+def live_quotes(mapping=None, extra_meta=None):
     """[(series_id, {дата: цена}, meta)] — тот же контракт, что у iss.intraday_quote.
 
     Дата точки — МОСКОВСКИЙ день сделки: витрина живёт по биржевому календарю, а
@@ -169,12 +218,13 @@ def live_quotes(mapping=None):
         price, when = got
         msk = datetime.now(timezone.utc) + timedelta(hours=MSK_OFFSET_HOURS)
         day = msk.date().isoformat()
-        out.append((sid, {day: price},
-                    {"source": "tinvest", "url": BASE, "asof": day, "status": "ok",
-                     "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                     "intraday": True, "delay_min": 0, "uid": uid,
-                     "updatetime": _msk_time(when),
-                     "note": "T-Invest: цена без задержки"}))
+        meta = {"source": "tinvest", "url": BASE, "asof": day, "status": "ok",
+                "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "intraday": True, "delay_min": 0, "uid": uid,
+                "updatetime": _msk_time(when),
+                "note": "T-Invest: цена без задержки"}
+        meta.update((extra_meta or {}).get(sid) or {})
+        out.append((sid, {day: price}, meta))
     if not out:
         raise FetchError("T-Invest: ни одной цены по известным инструментам", url=BASE)
     return out
