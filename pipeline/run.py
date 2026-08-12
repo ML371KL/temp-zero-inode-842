@@ -247,13 +247,30 @@ def fetch_live_quotes(journal):
     """
     if store is None:
         return {}
+    results, origin = [], "iss"
+    # T-Invest первым, когда есть токен: бесплатный ISS накрывает ход торгов
+    # ИНСТРУМЕНТАМИ (юань, золото) задержкой ровно в 15 минут — замерено
+    # 12.08.2026 в 11:10 МСК: UPDATETIME=10:55 при SYSTIME=11:10. Индексы биржа
+    # отдаёт без задержки и там выигрыша нет, но один запрос T-Invest покрывает
+    # весь набор сразу, а пять запросов к ISS — по одному на бумагу.
     try:
-        iss = importlib.import_module("pipeline.fetch.iss")
-        results = _normalize(iss.intraday_quote(secs=tuple(LIVE_QUOTE_IDS), ids=LIVE_QUOTE_IDS))
-    except Exception as exc:  # noqa: BLE001 — граница изоляции, как в fetch_all
-        journal.warn("fetch", f"живые котировки: {type(exc).__name__}: {exc} "
-                              f"(витрина покажет последнее закрытие)")
-        return {}
+        tinvest = importlib.import_module("pipeline.fetch.tinvest")
+        if tinvest.ready():
+            results = _normalize(tinvest.live_quotes())
+            origin = "tinvest"
+    except Exception as exc:  # noqa: BLE001 — граница изоляции
+        journal.warn("fetch", f"живые котировки T-Invest: {type(exc).__name__}: {exc} "
+                              f"(беру бесплатный ISS)")
+        results = []
+    if not results:
+        try:
+            iss = importlib.import_module("pipeline.fetch.iss")
+            results = _normalize(iss.intraday_quote(secs=tuple(LIVE_QUOTE_IDS),
+                                                    ids=LIVE_QUOTE_IDS))
+        except Exception as exc:  # noqa: BLE001 — граница изоляции, как в fetch_all
+            journal.warn("fetch", f"живые котировки: {type(exc).__name__}: {exc} "
+                                  f"(витрина покажет последнее закрытие)")
+            return {}
     out = {}
     for sid, points, meta in results:
         try:
@@ -262,7 +279,7 @@ def fetch_live_quotes(journal):
             journal.warn("fetch", f"{sid}: {type(exc).__name__}: {exc}")
             continue
         out[sid] = (meta or {}).get("asof")
-    journal.line("fetch", "живые котировки: " +
+    journal.line("fetch", f"живые котировки ({origin}): " +
                  (", ".join(f"{k}={v}" for k, v in sorted(out.items())) or "нет"))
     return out
 

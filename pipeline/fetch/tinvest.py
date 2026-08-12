@@ -96,6 +96,90 @@ def shares(board=BOARD):
     return out
 
 
+# Инструменты витрины котировок: id ряда в сторе -> uid в T-Invest.
+#
+# Uid'ы разрешены и проверены 12.08.2026 (`InstrumentsService/Indicatives` для
+# индексов, `Currencies` для валютной секции) и захардкожены осознанно: это
+# постоянные идентификаторы, а разрешать их на каждом пятиминутном такте — два
+# лишних запроса ради того, что не меняется. Если T-Invest вернёт по uid пусто,
+# витрина уходит на бесплатный ISS целиком (см. run.fetch_live_quotes).
+LIVE_UIDS = {
+    "live_imoex": "4821c9aa-36e8-4743-b37c-861e58581b25",
+    "live_rgbi": "fceffb27-3c51-4101-834c-d28c98ada458",
+    "live_rvi": "c83d74aa-4539-4f27-85f0-295511d50d63",
+    "live_cny_tom": "4587ab1d-a9c9-4910-a0d6-86c7b9c42510",
+    "live_gld_tom": "258e2b93-54e8-4f2d-ba3d-a507c47e3ae2",
+}
+MSK_OFFSET_HOURS = 3
+
+
+def last_prices(uids):
+    """{uid: (цена, время в UTC)} одним запросом на все инструменты сразу.
+
+    Одним, а не пятью: у бесплатного ISS на каждую бумагу свой вызов, здесь весь
+    набор берётся за 0,8 с. И главное — здесь нет пятнадцатиминутной задержки,
+    которой биржа накрывает ход торгов инструментами без подписки (замер
+    12.08.2026 в 11:10 МСК: у ISS по юаню UPDATETIME=10:55 при SYSTIME=11:10,
+    у T-Invest та же бумага — 11:10:46).
+    """
+    if not uids:
+        return {}
+    data = call("MarketDataService", "GetLastPrices", {"instrumentId": list(uids)})
+    out = {}
+    for row in data.get("lastPrices") or []:
+        uid = row.get("instrumentUid")
+        price = quotation(row.get("price"))
+        # Нулевая цена приходит по инструменту, по которому сегодня сделок не было:
+        # это НЕ котировка, и подставлять ею живую цену нельзя.
+        if uid and price:
+            out[uid] = (price, str(row.get("time") or ""))
+    return out
+
+
+def _msk_time(iso):
+    """'2026-08-12T08:26:14.123Z' -> '11:26:14' по Москве. Пусто -> None."""
+    from datetime import datetime, timedelta, timezone
+    try:
+        raw = str(iso).replace("Z", "+00:00")
+        stamp = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return (stamp.astimezone(timezone.utc) +
+            timedelta(hours=MSK_OFFSET_HOURS)).strftime("%H:%M:%S")
+
+
+def live_quotes(mapping=None):
+    """[(series_id, {дата: цена}, meta)] — тот же контракт, что у iss.intraday_quote.
+
+    Дата точки — МОСКОВСКИЙ день сделки: витрина живёт по биржевому календарю, а
+    после полуночи UTC «сегодня» у нас и у биржи разные.
+    """
+    from datetime import datetime, timedelta, timezone
+    ids = dict(mapping or LIVE_UIDS)
+    prices = last_prices(ids.values())
+    if not prices:
+        raise FetchError("T-Invest: живые котировки не получены", url=BASE)
+    out = []
+    for sid, uid in sorted(ids.items()):
+        got = prices.get(uid)
+        if not got:
+            continue
+        price, when = got
+        msk = datetime.now(timezone.utc) + timedelta(hours=MSK_OFFSET_HOURS)
+        day = msk.date().isoformat()
+        out.append((sid, {day: price},
+                    {"source": "tinvest", "url": BASE, "asof": day, "status": "ok",
+                     "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                     "intraday": True, "delay_min": 0, "uid": uid,
+                     "updatetime": _msk_time(when),
+                     "note": "T-Invest: цена без задержки"}))
+    if not out:
+        raise FetchError("T-Invest: ни одной цены по известным инструментам", url=BASE)
+    return out
+
+
 def dividends(uid, frm, till):
     """[{record_date, last_buy_date, amount_rub, yield_pct, price, payment_date}].
 

@@ -138,6 +138,91 @@ class FutoiRoutingCase(unittest.TestCase):
         self.assertEqual(bad, 1)
 
 
+class LiveQuotesCase(unittest.TestCase):
+    """Витрина котировок: T-Invest вместо ISS и обязательный откат на бесплатный.
+
+    Бесплатный ISS накрывает ход торгов ИНСТРУМЕНТАМИ задержкой ровно 15 минут —
+    замерено 12.08.2026 в 11:10 МСК: по юаню UPDATETIME=10:55 при SYSTIME=11:10.
+    T-Invest отдаёт ту же бумагу текущей секундой и весь набор одним запросом.
+    Но витрина не имеет права зависеть от платного API: отказ обязан уводить на ISS,
+    а не оставлять панель без цен.
+    """
+
+    def setUp(self):
+        self.run = need(self, "pipeline.run", "fetch_live_quotes")
+        self.tv = need(self, "pipeline.fetch.tinvest", "live_quotes", "LIVE_UIDS")
+        self.tmp_env = os.environ.get("MOEX_ALGOPACK_TOKEN")
+        self.journal = self.run.Journal()
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.prev = os.environ.get("STATE_DIR")
+        os.environ["STATE_DIR"] = self.tmp.name
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        if self.prev is None:
+            os.environ.pop("STATE_DIR", None)
+        else:
+            os.environ["STATE_DIR"] = self.prev
+
+    def triple(self, source):
+        return [("live_imoex", {"2026-08-12": 2317.13},
+                 {"source": source, "asof": "2026-08-12", "delay_min": 0,
+                  "intraday": True, "fetched_at": "2026-08-12T08:27:48Z"})]
+
+    def test_с_токеном_идём_в_tinvest(self):
+        with mock.patch.object(self.tv, "ready", return_value=True), \
+             mock.patch.object(self.tv, "live_quotes",
+                               return_value=self.triple("tinvest")) as called, \
+             mock.patch("pipeline.fetch.iss.intraday_quote") as never:
+            got = self.run.fetch_live_quotes(self.journal)
+        called.assert_called_once()
+        never.assert_not_called()
+        self.assertEqual(got, {"live_imoex": "2026-08-12"})
+
+    def test_без_токена_остаётся_бесплатный_iss(self):
+        with mock.patch.object(self.tv, "ready", return_value=False), \
+             mock.patch.object(self.tv, "live_quotes") as never, \
+             mock.patch("pipeline.fetch.iss.intraday_quote",
+                        return_value=self.triple("iss")) as fallback:
+            self.run.fetch_live_quotes(self.journal)
+        never.assert_not_called()
+        fallback.assert_called_once()
+
+    def test_отказ_платного_api_не_оставляет_панель_без_цен(self):
+        # мутация: убрать откат -> при любом сбое T-Invest витрина показывает
+        # вчерашнее закрытие весь торговый день и молчит об этом.
+        with mock.patch.object(self.tv, "ready", return_value=True), \
+             mock.patch.object(self.tv, "live_quotes", side_effect=RuntimeError("лёг")), \
+             mock.patch("pipeline.fetch.iss.intraday_quote",
+                        return_value=self.triple("iss")) as fallback:
+            got = self.run.fetch_live_quotes(self.journal)
+        fallback.assert_called_once()
+        self.assertEqual(got, {"live_imoex": "2026-08-12"})
+
+    def test_нулевая_цена_не_становится_котировкой(self):
+        # По инструменту без сделок T-Invest отдаёт ноль. Это не цена.
+        data = {"lastPrices": [
+            {"instrumentUid": "u1", "price": {"units": "0", "nano": 0}, "time": "2026-08-12T08:00:00Z"},
+            {"instrumentUid": "u2", "price": {"units": "12", "nano": 264000000}, "time": "2026-08-12T08:27:31Z"}]}
+        with mock.patch.object(self.tv, "call", return_value=data):
+            got = self.tv.last_prices(["u1", "u2"])
+        self.assertEqual(list(got), ["u2"])
+        self.assertEqual(got["u2"][0], 12.264)
+
+    def test_время_показывается_московское(self):
+        self.assertEqual(self.tv._msk_time("2026-08-12T08:27:31Z"), "11:27:31")
+        self.assertIsNone(self.tv._msk_time("не время"))
+
+    def test_известны_все_инструменты_витрины(self):
+        # Витрина показывает шесть строк, пять из них живые (шестая — фьючерс BR
+        # из history). Пропущенный uid означал бы тихо застывшую цену.
+        self.assertEqual(sorted(self.tv.LIVE_UIDS),
+                         ["live_cny_tom", "live_gld_tom", "live_imoex", "live_rgbi",
+                          "live_rvi"])
+
+
 class FutoiNoteCase(unittest.TestCase):
     """Записка о задержке обязана следовать режиму, а не быть константой."""
 
