@@ -13,7 +13,6 @@
 
 import json
 import os
-import time
 import unittest
 import urllib.error
 from pathlib import Path
@@ -21,6 +20,13 @@ from tempfile import TemporaryDirectory
 from unittest import mock
 
 from tests import need
+
+# Часы чистки заморожены. `prune_markers` сравнивает mtime файла с `time.time()`, то
+# есть проверка по своей природе «относительно сейчас» — и написанная в лоб, она
+# нарушила бы первое правило набора (никаких «сегодня минус N»). Поэтому подменяем
+# часы САМОГО МОДУЛЯ и раскладываем mtime по абсолютным меткам от той же точки.
+NOW = 1_800_000_000.0   # 2027-01-15, произвольная фиксированная точка
+DAY = 86400.0
 
 
 class FakeResponse:
@@ -65,6 +71,15 @@ class TelegramCase(unittest.TestCase):
         patcher = mock.patch.object(self.tg.urllib.request, "urlopen", fake)
         patcher.start()
         self.addCleanup(patcher.stop)
+
+        clock = mock.patch.object(self.tg.time, "time", lambda: NOW)
+        clock.start()
+        self.addCleanup(clock.stop)
+
+    def age(self, path, days):
+        """Состарить маркер на N суток от замороженного «сейчас»."""
+        stamp = NOW - days * DAY
+        os.utime(path, (stamp, stamp))
 
     def _restore(self):
         for key, val in self.prev.items():
@@ -156,9 +171,8 @@ class TestMarkers(TelegramCase):
         self.tg.deliver("source_stale:iss", "источник отстал", channel="ops")
         self.assertEqual(len(self.markers()), 2)
 
-        old = time.time() - 100 * 86400  # больше 45 суток, но меньше срока долгожителя
         for path in (self.root / "notify").rglob("*.json"):
-            os.utime(path, (old, old))
+            self.age(path, 100)  # больше 45 суток, но меньше срока долгожителя
         self.assertEqual(self.tg.prune_markers(days=45), 1, "вычищена не одна запись")
         left = self.markers()
         self.assertEqual(len(left), 1, left)
@@ -166,8 +180,7 @@ class TestMarkers(TelegramCase):
         self.assertEqual(key, "recalibrate:abc123")
 
         # Но не вечно: через год уходит и он — иначе каталог растёт без конца.
-        forever = time.time() - (self.tg.LONG_LIVED_DAYS + 10) * 86400
-        os.utime(self.root / left[0], (forever, forever))
+        self.age(self.root / left[0], self.tg.LONG_LIVED_DAYS + 10)
         self.assertEqual(self.tg.prune_markers(days=45), 1)
         self.assertEqual(self.markers(), [])
 
@@ -175,9 +188,8 @@ class TestMarkers(TelegramCase):
         # мутация: rglob -> glob, и каталог ops-канала растёт вечно.
         self.tg.deliver("a", "текст", channel="alerts")
         self.tg.deliver("b", "текст", channel="ops")
-        old = time.time() - 100 * 86400
         for path in (self.root / "notify").rglob("*.json"):
-            os.utime(path, (old, old))
+            self.age(path, 100)
         self.assertEqual(self.tg.prune_markers(days=45), 2)
         self.assertEqual(self.markers(), [])
 
