@@ -430,7 +430,12 @@ def _quotes(now):
                 prev = None
             row = {"intraday": True, "delay_min": meta.get("delay_min"),
                    "updatetime": meta.get("updatetime"),
-                   "contract": meta.get("secid")}
+                   # Код ИНСТРУМЕНТА, которым котируется строка. У индексов это сам
+                   # индекс, у нефти — конкретный контракт (BRU6), и без него после
+                   # переката непонятно, к чему относится цена. Название «contract»
+                   # было неверным: meta стора сливается, а не заменяется, и у
+                   # индексов там остался secid от прежнего ISS-фетчера.
+                   "instrument": meta.get("secid")}
         elif pts:
             d, v = pts[-1]
             prev = pts[-2][1] if len(pts) > 1 else None

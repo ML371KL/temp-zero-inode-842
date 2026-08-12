@@ -270,7 +270,7 @@ class LiveQuotesCase(unittest.TestCase):
             {"delay_min": 0, "secid": "BRV6", "secid_since": "2026-08-12"})
         q = self.run._quotes(NOW)["brent_moex"]
         self.assertIsNone(q["chg_pct"], "на перекате показано выдуманное движение")
-        self.assertEqual(q["contract"], "BRV6")
+        self.assertEqual(q["instrument"], "BRV6")
 
     def test_вне_переката_изменение_считается(self):
         self.run.store.upsert_points("brent_moex", {"2026-08-11": 84.0}, {})
