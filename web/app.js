@@ -661,6 +661,22 @@
       case 'sep_node':
         out.push(h('div', { 'class': 'tile__headline', text: ruText(m.headline) }));
         break;
+      case 'retail':
+        // Крупным — долю в обороте: именно она объясняет, почему поток розницы
+        // вообще что-то значит для индекса. Число счетов сюда не годится —
+        // 41,9 млн открытых счетов и 3,0 млн торгующих это разные величины,
+        // и крупная цифра «41,9 млн» читалась бы как число участников рынка.
+        out.push(num(p.share_equity_pct, 0, '%'));
+        out.push(h('div', { 'class': 'tile__sub', text: 'оборота акций за физлицами; активны ' +
+          fmtNum(p.active_mln, 1, false) + ' из ' + fmtNum(p.clients_total_mln, 1, false) + ' млн счетов' +
+          (isNum(p.inflow_equity_bln) ? '; в акции ' + fmtNum(p.inflow_equity_bln, 1, true) + ' млрд ₽' : '') }));
+        if (p.portfolio && p.portfolio.length) {
+          out.push(h('div', { 'class': 'tile__sub', text: 'народный портфель: ' +
+            p.portfolio.slice(0, 3).map(function (x) {
+              return ruText(x.name) + ' ' + fmtNum(x.share_pct, 0, false) + '%';
+            }).join(', ') }));
+        }
+        break;
       default:
         // «Нет данных» тайл и так скажет в подвале датой, а monitor-заметка — словами.
         // Три сообщения об одном факте в карточке высотой в два экрана телефона —

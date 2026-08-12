@@ -41,6 +41,7 @@ TITLES = {
     "breadth": "Ширина рынка",
     "mcxsm": "Малые каппы против индекса",
     "hy_spread": "Спред ВДО",
+    "retail": "Частные инвесторы",
 }
 
 # Обязательная пометка для тира dead: тайл остаётся на панели как контекст, но
@@ -1050,12 +1051,100 @@ def _t_hy_spread(store, now):
                  hy_meta.get("fetched_at"))
 
 
+def _t_retail(store, now):
+    """Кто такие «физики» на этом рынке: доля в обороте, участие, портфель.
+
+    Ряд `moex_retail` собирался месяцами, но показать его было негде — и когда он
+    сломался, это заметили только по баннеру. Тайл делает три вещи, которых на
+    панели не было:
+
+    1. **доля физлиц в обороте акций.** Две трети оборота — это и есть причина,
+       по которой потоки розницы вообще что-то значат для индекса;
+    2. **участие против счетов.** Открытых счетов 41,9 млн, сделки в месяц
+       заключают 3,0 млн. Разница — это разница между маркетинговым счётчиком и
+       живым рынком, и путать их нельзя;
+    3. **концентрация народного портфеля.** Сбербанк с префами — под 40% всего
+       розничного портфеля: «розница купила рынок» на деле обычно означает
+       «розница купила Сбербанк».
+
+    Предиктивной претензии нет и быть не может: валидация прямо показывает, что
+    физлица — не константа (в 2024 крупнейший нетто-ПРОДАВЕЦ года, в 2026
+    выкупали падение). Тир monitor.
+    """
+    pts, meta = _ser(store, "moex_retail")
+    payload_src = meta.get("payload") if isinstance(meta.get("payload"), dict) else {}
+    if not pts and not payload_src:
+        return _empty("retail", "Релиз выходит раз в месяц, 5–14 числа.")
+    asof, active = _last(pts)
+    total = payload_src.get("clients_total_mln")
+    share = payload_src.get("share_equity_pct")
+    equity = payload_src.get("inflow_equity_bln")
+    # Доля ДЕЙСТВУЮЩИХ: счёт открыт у 41,9 млн, торгует 3,0 млн. Считаем здесь, а
+    # не берём из релиза, — биржа этой доли не публикует, а без неё «41,9 млн
+    # инвесторов» читается как 41,9 млн участников рынка.
+    active_share = (active / total * 100.0) if (active and total) else None
+    portfolio = _by_issuer(payload_src.get("portfolio"))
+    top_name, top_share = portfolio[0] if portfolio else (None, None)
+    status = _st("moex_retail", pts, meta, now)
+    payload = {
+        "period": meta.get("asof"),
+        "share_equity_pct": _r(share, 1),
+        "active_mln": _r(active, 2),
+        "clients_total_mln": _r(total, 1),
+        "active_share_pct": _r(active_share, 1),
+        "clients_added_k": _r(payload_src.get("clients_added_k"), 0),
+        "inflow_equity_bln": _r(equity, 1),
+        "inflow_bonds_bln": _r(payload_src.get("inflow_bonds_bln"), 1),
+        "inflow_funds_bln": _r(payload_src.get("inflow_funds_bln"), 1),
+        "top_name": top_name,
+        "top_share_pct": _r(top_share, 1),
+        "portfolio": [{"name": name, "share_pct": _r(pct, 1)} for name, pct in portfolio[:6]],
+        "news_url": meta.get("url"),
+    }
+    parts = []
+    if share is not None:
+        parts.append(f"{_n(share, 0)}% оборота акций")
+    if active and total:
+        parts.append(f"активны {_n(active, 1)} из {_n(total, 1)} млн счетов "
+                     f"({_n(active_share, 0)}%)")
+    if top_share:
+        parts.append(f"доля {top_name} {_n(top_share, 0)}%")
+    headline = "Физлица: " + "; ".join(parts) if parts else "релиз разобран не полностью"
+    return _tile("retail", status, asof, headline, payload,
+                 "Описание состава рынка, а не сигнал: валидация показывает, что физлица "
+                 "не константа — в 2024 розница была крупнейшим нетто-продавцом года, "
+                 "а в 2026 выкупала падение.",
+                 meta.get("fetched_at"))
+
+
+def _by_issuer(rows):
+    """[(эмитент, доля %)] по убыванию доли, обыкновенные и привилегированные вместе.
+
+    Биржа печатает «Сбербанка 31,8%» и «Сбербанка (прив.) 7,3%» отдельными строками
+    и подряд, а не по величине. Обе строки — одна и та же ставка розницы на одного
+    эмитента: без сложения концентрация занижена почти на треть (31,8 вместо 39,1),
+    а без сортировки «первая строка» случайно совпадает с крупнейшей только пока
+    Сбербанк стоит первым.
+    """
+    total = {}
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").replace(" (прив.)", "").strip()
+        pct = row.get("share_pct")
+        if not name or not isinstance(pct, (int, float)) or isinstance(pct, bool):
+            continue
+        total[name] = total.get(name, 0.0) + float(pct)
+    return sorted(total.items(), key=lambda kv: -kv[1])
+
+
 BUILDERS = [
     ("orfr", _t_orfr), ("lqdt", _t_lqdt), ("deposit_spread", _t_deposit_spread),
     ("dividends", _t_dividends), ("cb_meeting", _t_cb_meeting), ("cpi_weekly", _t_cpi_weekly),
     ("ofz_auctions", _t_ofz_auctions), ("polymarket", _t_polymarket), ("futoi", _t_futoi),
     ("rvi", _t_rvi), ("rub_barrel", _t_rub_barrel), ("sep_node", _t_sep_node),
     ("breadth", _t_breadth), ("mcxsm", _t_mcxsm), ("hy_spread", _t_hy_spread),
+    ("retail", _t_retail),
 ]
 
 
