@@ -129,6 +129,21 @@ class TestMetaHonesty(AuctionsCase):
         self.assertEqual(meta["last"]["date"], "2026-07-15")
         self.assertIsInstance(meta["weeks_since"], int)
 
+    def test_пустое_окно_не_объявляет_аукционом_старую_точку(self):
+        # В затравке дни ОТМЕНЁННЫХ аукционов записаны нулями. Если взять последнюю
+        # точку ряда за «последний аукцион», панель во время паузы напишет «Аукцион
+        # 05.08 не состоялся» про день, когда аукциона не назначали. Помним свой
+        # прошлый разбор, а к ряду не обращаемся.
+        prev = {"date": "2026-07-15", "issue": "SU29028RMFS6", "placed_bn": 0.0,
+                "failed": True, "demand_bn": None}
+        with mock.patch.object(self.a.store, "load_series",
+                               return_value={"meta": {"last": prev}}), \
+             mock.patch.object(self.a.store, "last_date", return_value="2026-08-05"):
+            _sid, pts, meta = self.run_range("2026-07-22", "2026-07-22")
+        self.assertEqual(pts, {})
+        self.assertEqual(meta["last"]["date"], "2026-07-15")
+        self.assertEqual(meta["asof"], "2026-07-15")
+
     def test_анонс_попадает_в_meta(self):
         _sid, _pts, meta = self.run_range(
             "2026-07-22", "2026-07-22",

@@ -224,8 +224,16 @@ def auctions(series_id="ofz_auctions", start=None, end=None, bootstrap=False):
         summaries[key] = summary
 
     ahead, title, news_url = next_auction()
-    last_day = max(summaries) if summaries else store.last_date(series_id)
-    last = dict(summaries.get(last_day) or {}, date=last_day) if last_day else {}
+    # Если в окне аукционов не было, «последним аукционом» остаётся тот, что фетчер
+    # уже разбирал, а НЕ последняя точка ряда: в затравке дни отменённых аукционов
+    # записаны нулями, и брать их за последний аукцион значит объявить аукционом день,
+    # когда его не проводили («Аукцион 05.08 не состоялся» при паузе с 20.07).
+    last = dict(summaries[max(summaries)], date=max(summaries)) if summaries else {}
+    if not last:
+        prev = ((store.load_series(series_id) or {}).get("meta") or {}).get("last")
+        if isinstance(prev, dict) and prev.get("date"):
+            last = dict(prev)
+    last_day = last.get("date") or store.last_date(series_id)
     # Спроса у биржи нет: показываем это явным None, чтобы тайл написал «нет данных»,
     # а не унаследовал число из затравки и не выдал его за свежее.
     last.setdefault("demand_bn", None)
