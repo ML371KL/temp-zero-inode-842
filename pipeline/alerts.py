@@ -251,16 +251,45 @@ def _orfr(payload, prev, now):
                 f"Потоки ОРФР за {asof}: {tile.get('headline')}. {exhaust}.", "info", now)]
 
 
+# Тревога об аукционе — про СЕГОДНЯШНИЙ провал. Аукционы идут по средам, четырёх
+# суток хватает и на вечернюю публикацию, и на пропущенный такт.
+AUCTION_FRESH_DAYS = 4
+
+
+def _age_days(day, now):
+    """Сколько суток назад была дата тайла. None — если дата не разобралась."""
+    try:
+        when = datetime.strptime(str(day)[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return None
+    return (now - when).days
+
+
 def _auction(payload, prev, now):
     tile = _mons(payload).get("ofz_auctions") or {}
     pl = tile.get("payload") or {}
     date_ = pl.get("date")
     if not pl.get("failed") or not date_ or date_ == prev.get("auction_date"):
         return []
+    # Дата тайла меняется НЕ ТОЛЬКО когда прошёл новый аукцион: переезд на другой
+    # источник, починка ряда или восстановление стора сдвигают её задним числом.
+    # 12.08.2026 так и вышло — ряд переехал на биржевую доску, «последним» стал
+    # реальный аукцион 15.07 вместо нуля затравки от 05.08, и правило разослало
+    # «аукцион провален» про день четырёхнедельной давности. Смена записи в истории
+    # не событие рынка; событие — свежий провал.
+    age = _age_days(date_, now)
+    if age is None or age > AUCTION_FRESH_DAYS:
+        return []
+    # Спрос бывает пустым штатно: биржа его не раскрывает. «при спросе н/д млрд» —
+    # единица, приклеенная к отсутствующему числу (та же ошибка, что уже правили на
+    # тайле), поэтому про молчание говорим словами.
+    demand = pl.get("demand_bn")
+    tail = (f" при спросе {_num(demand, 1)} млрд" if isinstance(demand, (int, float))
+            else "; спрос не раскрыт")
     return [_ev(f"auction_failed:{date_}", "auction_failed",
-                f"Аукцион ОФЗ {date_} провален: размещено {_num(pl.get('placed_bn'), 1)} млрд "
-                f"при спросе {_num(pl.get('demand_bn'), 1)} млрд. Минфин не даёт премию — "
-                f"давление уходит в длинный конец.", "warn", now)]
+                f"Аукцион ОФЗ {date_} провален: размещено {_num(pl.get('placed_bn'), 1)} млрд"
+                f"{tail}. Минфин не даёт премию — давление уходит в длинный конец.",
+                "warn", now)]
 
 
 def _deposit(payload, prev, now):

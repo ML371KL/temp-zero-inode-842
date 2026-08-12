@@ -348,6 +348,50 @@ class TestAfterPublish(AlertsCase):
         self.assertEqual(self.alerts.after_publish(self.result(), now=NOW), [])
 
 
+class TestAuctionFreshness(AlertsCase):
+    """Тревога об аукционе — про сегодняшний провал, а не про запись в истории.
+
+    Оплачено 12.08.2026: ряд аукционов переехал с недоступного Минфина на биржевую
+    доску, «последним» стал реальный аукцион 15.07 вместо нуля затравки от 05.08 —
+    дата тайла изменилась, и правило разослало в телеграм «аукцион провален» про
+    день ЧЕТЫРЁХНЕДЕЛЬНОЙ давности. Смена записи в истории не событие рынка.
+    """
+
+    def tile(self, date_, demand=88.1):
+        return [{"id": "ofz_auctions", "status": "ok", "asof": date_,
+                 "headline": "аукцион провален",
+                 "payload": {"date": date_, "failed": True, "placed_bn": 0.0,
+                             "demand_bn": demand}}]
+
+    def fire(self, date_, demand=88.1, prev_date="2026-07-29"):
+        state = {"last": {"auction_date": prev_date}}
+        events = self.alerts.detect(payload(monitors=self.tile(date_, demand)),
+                                    state, NOW)
+        return [e for e in events if e["kind"] == "auction_failed"]
+
+    def test_свежий_провал_доходит(self):
+        self.assertEqual(len(self.fire(ASOF)), 1)
+
+    def test_провал_месячной_давности_молчит(self):
+        # мутация: убрать проверку возраста -> в канал уходит новость про 15.07,
+        # как будто аукцион был сегодня.
+        self.assertEqual(self.fire("2026-07-15"), [])
+
+    def test_граница_окна(self):
+        self.assertEqual(len(self.fire("2026-08-07")), 1)   # 4 суток — ещё событие
+        self.assertEqual(self.fire("2026-08-06"), [])       # 5 суток — уже история
+
+    def test_пустой_спрос_не_печатается_единицей(self):
+        # «при спросе н/д млрд» — единица, приклеенная к отсутствующему числу.
+        # Биржа спрос не раскрывает вовсе, и это надо сказать словами.
+        text = self.fire(ASOF, demand=None)[0]["text"]
+        self.assertNotIn("н/д млрд", text)
+        self.assertIn("спрос не раскрыт", text)
+
+    def test_битая_дата_не_роняет_правило(self):
+        self.assertEqual(self.fire("не дата"), [])
+
+
 class TestTexts(AlertsCase):
     """Каждое событие обязано нести число и один десятичный разделитель — точку."""
 
