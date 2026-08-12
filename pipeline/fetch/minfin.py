@@ -69,6 +69,11 @@ except ImportError:                        # автономный запуск �
     except ImportError:
         tg = None
 
+try:                                       # первоисточник налоговой цены Urals
+    from . import consultant
+except ImportError:
+    import consultant
+
 # Грабля 11.08.2026: minfin.gov.ru отдаёт 503 на дефолтный UA пайплайна
 # («moex-radar/1.0 … python-urllib») и спокойно отвечает браузерному. Поэтому
 # заголовки передаём явно в каждый запрос — молча получать 503 хуже, чем врать
@@ -89,21 +94,29 @@ AUCTION_URL = ("https://minfin.gov.ru/ru/perfomance/public_debt/internal/"
 # Четвёртое поле — таймаут в секундах, пятое — число попыток: economy.gov.ru из
 # части сетей просто ВИСИТ на TLS-рукопожатии, и дефолтные 3 попытки × 30 с
 # съедают три минуты прогона на источнике, который сегодня недоступен.
-# 12.08.2026 таймаут урезан с 12 с до 6: хост не отвечает НИ С ОДНОЙ из двух машин
-# (с VPS не резолвится вовсе, с ноутбука виснет на рукопожатии), а замер прогона
-# показал 26,5 с на ряд — почти всё это ожидание двух мёртвых адресов. Опрос идёт
-# трижды в сутки, и полторы минуты в день уходили в никуда.
+# 12.08.2026 список ПЕРЕВЕДЁН В РОЛЬ СВЕРКИ: цену в ряд теперь пишет справочная
+# таблица НДПИ (fetch/consultant.py), а здесь остаётся рыночная цена из лент — её
+# сравнивают с налоговой и кладут расхождение в meta.conflicts. Раз ряд от них больше
+# не зависит, таймауты урезаны: economy.gov.ru не отвечает ни с одной машины (замер
+# показал 26,5 с ожидания на прогон), а ленты незачем ждать по минуте втроём.
 URALS_SOURCES = [
     ("economy.gov.ru", "https://www.economy.gov.ru/material/press/", 6, 1),
     ("economy.gov.ru", "https://www.economy.gov.ru/material/news/", 6, 1),
-    ("1prime.ru", "https://1prime.ru/oil/", 30, 2),
-    ("investfuture.ru", "https://investfuture.ru/news", 30, 2),
-    ("mfd.ru", "https://mfd.ru/news/", 30, 2),
+    ("1prime.ru", "https://1prime.ru/oil/", 15, 1),
+    ("investfuture.ru", "https://investfuture.ru/news", 15, 1),
+    ("mfd.ru", "https://mfd.ru/news/", 15, 1),
 ]
 
-# Реперы 2026 из задания: только самопроверка, в данные не подставляются.
-URALS_SELF_CHECK = {"2026-01": 45.0, "2026-04": 94.87, "2026-06": 63.52,
-                    "2026-07": 59.02}
+# Реперы 2026: только самопроверка, в данные не подставляются.
+#
+# Январь исправлен 12.08.2026 с 45,0 на 40,95. Прежнее число было взято из пересказов
+# лент, а НАЛОГОВАЯ цена января — 40,95: она стоит в справочной таблице НДПИ, из неё же
+# посчитан Кц 7,7117 при курсе 77,5632 (тождество сходится до четвёртого знака), и
+# ровно 40,95 лежит в ряду, собранном исследованием. Со старым репером исправный
+# парсер докладывал бы «расхождение с репером» на верном числе — то есть самопроверка
+# работала бы ровно наоборот.
+URALS_SELF_CHECK = {"2026-01": 40.95, "2026-02": 44.59, "2026-04": 94.87,
+                    "2026-06": 63.52, "2026-07": 59.02}
 
 _MONTHS = {"январ": 1, "феврал": 2, "март": 3, "апрел": 4, "мая": 5, "мае": 5,
            "май": 5, "июн": 6, "июл": 7, "август": 8, "сентябр": 9, "октябр": 10,
@@ -345,14 +358,17 @@ def _month_price_pair(window):
     return None
 
 
-def urals():
-    """-> ("urals_tax", {последний день месяца: цена}, meta).
+def market_prices():
+    """{дата: (цена, источник)} из пересказов СМИ — ТОЛЬКО ДЛЯ СВЕРКИ.
 
-    Сначала economy.gov.ru, затем зеркала. Значение с более приоритетного
-    источника НЕ перезаписывается зеркалом; расхождения складываются в
-    meta["conflicts"] — их надо смотреть глазами, а не усреднять.
+    В ряд эти числа не попадают: агентства печатают РЫНОЧНУЮ цену Юралс, а ряд
+    хранит НАЛОГОВУЮ, и они расходятся (январь-2026: 40,95 против ~45 в лентах).
+    Подставить одно вместо другого — значит незаметно поменять величину, на которой
+    калибровалось ядро. Зато расхождение, увиденное явно, — полезный сигнал:
+    налоговая цена с 2023 года считается с «полом» к Brent, и разрыв между двумя
+    сериями сам по себе информативен.
     """
-    points, conflicts, tried, ok_sources = {}, [], [], []
+    out, tried = {}, []
     for name, url, timeout, retries in URALS_SOURCES:
         try:
             html = get_text(url, headers=_UA, timeout=timeout, retries=retries)
@@ -363,20 +379,104 @@ def urals():
         if not found:
             tried.append("%s: страница открылась, цены не найдено" % name)
             continue
-        ok_sources.append(name)
         for day, price in found.items():
-            if day not in points:
-                points[day] = price
-            elif abs(points[day] - price) > 0.01:
-                conflicts.append("%s: %s против %.2f у %s"
-                                 % (day, price, points[day], ok_sources[0]))
+            out.setdefault(day, (price, name))
+    return out, tried
+
+
+def _prev_month_end(today=None):
+    """Конец ПРЕДЫДУЩЕГО календарного месяца по московскому дню."""
+    now = today or (datetime.now(timezone.utc) + timedelta(hours=3)).date()
+    return (date(now.year, now.month, 1) - timedelta(days=1)).isoformat()
+
+
+def _stored_urals(series_id="urals_tax"):
+    """Последняя дата ряда в сторе или None. Импорт ленивый — как в rosstat."""
+    try:
+        from lib.store import last_date
+    except ImportError:
+        try:
+            from pipeline.lib.store import last_date
+        except ImportError:
+            return None
+    try:
+        return last_date(series_id)
+    except (OSError, ValueError):
+        return None
+
+
+def _urals_manual():
+    """Ручной ввод из inputs/urals.yml. Импорт ленивый — как в orfr._manual_fallback:
+    имя пакета зависит от того, как run.py кладёт pipeline в sys.path."""
+    try:
+        from . import manual as manual_mod
+    except ImportError:
+        try:
+            from fetch import manual as manual_mod
+        except ImportError:
+            import manual as manual_mod
+    if not hasattr(manual_mod, "urals_manual"):
+        return {}, None
+    return manual_mod.urals_manual()
+
+
+def urals():
+    """-> ("urals_tax", {последний день месяца: НАЛОГОВАЯ цена, $/барр}, meta).
+
+    Порядок: справочная таблица НДПИ (consultant.ndpi_prices) → ручной ввод
+    inputs/urals.yml. Пересказы СМИ идут третьим блоком и НИКОГДА не пишутся в ряд —
+    только в meta.market/meta.conflicts (см. market_prices и шапку consultant.py).
+
+    Опрос прекращается, как только прошлый месяц в ряду есть. Окно 1–12 числа даёт
+    до 36 попыток (три такта в сутки), а нужна ровно одна: справочник — чужой
+    некоммерческий сервис, и ходить к нему за уже полученным числом незачем. Ревизии
+    задним числом этот ранний выход не увидит — их ловит bootstrap.
+    """
+    notes, extra = [], {}
+    points = {}
+    want = _prev_month_end()
+    have = _stored_urals()
+    if have and have >= want:
+        return "urals_tax", {}, _meta(
+            "consultant_ndpi", consultant.CARD, "ok",
+            "месяц %s уже в ряду — источник не тревожим" % want[:7],
+            {"asof": have, "skipped": True})
+    try:
+        points, info = consultant.ndpi_prices()
+        extra.update({"sections": info.get("sections"), "rows": info.get("rows")})
+        notes.append("справочник НДПИ: месяцев %d" % len(points))
+        source, url, status = "consultant_ndpi", info.get("url"), "ok"
+    except FetchError as exc:
+        notes.append("справочник НДПИ: %s" % exc)
+        source, url, status = "consultant_ndpi", consultant.CARD, "error"
+        info = {}
+
+    market, market_failed = market_prices()
+    conflicts = list(info.get("conflicts") or [])
+    for day, (price, name) in sorted(market.items()):
+        base = points.get(day)
+        if base is not None and abs(base - price) > 0.01:
+            conflicts.append("%s: налоговая %.2f против рыночной %.2f (%s)"
+                             % (day, base, price, name))
+    extra.update({"market": {d: v for d, (v, _n) in sorted(market.items())},
+                  "market_failed": market_failed, "conflicts": conflicts})
+
     if not points:
-        return "urals_tax", {}, _meta("minfin_urals", URALS_SOURCES[0][1], "error",
-                                      "; ".join(tried) or "источники не ответили")
-    return "urals_tax", points, _meta(
-        "minfin_urals", URALS_SOURCES[0][1], "ok",
-        "источники: %s" % ", ".join(ok_sources),
-        {"conflicts": conflicts, "failed": tried, "selfcheck": _urals_selfcheck(points)})
+        manual_points, path = _urals_manual()
+        if manual_points:
+            hint = ("; свежая рыночная цена по лентам: %s" % max(market.items())[1][0]
+                    if market else "")
+            return "urals_tax", manual_points, _meta(
+                "urals_manual", path, "manual_needed",
+                "; ".join(notes) + "; взято из %s%s" % (path, hint), extra)
+        extra["hint"] = ("впишите налоговую цену в inputs/urals.yml — её печатают "
+                         "письма ФНС и релизы Минэка «О среднем уровне цен нефти "
+                         "сорта Юралс»")
+        return "urals_tax", {}, _meta(source, url, "error",
+                                      "; ".join(notes) + "; inputs/urals.yml пуст", extra)
+
+    extra["selfcheck"] = _urals_selfcheck(points)
+    return "urals_tax", points, _meta(source, url, status, "; ".join(notes), extra)
 
 
 def _urals_selfcheck(points):

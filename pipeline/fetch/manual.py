@@ -317,6 +317,32 @@ def orfr_manual():
     return points, path, sources
 
 
+def urals_manual():
+    """inputs/urals.yml -> ({"2026-08-31": 61.3}, путь).
+
+    Гарантированный пол для ноги ядра. Значение — НАЛОГОВАЯ цена Юралс в долларах
+    за баррель (та, что в письмах ФНС и релизах Минэка «О среднем уровне цен нефти
+    сорта „Юралс“»), а не рыночная котировка из лент: это разные величины, и в ряд
+    идёт первая (см. шапку fetch/consultant.py).
+    """
+    data, path = load_input("urals")
+    points = {}
+    for rec in _records(data):
+        month = rec.get("month")
+        if isinstance(month, str) and re.match(r"^\d{4}-\d{2}$", month.strip()):
+            key = _month_end(month.strip())
+        elif _is_date(month):
+            key = month
+        else:
+            continue
+        value = _num(rec.get("usd", rec.get("price")))
+        # Коридор тот же, что у автоматического парсера: опечатка в рублях (5 400)
+        # или в копейках (0,59) не должна попасть в ногу ядра.
+        if value is not None and 5.0 < value < 250.0:
+            points[key] = value
+    return points, path
+
+
 def _month_end(ym):
     """'2026-07' -> '2026-07-31' без календарных зависимостей."""
     year, month = int(ym[:4]), int(ym[5:7])
