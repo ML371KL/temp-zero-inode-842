@@ -58,12 +58,17 @@ def compose(event):
 
     Префикс «Внимание.» из alerts.render здесь намеренно не используется: он стал
     бы всем заголовком целиком, а сама новость уехала бы в подпись.
+
+    Разбор модели идёт последним абзацем после «💬» — ровно так же, как его шлют в
+    ленту 837 и 838, чтобы у всех панелей хаба комментарий выглядел одинаково.
     """
     text = (event.get("text") or "").strip()
     if not text:
         return ""
     parts = _SENTENCE.split(text, maxsplit=1)
-    return parts[0] if len(parts) == 1 else f"{parts[0]}\n{parts[1].strip()}"
+    body = parts[0] if len(parts) == 1 else f"{parts[0]}\n{parts[1].strip()}"
+    comment = (event.get("comment") or "").strip()
+    return f"{body}\n\n💬 {comment}" if comment else body
 
 
 def deliver(event):

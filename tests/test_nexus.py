@@ -107,6 +107,20 @@ class TestCompose(NexusCase):
         self.assertEqual(text.split("\n")[0], "Облигационный флаг снят.")
         self.assertIn("+1.4%/мес (hit 0.64).", text.split("\n")[1])
 
+    def test_comment_travels_to_the_hub_as_its_own_paragraph(self):
+        # Разбор обязан уехать в ленту хаба вместе с фактом: иначе на панели
+        # комментарий есть, в телеграме есть, а в хабе событие голое.
+        ev = self.event("Облигационный флаг снят. Покупка просадок снова в силе.")
+        ev["comment"] = "Длинные ОФЗ дорожают первыми — обычный порядок в начале цикла."
+        text = self.nexus.compose(ev)
+        head, rest = text.split("\n", 1)
+        self.assertEqual(head, "Облигационный флаг снят.")
+        self.assertTrue(rest.rstrip().endswith("обычный порядок в начале цикла."))
+        self.assertIn("\n\n💬 ", text)
+
+    def test_missing_comment_leaves_the_fact_alone(self):
+        self.assertNotIn("💬", self.nexus.compose(self.event("Смена ячейки: A → B.")))
+
     def test_single_sentence_stays_single_line(self):
         text = self.nexus.compose(self.event("Смена ячейки: A → B (токсичная)."))
         self.assertNotIn("\n", text)
