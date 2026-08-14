@@ -193,34 +193,34 @@ class TestBuyWindow(AlertsCase):
 
 class TestDelivery(AlertsCase):
     def test_undelivered_event_waits_in_queue_without_marker(self):
-        self.seed(payload(bond=1))
+        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
         self.online = False
-        evs = self.alerts.run(payload(bond=0, cell="bear|stress|ok"), dry_run=False, now=NOW)
+        evs = self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=False, now=NOW)
         self.assertTrue(evs)
         self.assertFalse(any(e["delivered"] for e in evs))
         self.assertEqual(self.markers(), [], "маркер дедупа не имеет права опережать доставку")
         self.assertIn("bond_off:" + ASOF, self.pending_keys())
 
     def test_repaired_telegram_delivers_pending_exactly_once(self):
-        self.seed(payload(bond=1))
+        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
         self.online = False
-        self.alerts.run(payload(bond=0, cell="bear|stress|ok"), dry_run=False, now=NOW)
+        self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=False, now=NOW)
         self.online = True
-        self.alerts.run(payload(bond=0, cell="bear|stress|ok"), dry_run=False,
+        self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=False,
                         now=NOW + timedelta(hours=1))
         self.assertEqual(len([t for t in self.sent if "Долговой рынок вышел из стресса" in t]), 1)
         self.assertEqual(self.pending_keys(), [])
         # третий прогон ничего не повторяет
-        self.alerts.run(payload(bond=0, cell="bear|stress|ok"), dry_run=False,
+        self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=False,
                         now=NOW + timedelta(hours=2))
         self.assertEqual(len([t for t in self.sent if "Долговой рынок вышел из стресса" in t]), 1)
 
     def test_stale_pending_is_dropped_after_a_day(self):
-        self.seed(payload(bond=1))
+        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
         self.online = False
-        self.alerts.run(payload(bond=0, cell="bear|stress|ok"), dry_run=False, now=NOW)
+        self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=False, now=NOW)
         self.online = True
-        self.alerts.run(payload(bond=0, cell="bear|stress|ok"), dry_run=False,
+        self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=False,
                         now=NOW + timedelta(hours=25))
         self.assertEqual(self.sent, [], "протухшую новость не повторяем")
 
@@ -245,17 +245,17 @@ class TestDelivery(AlertsCase):
                                          "health": "ok"},
                                 "core_sign_alerted": 1, "pending": old})
         self.online = False
-        self.alerts.run(payload(bond=0, cell="bear|stress|ok"), dry_run=False, now=NOW)
+        self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=False, now=NOW)
         keys = self.pending_keys()
         self.assertLessEqual(len(keys), self.alerts.PENDING_MAX)
         self.assertIn("bond_off:" + ASOF, keys)
-        self.assertIn("buy_window:" + ASOF, keys)
+        self.assertIn("bond_off:" + ASOF, keys)
 
     def test_dry_run_does_not_eat_the_transition(self):
-        self.seed(payload(bond=1))
-        self.alerts.run(payload(bond=0, cell="bear|stress|ok"), dry_run=True, now=NOW)
+        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
+        self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=True, now=NOW)
         self.assertEqual(self.sent, [])
-        evs = self.alerts.run(payload(bond=0, cell="bear|stress|ok"), dry_run=False, now=NOW)
+        evs = self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=False, now=NOW)
         self.assertIn("bond_flag_off", [e["kind"] for e in evs])
 
 
@@ -286,8 +286,12 @@ class TestSeedFromPublishedPayload(AlertsCase):
                                                        "asof": "2026-08-05"}}),
                               dry_run=False, now=NOW, seed_payload=published)
         kinds = [e["kind"] for e in evs]
-        for kind in ("bond_flag_off", "buy_window_open", "source_stale", "health_dead"):
+        for kind in ("buy_window_open", "source_stale", "health_dead"):
             self.assertIn(kind, kinds)
+        # Снятый облигационный флаг — часть того же поворота, поэтому он не отдельное
+        # сообщение, а подпункт окна входа (см. TestRegimeMerge).
+        window = next(e for e in evs if e["kind"] == "buy_window_open")
+        self.assertIn("bond_off:" + ASOF, window.get("merged") or [])
 
     def test_seeding_does_not_invent_a_core_flip(self):
         evs = self.alerts.run(payload(core=0.68), dry_run=False, now=NOW,
@@ -299,7 +303,7 @@ class TestSeedFromPublishedPayload(AlertsCase):
         self.assertFalse(self.alerts.seed_from_payload({}, empty, NOW))
 
     def test_existing_state_wins_over_snapshot(self):
-        self.seed(payload(bond=1))
+        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
         state = self.state()
         self.assertFalse(self.alerts.seed_from_payload(state, payload(bond=0), NOW))
 
@@ -425,10 +429,16 @@ class TestTexts(AlertsCase):
                       health="dead", monitors=mons,
                       sources={"iss": {"status": "stale", "lag_min": 4300,
                                        "asof": "2026-08-05"}})
-        events = self.alerts.detect(bad, state, NOW)
-        events += self.alerts.detect(payload(core=None, cell=None), {"last": prev}, NOW)
+        # merge=False — СЫРОЙ выход правил. После слияния семейства режима часть
+        # видов в одном прогоне не появляется по построению (заголовком становится
+        # один, остальные уходят подпунктами), и «вид недостижим» стало бы
+        # неотличимо от «правило сломалось». Слияние проверяется отдельно —
+        # TestRegimeMerge.
+        events = self.alerts.detect(bad, state, NOW, merge=False)
+        events += self.alerts.detect(payload(core=None, cell=None), {"last": prev},
+                                     NOW, merge=False)
         events += self.alerts.detect(payload(bond=1, cell="bear|stress|stress"),
-                                     {"last": dict(prev, bond=0)}, NOW)
+                                     {"last": dict(prev, bond=0)}, NOW, merge=False)
         self.online = False
         events += self.alerts.after_publish(
             {"lease_ok": False, "lease_reason": "перо у GHA", "oversize": True,
@@ -485,8 +495,8 @@ class TestTexts(AlertsCase):
 
 class TestPayloadFeed(AlertsCase):
     def test_feed_keeps_tail_and_shape(self):
-        self.seed(payload(bond=1))
-        self.alerts.run(payload(bond=0, cell="bear|stress|ok"), dry_run=False, now=NOW)
+        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
+        self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=False, now=NOW)
         feed = self.alerts.payload_events()
         self.assertTrue(feed)
         for row in feed:
@@ -508,7 +518,7 @@ class TestOpsSplit(AlertsCase):
     def test_ops_event_goes_to_the_ops_channel_only(self):
         # мутация: слать санитарные тем же каналом -> лента рынка тонет в отказах
         # источников, ровно как это выглядело в проде 12 августа.
-        self.seed(payload(bond=1))
+        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
         events = self.stale()
         kinds = {e["kind"] for e in events}
         self.assertIn("source_stale", kinds, "проверка бессмысленна без санитарного события")
@@ -517,7 +527,7 @@ class TestOpsSplit(AlertsCase):
         self.assertFalse(any("moex_press" in t for t in self.by_channel.get("alerts") or []))
 
     def test_ops_event_never_reaches_the_feed(self):
-        self.seed(payload(bond=1))
+        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
         self.stale()
         feed = self.alerts.payload_events()
         self.assertTrue(feed, "рыночные события в ленте остаться обязаны")
@@ -527,7 +537,7 @@ class TestOpsSplit(AlertsCase):
     def test_old_ops_events_are_swept_out_of_a_saved_feed(self):
         # Состояние переживает обновление кода: до разделения санитарные лежали в
         # feed, и без вычистки они висели бы в журнале ещё двадцать событий.
-        self.seed(payload(bond=1))
+        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
         state = self.state()
         state["feed"] = [{"key": "source_stale:iss:x", "kind": "source_stale",
                           "ts": "2026-08-10T00:00:00Z", "severity": "warn", "text": "старьё"}]
@@ -535,7 +545,7 @@ class TestOpsSplit(AlertsCase):
         self.assertEqual(self.alerts.payload_events(), [])
 
     def test_ops_events_are_not_mirrored_to_the_hub(self):
-        self.seed(payload(bond=1))
+        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
         mirrored = []
         nexus = need(self, "pipeline.lib.nexus", "deliver", "SENT")
         with mock.patch.object(nexus, "deliver",
@@ -548,29 +558,29 @@ class TestComment(AlertsCase):
     """Комментарий модели: одинаковый во всех трёх местах, необязательный везде."""
 
     def test_comment_reaches_telegram_and_feed(self):
-        self.seed(payload(bond=1))
+        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
         with mock.patch.object(self.alerts.commentary, "annotate",
                                lambda evs, pl, log=None: [e.update(comment="разбор") for e in evs
                                                           if not self.alerts.is_ops(e)]):
-            self.alerts.run(payload(bond=0, cell="bear|stress|ok"), dry_run=False, now=NOW)
+            self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=False, now=NOW)
         self.assertTrue(any("💬 разбор" in t for t in self.sent))
         self.assertTrue(all(e.get("comment") == "разбор" for e in self.alerts.payload_events()))
 
     def test_event_without_comment_is_a_plain_fact(self):
         # Ключа нет — комментатор возвращает None, и это НЕ отказ доставки.
-        self.seed(payload(bond=1))
-        self.alerts.run(payload(bond=0, cell="bear|stress|ok"), dry_run=False, now=NOW)
+        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
+        self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=False, now=NOW)
         self.assertTrue(self.sent)
         self.assertFalse(any("💬" in t for t in self.sent))
         self.assertEqual(self.pending_keys(), [])
 
     def test_dry_run_does_not_call_the_model(self):
         # Прогон «на посмотреть» не должен зависеть от чужого провайдера.
-        self.seed(payload(bond=1))
+        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
         calls = []
         with mock.patch.object(self.alerts.commentary, "annotate",
                                lambda *a, **k: calls.append(1)):
-            self.alerts.run(payload(bond=0, cell="bear|stress|ok"), dry_run=True, now=NOW)
+            self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=True, now=NOW)
         self.assertEqual(calls, [])
 
 
@@ -696,6 +706,99 @@ class TestCommentaryScope(AlertsCase):
                          "событие уже в ленте: второй разбор ему не нужен")
 
 
+class TestRegimeMerge(AlertsCase):
+    """Совпавшие переходы машины состояний — одно сообщение, а не три.
+
+    ОПЛАЧЕНО ПРОГОНОМ 14.08.2026: ячейка — это и есть три её признака вместе,
+    поэтому снятие облигационного флага НЕИЗБЕЖНО меняет ячейку, а окно входа —
+    частный случай той же смены. Переход «ОФЗ вышли из стресса» рождал три
+    уведомления подряд про одно движение.
+
+    Приём взят у 837: внутренние переключения не рассылаются отдельно, а собираются
+    объяснением к одному внешнему событию — блоком «Что за этим стоит».
+    """
+
+    def turn(self, before, after):
+        """Один поворот рынка -> список событий этого прогона."""
+        self.seed(payload(**before))
+        return self.alerts.run(payload(**after), dry_run=False, now=NOW)
+
+    def test_три_перехода_становятся_одним_сообщением(self):
+        evs = self.turn(dict(vol=1, bond=1, cell="bear|stress|stress"),
+                        dict(vol=1, bond=0, cell="bear|stress|ok"))
+        self.assertEqual(len(evs), 1, [e["kind"] for e in evs])
+        self.assertEqual(evs[0]["kind"], "buy_window_open")
+        self.assertEqual(len(self.sent), 1, "в телеграм ушло больше одного сообщения")
+
+    def test_заголовком_становится_самое_предметное(self):
+        """«Долговой рынок вошёл в стресс» конкретнее, чем «Режим рынка сменился».
+
+        Обратный порядок давал заголовки, из которых нельзя понять, ЧТО произошло.
+        """
+        evs = self.turn(dict(vol=0, bond=0, cell="bull|calm|ok"),
+                        dict(vol=0, bond=1, cell="bull|calm|stress"))
+        self.assertEqual([e["kind"] for e in evs], ["bond_flag_on"])
+        self.assertIn("Режим рынка сменился", " ".join(evs[0]["causes"]))
+
+    def test_свёрнутое_не_теряется_а_становится_подпунктом(self):
+        evs = self.turn(dict(vol=1, bond=1, cell="bear|stress|stress"),
+                        dict(vol=1, bond=0, cell="bear|stress|ok"))
+        message = self.alerts.render(evs[0])
+        self.assertIn("<b>Что за этим стоит</b>", message)
+        self.assertIn("Долговой рынок вышел из стресса", message)
+        # Смысловая часть свёрнутого — самое ценное, что в нём было.
+        self.assertIn("Покупка просадок в акциях снова имеет смысл", message)
+
+    def test_ключи_свёрнутых_переезжают_в_главное(self):
+        """Дедуп телеграма и лента хаба работают по ключу.
+
+        Без переноса повтор из очереди прислал бы свёрнутые события заново
+        по отдельности — тем самым вернув ту же тройку сообщений.
+        """
+        evs = self.turn(dict(vol=1, bond=1, cell="bear|stress|stress"),
+                        dict(vol=1, bond=0, cell="bear|stress|ok"))
+        merged = evs[0].get("merged") or []
+        self.assertIn("bond_off:" + ASOF, merged)
+        self.assertTrue(any(k.startswith("cell:") for k in merged), merged)
+
+    def test_подпункт_не_повторяет_строку_выше(self):
+        # Свёрнутое событие описывает то же движение, и его «было → стало» сплошь
+        # и рядом совпадает с уже напечатанным. Дубль в блоке объяснений —
+        # не объяснение.
+        evs = self.turn(dict(vol=1, bond=1, cell="bear|stress|stress"),
+                        dict(vol=1, bond=0, cell="bear|stress|ok"))
+        move = f"{evs[0]['before']} → {evs[0]['after']}"
+        for cause in evs[0]["causes"]:
+            self.assertNotIn(move, cause, f"подпункт повторяет строку движения: {cause}")
+
+    def test_одиночный_переход_не_обрастает_блоком(self):
+        evs = self.turn(dict(trend=1, vol=0, bond=0, cell="bull|calm|ok"),
+                        dict(trend=0, vol=0, bond=0, cell="bear|calm|ok"))
+        self.assertEqual([e["kind"] for e in evs], ["state_cell_change"])
+        self.assertNotIn("Что за этим стоит", self.alerts.render(evs[0]))
+
+    def test_наклон_ядра_не_сливается_с_воротами(self):
+        """Наклон и ворота — разные слои модели, и слияние спрятало бы одно за другим.
+
+        «Сначала ворота, потом наклон» (docs/ARCHITECTURE.md): они меняются
+        независимо друг от друга, это два разных факта, а не один поворот.
+        """
+        self.seed(payload(core=0.66, vol=0, bond=0, cell="bull|calm|ok"))
+        evs = self.alerts.run(payload(core=-0.66, vol=0, bond=1, cell="bull|calm|stress"),
+                              dry_run=False, now=NOW)
+        kinds = [e["kind"] for e in evs]
+        self.assertIn("core_flip", kinds)
+        self.assertIn("bond_flag_on", kinds)
+        self.assertEqual(len(kinds), 2, kinds)
+
+    def test_тревожность_берётся_худшая(self):
+        # Спокойная смена режима, свёрнутая с тревожным флагом, обязана остаться
+        # тревогой: иначе слияние понижает важность сообщения.
+        evs = self.turn(dict(vol=0, bond=0, cell="bull|calm|ok"),
+                        dict(vol=0, bond=1, cell="bull|calm|stress"))
+        self.assertEqual(evs[0]["severity"], "warn")
+
+
 class TestNexusMirror(AlertsCase):
     """Копия события в ленту хаба. Сам POST проверяется в test_nexus.py — здесь
     только сцепка с очередью повторов, которая живёт в alerts.dispatch."""
@@ -718,10 +821,10 @@ class TestNexusMirror(AlertsCase):
         self.mirrored.clear()
 
     def bond_off(self, now=NOW):
-        return self.alerts.run(payload(bond=0, cell="bear|stress|ok"), dry_run=False, now=now)
+        return self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=False, now=now)
 
     def test_event_reaches_the_hub_under_its_own_key(self):
-        self.seed(payload(bond=1))
+        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
         events = self.bond_off()
         # Снятие флага тянет за собой смену ячейки и окно входа — в ленту уезжают
         # все три, по одному ключу на событие.
@@ -732,7 +835,7 @@ class TestNexusMirror(AlertsCase):
     def test_dead_hub_retries_without_a_second_telegram_message(self):
         # мутация: считать событие доставленным по одному телеграму -> упавший хаб
         # теряет событие навсегда, повторить его уже некому.
-        self.seed(payload(bond=1))
+        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
         self.hub_outcome = self.nexus.FAIL
         self.bond_off()
         self.assertIn("bond_off:" + ASOF, self.pending_keys())
@@ -746,14 +849,14 @@ class TestNexusMirror(AlertsCase):
     def test_unconfigured_hub_never_blocks_delivery(self):
         # мутация: OFF трактовать как FAIL -> на машине без NEXUS_* очередь повторов
         # растёт вечно, а телеграм на каждом прогоне отвечает DUP впустую.
-        self.seed(payload(bond=1))
+        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
         self.hub_outcome = self.nexus.OFF
         self.bond_off()
         self.assertEqual(self.pending_keys(), [])
 
     def test_dry_run_touches_neither_channel(self):
-        self.seed(payload(bond=1))
-        self.alerts.run(payload(bond=0, cell="bear|stress|ok"), dry_run=True, now=NOW)
+        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
+        self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=True, now=NOW)
         self.assertEqual(self.mirrored, [])
         self.assertEqual(self.sent, [])
 

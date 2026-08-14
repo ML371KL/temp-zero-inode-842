@@ -295,6 +295,16 @@ def render_market(event):
     if event.get("meaning"):
         lines.append(esc(event["meaning"]))
 
+    # «Что за этим стоит» — блок 837 слово в слово. Туда уходят переходы, которые
+    # описывают ТО ЖЕ движение с другой стороны: снятый облигационный флаг и смена
+    # режима — это один поворот рынка, а не три новости. Пустая строка перед
+    # заголовком блока делается первым элементом, а не «\n» внутри строки: так
+    # отбивка видна в исходнике и не теряется при склейке.
+    causes = [c for c in (event.get("causes") or []) if str(c).strip()]
+    if causes:
+        lines += ["", "<b>Что за этим стоит</b>"]
+        lines += [f"• {esc(cause)}" for cause in causes]
+
     # Разбор модели отбивается ПУСТОЙ СТРОКОЙ и меткой 💬 — ровно как у 837/838,
     # чтобы в общей ленте хаба разбор у всех панелей выглядел одинаково.
     comment = (event.get("comment") or "").strip()
@@ -338,5 +348,8 @@ def plain_text(event):
     for key in ("fact", "detail", "meaning", "where"):
         if event.get(key):
             parts.append(event[key])
+    for cause in event.get("causes") or []:
+        if str(cause).strip():
+            parts.append(sentence(cause))
     text = " ".join(p.strip() for p in parts if p)
     return re.sub(r"\s+", " ", text).strip()

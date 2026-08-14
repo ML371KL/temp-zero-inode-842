@@ -499,8 +499,103 @@ def _core_missing(payload, prev, now):
                       "стора в /var/lib/moex-radar/raw.")]
 
 
-def detect(payload, state, now=None):
-    """Все переходы этого прогона. state мутируется (гистерезис знака ядра)."""
+# Семейство «машина состояний»: разные стороны ОДНОГО поворота рынка. Ячейка — это
+# и есть три её признака вместе, поэтому снятие облигационного флага НЕИЗБЕЖНО меняет
+# ячейку, а окно входа — частный случай той же смены. Прогон 14.08.2026 показал, чем
+# это оборачивалось: переход «ОФЗ вышли из стресса» рождал ТРИ сообщения подряд про
+# одно движение.
+#
+# Порядок — ОТ КОНКРЕТНОГО К ОБЩЕМУ: заголовком становится самый предметный факт,
+# остальное уходит подпунктами в «Что за этим стоит».
+#
+# Окно входа впереди всех: самый редкий режим за 22 года (8–10 месяцев) и
+# единственный, который панель считает поводом добавлять риск.
+# Дальше облигационный флаг, и лишь потом смена режима. Это не произвол: «Долговой
+# рынок вошёл в стресс» — конкретное событие с понятным следствием, а «Режим рынка
+# сменился» — обобщение над ним. Заголовок обязан нести предметное, обобщение
+# читается подпунктом. Обратный порядок первой редакции давал заголовки, из которых
+# нельзя было понять, ЧТО ИМЕННО произошло.
+#
+# core_flip СЮДА НЕ ВХОДИТ и не должен: наклон и ворота — разные слои модели
+# («сначала ворота, потом наклон», docs/ARCHITECTURE.md). Они меняются независимо, и
+# слияние спрятало бы одно за другим.
+REGIME_FAMILY = ("buy_window_open", "bond_flag_on", "bond_flag_off", "state_cell_change")
+
+SEVERITY_RANK = {"info": 0, "warn": 1}
+CAUSES_MAX = 4          # пять строк подряд читаются как шум (тот же предел у 837)
+
+
+def _cause_line(event, main):
+    """Событие как подпункт — или None, если оно ничего не добавляет к заголовку.
+
+    Свёрнутое событие описывает то же движение, что и главное, поэтому его
+    «было → стало» СПЛОШЬ И РЯДОМ совпадает с уже напечатанным во второй строке.
+    Первая редакция печатала его всё равно, и подпункт дословно повторял строку
+    выше — блок «Что за этим стоит» не объяснял, а дублировал.
+    """
+    title = (event.get("title") or "").strip()
+    before, after = event.get("before"), event.get("after")
+    same = (before == main.get("before") and after == main.get("after"))
+    if not (before or after) or same:
+        # Движение то же — остаётся один заголовок, и то лишь если он говорит
+        # что-то сверх главного.
+        return None if same else (title or None)
+    joiner = " — " if ":" in title else ": "
+    return f"{title}{joiner}{before or '—'} → {after or '—'}"
+
+
+def merge_regime(events):
+    """Совпавшие переходы машины состояний -> одно событие с подпунктами."""
+    family = [e for e in events if e.get("kind") in REGIME_FAMILY]
+    if len(family) < 2:
+        return events
+    order = {kind: i for i, kind in enumerate(REGIME_FAMILY)}
+    family.sort(key=lambda e: order[e["kind"]])
+    main, folded = family[0], family[1:]
+
+    causes = list(main.get("causes") or [])
+    for event in folded:
+        line = _cause_line(event, main)
+        if line:
+            causes.append(line)
+        # Подробность свёрнутого события (например, расстояние RGBI до порога) —
+        # тоже объяснение, и терять её вместе с сообщением незачем. Дубль с уже
+        # напечатанной подробностью главного не берём.
+        detail = str(event.get("detail") or "").strip().rstrip(".")
+        if detail and detail != str(main.get("detail") or "").strip().rstrip("."):
+            causes.append(detail)
+        # СМЫСЛОВАЯ часть свёрнутого события — самое ценное, что в нём было
+        # («покупка просадок снова в силе», историческая статистика режима).
+        # Терять её вместе с отдельным сообщением нельзя: ради неё событие и есть.
+        meaning = str(event.get("meaning") or "").strip()
+        main_meaning = str(main.get("meaning") or "").strip()
+        # Не только дословный дубль: две строки «Так было раньше: …» подряд с разными
+        # числами читаются как противоречие, хотя описывают один и тот же режим.
+        same_opening = bool(meaning and main_meaning
+                            and meaning[:20] == main_meaning[:20])
+        if meaning and meaning != main_meaning and not same_opening:
+            causes.append(meaning)
+    main["causes"] = causes[:CAUSES_MAX]
+    main["severity"] = max([main.get("severity", "info")]
+                           + [e.get("severity", "info") for e in folded],
+                           key=lambda s: SEVERITY_RANK.get(s, 0))
+    # Ключи свёрнутых событий переезжают в главное: дедуп телеграма и лента хаба
+    # работают по ключу, и без этого повтор из очереди прислал бы их заново
+    # по отдельности.
+    main["merged"] = [e["key"] for e in folded]
+    main["text"] = wording.plain_text(main)
+    keep = {id(e) for e in folded}
+    return [e for e in events if id(e) not in keep]
+
+
+def detect(payload, state, now=None, merge=True):
+    """Все переходы этого прогона. state мутируется (гистерезис знака ядра).
+
+    `merge=False` отдаёт СЫРОЙ выход правил, без слияния семейства режима. Нужен
+    проверкам, которые обходят все виды событий: после слияния часть видов в одном
+    прогоне не появляется по построению, и «вид недостижим» стало бы неотличимо от
+    «правило сломалось».
+    """
     now = now or datetime.now(timezone.utc)
     prev = state.get("last") or {}
     events = []
@@ -521,7 +616,7 @@ def detect(payload, state, now=None):
     events += _health(payload, prev, now)
     events += _health_review(payload, prev, now)
     events += _core_missing(payload, prev, now)
-    return events
+    return merge_regime(events) if merge else events
 
 
 # ------------------------------------------------------------------ доставка
