@@ -34,7 +34,7 @@
 // CRLF — хэш от CRLF-версии не совпадёт с тем, что увидит браузер. Пересчитывать при
 // любой правке того скрипта; расхождение ловит шаг «CSP: хэш инлайн-скрипта» в CI и
 // печатает готовую строку на замену.
-const THEME_SCRIPT_HASH = "sha256-GJTqWX+PU6ltVMlHERYbEnP7O5cej9q3eu3PaZC33bk=";
+const THEME_SCRIPT_HASH = "sha256-PA8O/+/oTkckcd/QPa19vldLqOXpYDStFgytBGbPYIg=";
 
 // 'unsafe-inline' в style-src — вынужденно и осознанно: web/charts.js ставит атрибут
 // style через setAttribute в шести местах (отступы карточек и сетка), и без него
