@@ -209,6 +209,26 @@ class TestBadAnswers(CommentaryCase):
             got = self.mod.comments(self.events(), self.panel(), log=self.log.append)
         self.assertIn("ОФЗ", got[0])
 
+    def test_метка_блока_без_новой_строки(self):
+        """ОПЛАЧЕНО ЖИВЫМ ОТВЕТОМ 14.08.2026: метка пришла склеенной с текстом.
+
+        «…построенную на экспортно-импортных равновесиях.===1===\nСтавка…» —
+        строгая регулярка такую метку не видела вовсе. Разбор возвращал ОДИН блок:
+        комментарий второго события утекал хвостом в первое (читатель видел
+        «===1===» прямо в сообщении), а второе оставалось без разбора совсем.
+        """
+        glued = ("===0===\nКурс ушёл слабее зоны — отклонение −6,7%."
+                 "===1===\nСтавка выросла до 14,8%.")
+        got = self.mod.parse(glued, 2)
+        self.assertEqual(got, ["Курс ушёл слабее зоны — отклонение −6,7%.",
+                               "Ставка выросла до 14,8%."])
+        for text in got:
+            self.assertNotIn("===", text, "метка утекла в текст сообщения")
+
+    def test_чистый_формат_не_сломан(self):
+        got = self.mod.parse("===0===\nПервый.\n===1===\nВторой.", 2)
+        self.assertEqual(got, ["Первый.", "Второй."])
+
     def test_unparsable_answer_moves_to_the_next_model(self):
         with self._urlopen(chat("просто текст без разметки"), chat(ANSWER)):
             got = self.mod.comments(self.events(), self.panel(), log=self.log.append)
