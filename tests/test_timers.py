@@ -52,6 +52,31 @@ class TimerCase(unittest.TestCase):
         # Закрывающий такт в полночь по Москве — отдельной строкой.
         self.assertTrue(any(l.startswith("Mon..Fri *-*-* 21:00:00") for l in lines))
 
+    def test_ограничитель_стартов_вмещает_плановые_такты(self):
+        """systemd считает ВСЕ старты, включая приходящие от таймера, а не одни повторы.
+
+        ОПЛАЧЕНО ПРОДОМ: у витринного такта стояло `StartLimitBurst=2` на окно 900 с —
+        верно для прежнего шага 15 минут и неверно для нынешних 5. В окне лежит ТРИ
+        плановых такта, третий отбивался с «Start request repeated too quickly».
+        За 13.08.2026 так молча пропало 73 такта из 169, включая закрывающий 21:00 UTC
+        (00:00 МСК): его каждый день съедали 20:50 и 20:55. Юнит при этом не падает,
+        прогона просто нет, а витрина стоит с прошлыми числами и «ok» у всех
+        источников — отказ, который сам себя прячет.
+        """
+        cs = need(self, "ops.check_schedule", "start_limit_problems")
+        sched = need(self, "pipeline.lib.schedule", "starts_of_day", "max_starts_in_window")
+        self.assertEqual(cs.start_limit_problems(OPS), [])
+
+        # Счёт на настоящем таймере: 169 срабатываний в сутки, по три в четверть часа.
+        starts = sched.starts_of_day(calendars("moex-radar-intraday.timer"))
+        self.assertEqual(len(starts), 169, "плотность витринного такта изменилась")
+        self.assertEqual(sched.max_starts_in_window(starts, 15), 3)
+
+        # И сам детектор: на прежнем значении он обязан кричать.
+        burst = int(re.search(r"^StartLimitBurst=(\d+)",
+                              unit_text("moex-radar-intraday.service"), re.M).group(1))
+        self.assertGreaterEqual(burst, 3, "ограничитель снова душит плановый такт")
+
     def test_витринный_такт_не_доигрывается_после_простоя(self):
         self.assertIn("Persistent=false", unit_text("moex-radar-intraday.timer"))
 

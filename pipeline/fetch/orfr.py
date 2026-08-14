@@ -62,6 +62,11 @@ except ImportError:
 _UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
        "Accept-Language": "ru,en;q=0.8"}
 
+try:
+    from ..lib import xlsx
+except ImportError:  # запуск из каталога pipeline/
+    from lib import xlsx
+
 SERIES_ID = "orfr_flows"
 INDEX_URL = "https://www.cbr.ru/analytics/finstab/orfr/"
 BASE = "https://www.cbr.ru"
@@ -633,6 +638,156 @@ def _period_from_name(url):
     return "%04d-%02d" % (int(year), int(month))
 
 
+# ------------------------------------------------- приложение-таблица (с 03.2026)
+
+# ЦБ перевёл приложение к обзору из PDF в таблицу: последний PDF — февральский
+# (ORFR_2026-2.pdf), дальше на странице только .xls/.xlsx. Пока читателя таблиц не
+# было, latest_pdf() честно брал «самый свежий PDF» и потому навсегда застрял на
+# феврале: fetched_at обновлялся каждый месяц, asof стоял '2026-02', а живые числа
+# человек переносил руками в seed/orfr_flows.csv. Отказ, который выглядит исправной
+# работой, — ровно тот класс, ради которого в проекте заведён check_schedule.py.
+SHEET_PARTICIPANTS = "РА По участникам"
+
+# Колонка ищется ПО ЗАГОЛОВКУ, а не по номеру: порядок колонок у ЦБ уже менялся
+# между выпусками, а молчаливая перестановка здесь означает, что физлицам
+# припишут поток нерезидентов.
+COLUMN_TITLES = {
+    "физические лица": "fiz",
+    "доверительное управление": "nfo_du",
+    "нфо": "nfo_own",
+    "сзко": "szko",
+    "прочие банки": "other_banks",
+    "нерезиденты": "nonres",
+}
+
+_MONTH_CELL = {"январ": 1, "феврал": 2, "март": 3, "апрел": 4, "ма": 5, "июн": 6,
+               "июл": 7, "август": 8, "сентябр": 9, "октябр": 10, "ноябр": 11,
+               "декабр": 12}
+
+
+def _month_from_cell(text):
+    """'Июль' -> 7. Кварталы ('1к') и прочее -> None.
+
+    Месячные строки берём отдельно от квартальных НАМЕРЕННО: в квартальных лежат
+    СРЕДНЕМЕСЯЧНЫЕ значения за квартал (так и подписан лист), и подмешать их в
+    месячный ряд значило бы записать среднее за три месяца как факт одного.
+    """
+    low = str(text or "").strip().lower()
+    if not low or low[0].isdigit():
+        return None
+    for stem, num in _MONTH_CELL.items():
+        if low.startswith(stem):
+            return num
+    return None
+
+
+def latest_workbook(html):
+    """HTML страницы обзора -> (URL, период 'YYYY-MM') самой свежей таблицы .xlsx."""
+    best = None
+    for href in re.findall(r'href="([^"]+\.xlsx)"', html, re.I):
+        if "orfr" not in href.lower():
+            continue
+        period = _period_from_name(href)
+        if not period:
+            continue
+        if best is None or period > best[1]:
+            best = (href if href.startswith("http") else BASE + href, period)
+    return best if best else (None, None)
+
+
+def parse_workbook(data, period):
+    """Байты .xlsx -> ({'YYYY-MM': {категория: млрд руб}}, замечания).
+
+    Берём только строки, подписанные МЕСЯЦЕМ. Год у ЦБ стоит одной ячейкой на весь
+    блок (объединённая ячейка), в остальных строках он пуст — тянем последний
+    увиденный. Если года нет вовсе, месяц относим к году самого выпуска.
+    """
+    book = xlsx.open_bytes(data)
+    rows = book.rows(SHEET_PARTICIPANTS)
+    header, head_at = None, None
+    for i, row in enumerate(rows):
+        low = [str(c or "").strip().lower() for c in row]
+        if "физические лица" in low:
+            header, head_at = low, i
+            break
+    if header is None:
+        raise xlsx.XlsxError("на листе %r не нашлось шапки с категориями"
+                             % SHEET_PARTICIPANTS)
+
+    columns = {}
+    for idx, title in enumerate(header):
+        key = COLUMN_TITLES.get(title)
+        if key and key not in columns:
+            columns[key] = idx
+    missing = [c for c in CATEGORIES if c not in columns]
+    if missing:
+        raise xlsx.XlsxError("в шапке нет колонок: %s" % ", ".join(missing))
+
+    fallback_year = int(period[:4])
+    out, notes, year = {}, [], None
+    for row in rows[head_at + 1:]:
+        if not row:
+            continue
+        if row[0] is not None and str(row[0]).strip():
+            try:
+                year = int(float(row[0]))
+            except (TypeError, ValueError):
+                pass
+        label = row[1] if len(row) > 1 else None
+        month = _month_from_cell(label)
+        if month is None:
+            continue
+        values = {}
+        for cat, idx in columns.items():
+            raw = row[idx] if idx < len(row) else None
+            if isinstance(raw, (int, float)):
+                values[cat] = round(float(raw), 2)
+        if len(values) < 2:
+            notes.append("строка %r без чисел" % label)
+            continue
+        out["%04d-%02d" % (year or fallback_year, month)] = values
+
+    if not out:
+        raise xlsx.XlsxError("на листе нет ни одной строки, подписанной месяцем")
+    if period not in out:
+        # Выпуск ORFR_2026-7 обязан содержать строку июля. Если её нет — вёрстка
+        # изменилась сильнее, чем мы понимаем, и угадывать нельзя.
+        notes.append("в таблице нет строки за %s (есть: %s)"
+                     % (period, ", ".join(sorted(out))))
+    return out, notes
+
+
+def flows_from_workbook(url=None):
+    """Свежая таблица ЦБ -> ряды. -> (points, meta, период) либо (None, причина, None)."""
+    wb_url, period = url, (_period_from_name(url) if url else None)
+    if wb_url is None:
+        try:
+            html = get_text(INDEX_URL, headers=_UA)
+        except FetchError as exc:
+            return None, "страница обзора не открылась: %s" % exc, None
+        wb_url, period = latest_workbook(html)
+        if not wb_url:
+            return None, "на странице обзора нет таблиц .xlsx", None
+    if not period:
+        return None, "период таблицы не определился по имени файла", None
+    try:
+        data = get_bytes(wb_url, headers=_UA, timeout=120)
+    except FetchError as exc:
+        return None, "таблица не скачалась: %s" % exc, None
+    try:
+        months, notes = parse_workbook(data, period)
+    except (xlsx.XlsxError, ValueError, KeyError) as exc:
+        return None, "таблица не разобралась: %s" % exc, None
+
+    points = {_month_end(m): dict(v) for m, v in months.items()}
+    meta = _meta("ok", wb_url,
+                 "таблица ЦБ, месяцев: %d%s"
+                 % (len(points), ("; " + "; ".join(notes)) if notes else ""),
+                 {"asof": period, "selfcheck": _selfcheck(period, months.get(period, {})),
+                  "months": sorted(months), "format": "xlsx"})
+    return points, meta, period
+
+
 def latest_pdf(html):
     """HTML страницы обзора -> (абсолютный URL, период 'YYYY-MM') самого свежего PDF."""
     best = None
@@ -702,38 +857,58 @@ def _flatten(points, meta):
 def flows(url=None):
     """-> [("orfr_flows_<категория>", {последний день месяца: млрд руб}, meta), …].
 
+    Порядок источников: ТАБЛИЦА (.xlsx) → PDF → inputs/orfr.yml. Таблица первая не
+    из любви к формату, а потому что она единственная живая: PDF-приложение ЦБ
+    кончилось на феврале 2026, и «самый свежий PDF» с тех пор означает «февраль
+    навсегда». Проверено на выпуске ORFR_2026-7: все шесть категорий сошлись с
+    числами, которые до этого переносили в seed/orfr_flows.csv руками.
+
     Статусы: ok (разобрали ≥2 категории), manual_needed (взяли inputs/orfr.yml),
     error (нет ни того, ни другого). Исключений наружу не кидаем: провал одного
     источника не валит прогон (CONTRACT.md §0).
     """
-    pdf_url, period = url, (_period_from_name(url) if url else None)
+    if url is None or url.lower().endswith(".xlsx"):
+        points, meta_or_why, period = flows_from_workbook(url)
+        if points:
+            return _flatten(points, meta_or_why)
+        table_why = meta_or_why
+    else:
+        table_why = "запрошен конкретный PDF"
+
+    def _fallback(reason, where):
+        # Причина отказа ТАБЛИЦЫ едет в каждый откат. Иначе в журнале осталось бы
+        # «PDF не разобрался», и никто бы не узнал, что живой источник — таблица —
+        # вообще не был прочитан: ровно так полгода и держалось «asof 2026-02».
+        return _manual_fallback("таблица: %s; %s" % (table_why, reason), where)
+
+    pdf_url, period = (None if (url or "").lower().endswith(".xlsx") else url), None
+    period = _period_from_name(pdf_url) if pdf_url else None
     if pdf_url is None:
         try:
             html = get_text(INDEX_URL, headers=_UA)
         except FetchError as exc:
-            return _manual_fallback("страница обзора не открылась: %s" % exc, INDEX_URL)
+            return _fallback("страница обзора не открылась: %s" % exc, INDEX_URL)
         pdf_url, period = latest_pdf(html)
         if not pdf_url:
-            return _manual_fallback("на странице обзора не нашлось ссылок на PDF",
-                                    INDEX_URL)
+            return _fallback("ссылок на PDF тоже нет", INDEX_URL)
     try:
         data = _get_pdf(pdf_url)
     except FetchError as exc:
-        return _manual_fallback(str(exc), pdf_url)
+        return _fallback(str(exc), pdf_url)
     try:
         text = pdf_text(data)
     except (zlib.error, ValueError, UnicodeError) as exc:
-        return _manual_fallback("PDF не разобрался: %s" % exc, pdf_url)
+        return _fallback("PDF не разобрался: %s" % exc, pdf_url)
     if len(text) < 2000:
-        return _manual_fallback("в PDF нет текстового слоя (%d симв.)" % len(text),
+        return _fallback("в PDF нет текстового слоя (%d симв.)" % len(text),
                                 pdf_url)
     found, audit = parse_flows(text, period)
     if len(found) < 2:
-        return _manual_fallback("в тексте нашлось %d категорий из %d"
+        return _fallback("в тексте нашлось %d категорий из %d"
                                 % (len(found), len(CATEGORIES)), pdf_url)
     key = _month_end(period) if period else None
     if key is None:
-        return _manual_fallback("не определился период выпуска", pdf_url)
+        return _fallback("не определился период выпуска", pdf_url)
     check = _selfcheck(period, found)
     meta = _meta("ok", pdf_url, "разобрано категорий: %d" % len(found),
                  {"asof": period, "selfcheck": check, "candidates": audit[:20],

@@ -15,7 +15,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from pipeline.lib import constants, lease, r2
+from pipeline.lib import constants, lease, r2, schedule
 
 MAX_BYTES = 250 * 1024
 DATA_KEY = "data.json"
@@ -88,6 +88,15 @@ def build_verdict(core, states):
     return verdict
 
 
+def _next_publish():
+    """Когда витрину ждёт следующая публикация. None — расписание не прочиталось."""
+    try:
+        moment = schedule.next_publish_at()
+    except Exception:  # noqa: BLE001 — подсказка не имеет права ронять публикацию
+        return None
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ") if moment else None
+
+
 def build_payload(core=None, states=None, monitors=None, sources=None, events=None,
                   mode="daily", asof=None, generated_at=None, quotes=None):
     payload = {
@@ -96,6 +105,16 @@ def build_payload(core=None, states=None, monitors=None, sources=None, events=No
         "run_mode": mode,
         "asof_trading_day": asof,
         "stale_after_minutes": constants.STALE_AFTER_MINUTES,
+        # ОБЕЩАНИЕ, а не возраст: «очередная публикация ждётся не позже этого
+        # момента». Витрина сравнивает часы читателя с ним, а не с плоской нормой,
+        # потому что конвейер по расписанию МОЛЧИТ десять часов в сутки (последний
+        # такт 21:00 UTC, первый следующий 07:00). Плоские 150 минут превращали эту
+        # тишину в ежедневную семичасовую тревогу «данные устарели» — при том что
+        # числа были свежайшие из возможных: биржа закрыта. Обещание же ломается
+        # ровно тогда, когда конвейер действительно встал: мёртвый прогон нового
+        # обещания не выпустит, и старое протухнет само.
+        "next_publish_at": _next_publish(),
+        "stale_grace_minutes": constants.STALE_GRACE_MINUTES,
         "verdict": build_verdict(core, states),
         "core": core or {},
         "states": states or {},

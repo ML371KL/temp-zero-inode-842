@@ -882,12 +882,38 @@
       ', ' + p2(msk.getUTCHours()) + ':' + p2(msk.getUTCMinutes()) + ' МСК';
   }
 
+  /** Опоздала ли публикация против СВОЕГО расписания.
+   *  -> {late: bool, byMin: число, dueAt: Date|null} либо null, если судить не по чему.
+   *
+   *  Конвейер молчит по расписанию десять часов в сутки: последний такт 21:00 UTC
+   *  (00:00 МСК), первый следующий — 07:00 (10:00 МСК). Плоская норма в 150 минут
+   *  превращала эту тишину в ежедневную семичасовую тревогу «данные устарели» —
+   *  при том что числа были свежайшие из возможных: биржа закрыта, меняться нечему.
+   *  Тревога, горящая треть суток, перестаёт что-либо значить.
+   *
+   *  Поэтому сравниваем не с возрастом, а с обещанием витрины (`next_publish_at`):
+   *  мёртвый конвейер нового обещания не выпустит, и старое протухнет само.
+   *  Без обещания (старая витрина, нечитаемое расписание) — прежняя плоская норма. */
+  function publishLateness(d) {
+    var due = Date.parse(d.next_publish_at || '');
+    var grace = isNum(d.stale_grace_minutes) ? d.stale_grace_minutes : 30;
+    if (isFinite(due)) {
+      var byMin = (Date.now() - due) / 60000;
+      return { late: byMin > grace, byMin: byMin, dueAt: new Date(due) };
+    }
+    var age = ageMinutes(d.generated_at);
+    var limit = isNum(d.stale_after_minutes) ? d.stale_after_minutes : 150;
+    if (!isNum(age)) return null;
+    return { late: age > limit, byMin: age - limit, dueAt: null };
+  }
+
   function renderBanners(d) {
     var box = document.getElementById('banners');
     box.innerHTML = '';
     var age = ageMinutes(d.generated_at);
     var limit = isNum(d.stale_after_minutes) ? d.stale_after_minutes : 150;
-    if (isNum(age) && age > limit) {
+    var late = publishLateness(d);
+    if (late && late.late) {
       // Норму печатаем в той же форме, что и возраст. Округление нормы до часов
       // делало баннер самоопровергающимся: при норме 150 минут он сообщал «при
       // норме 3 ч», и весь диапазон 150–180 минут тревога висела при возрасте
@@ -896,8 +922,12 @@
         ico('warn', 'banner__ico'),
         h('div', null, [
           h('b', { text: 'Данные устарели. ' }),
-          h('span', { text: 'Публикация была ' + hhmm(age) + ' назад при норме ' + hhmm(limit) +
-            '. Числа на экране — последние успешные, а не сегодняшние.' })
+          h('span', { text: late.dueAt
+            ? ('Очередная публикация ждалась в ' + fmtStamp(late.dueAt.toISOString()) +
+               ', её нет уже ' + hhmm(late.byMin) + '. Последняя была ' + hhmm(age) +
+               ' назад — числа на экране последние успешные, а не сегодняшние.')
+            : ('Публикация была ' + hhmm(age) + ' назад при норме ' + hhmm(limit) +
+               '. Числа на экране — последние успешные, а не сегодняшние.') })
         ])
       ]));
     }
@@ -932,8 +962,12 @@
       var body = age < 1 ? 'только что'
         : (age < 60 ? Math.round(age) + ' мин назад' : Math.floor(age / 60) + ' ч назад');
       ageEl.textContent = terse ? body : 'обновлено ' + body;
-      ageEl.title = 'Публикация витрины: ' + fmtStamp(d.generated_at);
-      ageEl.className = 'age' + (age > limit ? ' age--stale' : '');
+      // Подсказка называет и то, когда ждём следующую: без неё «обновлено 5 ч назад»
+      // ночью выглядит поломкой, хотя это расписание.
+      var late = publishLateness(d);
+      ageEl.title = 'Публикация витрины: ' + fmtStamp(d.generated_at) +
+        (late && late.dueAt ? '. Следующая ждётся ' + fmtStamp(late.dueAt.toISOString()) : '');
+      ageEl.className = 'age' + (late && late.late ? ' age--stale' : '');
     }
     var meta = document.getElementById('foot-meta');
     // Машинная метка «2026-08-11T14:04:42Z» среди дат вида 11.08.2026 читалась как
