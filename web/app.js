@@ -120,11 +120,10 @@
   var themeState = 'auto';
 
   function currentTheme() {
-    // ?theme=light|dark задаёт тему для конкретной ссылки: удобно и для того,
-    // чтобы поделиться панелью в нужном виде, и для съёмки страницы роботом.
-    var q = (location.search.match(/[?&]theme=(light|dark|auto)/) || [])[1];
-    if (q) return q;
-    try { return localStorage.getItem('moex-radar-theme') || 'auto'; } catch (e) { return 'auto'; }
+    // Разбор темы живёт в раннем скрипте index.html — он ставит её до первой
+    // отрисовки, и вторая копия правила однажды разошлась бы с первой. Порядок там
+    // такой: тема из адреса, затем вечернее правило, затем сохранённый выбор.
+    return window.__theme.resolve();
   }
   function applyTheme(t, persist) {
     themeState = t;
@@ -132,7 +131,9 @@
     // В хранилище пишем только собственный выбор посетителя. Тема из адреса —
     // свойство ссылки, а не человека: раньше она затирала сохранённый выбор
     // навсегда, и получатель ссылки терял свою тему на всех вкладках.
-    if (persist) { try { localStorage.setItem('moex-radar-theme', t); } catch (e) { /* приватный режим */ } }
+    // Вечером выбор живёт до закрытия вкладки и не трогает постоянную память: иначе
+    // один вечер сделал бы тёмную «последней темой» навсегда.
+    if (persist) window.__theme.remember(t);
     var label = document.getElementById('theme-label');
     if (label) label.textContent = THEME_LABEL[t];
     var btn = document.getElementById('theme-toggle');

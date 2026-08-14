@@ -11,10 +11,39 @@
 <script>
   // Тему ставим ДО первой отрисовки: иначе на секунду мигает светлая, пока грузится
   // app.js, и это заметнее всего ночью — ровно тогда, когда панель и открывают.
-  try {
-    var t = localStorage.getItem('moex-radar-theme');
-    if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
-  } catch (e) { /* приватный режим — молча остаёмся на системной теме */ }
+  //
+  // С 20:00 до 07:00 по часам устройства витрина открывается тёмной, что бы ни было
+  // выбрано раньше, а постоянный выбор при этом НЕ затирается: утром вернётся он.
+  // Переключение в эти часы живёт в sessionStorage — до закрытия вкладки.
+  // Тема из адреса (?theme=…) сильнее всего: это свойство ссылки, а не человека и
+  // не часа, и делиться витриной в нужном виде надо уметь и вечером.
+  (function () {
+    var KEY = 'moex-radar-theme', NIGHT_KEY = 'moex-radar-theme-tonight';
+    var NIGHT_FROM = 20, NIGHT_TO = 7;
+    function isNight(d) { var h = (d || new Date()).getHours(); return h >= NIGHT_FROM || h < NIGHT_TO; }
+    function read(store, key) {
+      try { var v = window[store].getItem(key); return v === 'light' || v === 'dark' || v === 'auto' ? v : null; }
+      catch (e) { return null; }
+    }
+    function fromLink() { return (location.search.match(/[?&]theme=(light|dark|auto)/) || [])[1] || null; }
+    function stored() { return read('localStorage', KEY); }
+    function resolve() {
+      var link = fromLink();
+      if (link) return link;
+      if (isNight()) return read('sessionStorage', NIGHT_KEY) || 'dark';
+      return stored() || 'auto';
+    }
+    function remember(theme) {
+      try {
+        if (isNight()) window.sessionStorage.setItem(NIGHT_KEY, theme);
+        else window.localStorage.setItem(KEY, theme);
+      } catch (e) { /* приватный режим */ }
+    }
+    var initial = resolve();
+    document.documentElement.dataset.theme = (initial === 'auto' ? '' : initial);
+    window.__theme = { isNight: isNight, stored: stored, resolve: resolve, remember: remember,
+                       fromLink: fromLink, NIGHT_FROM: NIGHT_FROM, NIGHT_TO: NIGHT_TO };
+  })();
 </script>
 </head>
 <body>
