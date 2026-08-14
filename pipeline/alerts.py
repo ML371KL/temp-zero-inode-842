@@ -18,7 +18,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from pipeline.lib import commentary, constants, nexus, telegram
+from pipeline.lib import commentary, constants, nexus, telegram, wording
 
 STATE_NAME = "alerts_state.json"
 FEED_LIMIT = 20          # столько последних событий уезжает в data.json
@@ -90,9 +90,12 @@ def _iso(dt=None):
 
 
 def _num(v, d=1, plus=False):
-    if v is None:
-        return "н/д"
-    return f"{v:{'+' if plus else ''},.{d}f}".replace(",", " ")
+    """Число так, как его пишет сама панель и соседние 837/838: запятой."""
+    return wording.num(v, d, plus)
+
+
+def _pct(v, d=1, plus=False):
+    return wording.pct(v, d, plus)
 
 
 def _mons(payload):
@@ -103,9 +106,24 @@ def _mp(mons, tid, key, default=None):
     return ((mons.get(tid) or {}).get("payload") or {}).get(key, default)
 
 
-def _ev(key, kind, text, severity="info", now=None):
-    return {"key": key, "kind": kind, "severity": severity, "text": text.strip(),
-            "ts": _iso(now)}
+def _ev(key, kind, title, severity="info", now=None, **parts):
+    """Событие как СТРУКТУРА, а не готовая строка.
+
+    До 14.08.2026 правило сразу склеивало текст, и один и тот же кусок уезжал и в
+    телеграм, и в журнал витрины, и в ленту хаба — а им нужен разный вид: телеграму
+    жирный заголовок и разметка, журналу простая фраза, хабу заголовок отдельной
+    строкой. Отсюда поля: `title` — о чём событие, `before`/`after` — движение,
+    `detail` — подробность, `meaning` — что это значит для читателя. Плоский `text`
+    собирается из них один раз (`lib/wording.plain_text`) и остаётся в контракте §3.
+    """
+    event = {"key": key, "kind": kind, "severity": severity,
+             "title": str(title).strip(), "ts": _iso(now)}
+    for name in ("before", "after", "moves", "detail", "meaning",
+                 "fact", "where"):
+        if parts.get(name):
+            event[name] = parts[name]
+    event["text"] = wording.plain_text(event)
+    return event
 
 
 def snapshot(payload, now=None):
@@ -132,6 +150,16 @@ def snapshot(payload, now=None):
 
 
 # -------------------------------------------------------------------- правила
+
+def _core_label(value):
+    """Словесная подпись значения оценки — та же лестница, что на панели."""
+    if not isinstance(value, (int, float)):
+        return ""
+    for low, high, word in constants.CORE_LABELS:
+        if low <= value < high:
+            return word
+    return ""
+
 
 def _core_flip(payload, prev, state, now):
     """Разворот ядра с гистерезисом: сообщаем, только когда |value| ушёл за порог.
@@ -161,13 +189,19 @@ def _core_flip(payload, prev, state, now):
         return []
     if not isinstance(prev_value, (int, float)):
         prev_value = prev.get("core_value")  # состояние от старой версии без core_value_alerted
-    from_txt = _num(prev_value, 2, True)
-    since = core.get("sign_since")
-    tail = f" Новый знак с {since}." if since else ""
     label = (payload.get("verdict") or {}).get("core_label") or ""
+    was_label = _core_label(prev_value)
+    since = core.get("sign_since")
     return [_ev(f"core_flip:{sign}:{payload.get('asof_trading_day')}", "core_flip",
-                f"Ядро развернулось: {_num(val, 2, True)} ({label}), было {from_txt}.{tail}",
-                now=now)]
+                "Оценка рынка на месяц вперёд развернулась "
+                + ("вверх" if sign > 0 else "вниз"),
+                now=now,
+                before=f"{_num(prev_value, 2, True)}{f' ({was_label})' if was_label else ''}",
+                after=f"{_num(val, 2, True)}{f' ({_core_label(val)})' if _core_label(val) else ''}",
+                detail=(f"Знак держится с {wording.ru_day(since)}." if since else ""),
+                meaning="Шкала — от −3 до +3: чем дальше от нуля, тем увереннее "
+                        "перевес в эту сторону. Это оценка направления на месяц, "
+                        "а не обещание доходности.")]
 
 
 def _cell_change(payload, prev, now):
@@ -177,14 +211,15 @@ def _cell_change(payload, prev, now):
     if not cell or not old or cell == old:
         return []
     stats = verdict.get("cell_stats") or {}
-    label = verdict.get("cell_label") or "без статистики"
-    nums = ""
-    if stats:
-        nums = (f", исторически {_num(stats.get('mean_fwd1m_pct'), 1, True)}%/мес "
-                f"(n={stats.get('n')}, hit {stats.get('hit')})")
+    label = verdict.get("cell_label") or ""
     sev = "warn" if (stats.get("mean_fwd1m_pct") or 0) < 0 else "info"
     return [_ev(f"cell:{payload.get('asof_trading_day')}:{cell}", "state_cell_change",
-                f"Смена ячейки: {old} → {cell} ({label}){nums}.", sev, now)]
+                "Режим рынка сменился"
+                + (f": {wording.regime_name(label)}" if wording.regime_name(label) else ""),
+                sev, now,
+                before=wording.cell_words(old),
+                after=wording.cell_words(cell),
+                meaning=wording.cell_plain(stats))]
 
 
 def _bond_flag(payload, prev, now):
@@ -195,19 +230,25 @@ def _bond_flag(payload, prev, now):
     dist = ""
     for row in (payload.get("states") or {}).get("distances") or []:
         if row.get("id") == "bond" and row.get("text"):
-            dist = f" {row['text']}."
+            dist = wording.sentence(wording.ru_decimals(row["text"]))
             break
     asof = payload.get("asof_trading_day")
     if new == 1:
-        # Разделитель в жёстких строках — ТОЧКА, как в _num и monitors._n: иначе в
-        # одном прогоне рядом висят «+1.4%/мес (hit 0.6)» и «+1,4%/мес (hit 0,64)»,
-        # и читатель принимает разные величины за одну и ту же с опечаткой.
         return [_ev(f"bond_on:{asof}", "bond_flag_on",
-                    f"Облигационный флаг ВКЛЮЧЁН.{dist} Покупка просадок отключается: "
-                    f"при долговом стрессе dd<−10% давала −0.55%/мес.", "warn", now)]
+                    "Долговой рынок вошёл в стресс", "warn", now,
+                    before="ОФЗ спокойны", after="ОФЗ под давлением",
+                    detail=dist,
+                    meaning="Индекс гособлигаций RGBI ушёл заметно ниже своего "
+                            "годового максимума. Пока так, покупка просадок в акциях "
+                            "не работает: на истории в такие месяцы она приносила "
+                            "убыток, а не прибыль.")]
     return [_ev(f"bond_off:{asof}", "bond_flag_off",
-                f"Облигационный флаг снят.{dist} Покупка просадок снова в силе: "
-                f"+1.4%/мес (hit 0.64) при спокойном RGBI.", "info", now)]
+                "Долговой рынок вышел из стресса", "info", now,
+                before="ОФЗ под давлением", after="ОФЗ спокойны",
+                detail=dist,
+                meaning="Гособлигации отыграли просадку. Покупка просадок в акциях "
+                        "снова имеет смысл: на спокойном долге такие месяцы в "
+                        "среднем закрывались в плюс примерно в двух случаях из трёх.")]
 
 
 def _buy_window(payload, prev, now):
@@ -223,11 +264,17 @@ def _buy_window(payload, prev, now):
     if prev.get("vol") == 1 and prev.get("bond") == 0:
         return []
     trend = cur.get("trend")
+    prev_code = "%s|%s|%s" % ("bull" if prev.get("trend") == 1 else "bear",
+                             "stress" if prev.get("vol") == 1 else "calm",
+                             "stress" if prev.get("bond") == 1 else "ok")
     stats = constants.CELL_STATS.get((trend, 1, 0)) or {}
-    nums = (f" Ячейка исторически {_num(stats.get('mean_fwd1m_pct'), 1, True)}%/мес "
-            f"(n={stats.get('n')}).") if stats else ""
     return [_ev(f"buy_window:{payload.get('asof_trading_day')}", "buy_window_open",
-                f"Окно входа: шип волатильности при спокойных ОФЗ.{nums}", "info", now)]
+                "Окно входа: паника в акциях при спокойном долге", "info", now,
+                before=wording.cell_words(prev_code), after=wording.cell_words(
+                    f"{'bull' if trend == 1 else 'bear'}|stress|ok"),
+                detail="Акции трясёт, а гособлигации держатся — редкое сочетание: "
+                       "продают из-за страха, а не из-за проблем с деньгами в системе.",
+                meaning=wording.cell_plain(stats))]
 
 
 def _cb(payload, prev, now):
@@ -238,22 +285,36 @@ def _cb(payload, prev, now):
     days, nxt = pl.get("days_left"), pl.get("next_meeting")
     key_rate, cons = pl.get("key_rate"), pl.get("consensus")
     if nxt and days == 1:
+        priced = wording.ru_decimals(pl.get("priced_text") or "")
+        waited = (f", аналитики ждут {_pct(cons, 2)}"
+                  if isinstance(cons, (int, float))
+                  else ", консенсус аналитиков в данные не внесён")
         out.append(_ev(f"cb_reminder:{nxt}", "cb_reminder",
-                       f"Завтра заседание ЦБ ({nxt}). Ключ {_num(key_rate, 2)}%, консенсус "
-                       f"{_num(cons, 2)}%. {pl.get('priced_text') or ''}", "info", now))
+                       "Завтра заседание Банка России", "info", now,
+                       detail=f"Сейчас ключевая ставка {_pct(key_rate, 2)}{waited}.",
+                       meaning=wording.sentence(priced)))
     old_rate = prev.get("key_rate")
     if isinstance(key_rate, (int, float)) and isinstance(old_rate, (int, float)) \
             and abs(key_rate - old_rate) > 1e-9:
         delta_bp = round((key_rate - old_rate) * 100)
-        if isinstance(cons, (int, float)):
-            surprise_bp = round((key_rate - cons) * 100)
-            verdict = ("в линию с консенсусом" if surprise_bp == 0
-                       else f"СЮРПРИЗ {_num(surprise_bp, 0, True)} б.п. к консенсусу {_num(cons, 2)}%")
+        surprise = round((key_rate - cons) * 100) if isinstance(cons, (int, float)) else None
+        if surprise is None:
+            meaning = ("Консенсус аналитиков в данные не внесён — сказать, совпало ли "
+                       "решение с ожиданиями, нечем.")
+        elif surprise == 0:
+            meaning = "Решение совпало с тем, чего ждали аналитики."
         else:
-            verdict = "консенсуса в данных нет"
-        out.append(_ev(f"cb_decision:{payload.get('asof_trading_day')}:{key_rate}", "cb_decision",
-                       f"ЦБ: ключевая {_num(key_rate, 2)}% ({_num(delta_bp, 0, True)} б.п.) — "
-                       f"{verdict}.", "warn" if "СЮРПРИЗ" in verdict else "info", now))
+            meaning = (f"Это на {_num(abs(surprise), 0)} базисных пунктов "
+                       + ("выше" if surprise > 0 else "ниже")
+                       + f" ожиданий аналитиков ({_pct(cons, 2)}): рынку придётся "
+                       + "переставлять свои прогнозы.")
+        step = "снизил" if delta_bp < 0 else "повысил"
+        out.append(_ev(f"cb_decision:{payload.get('asof_trading_day')}:{key_rate}",
+                       "cb_decision", f"Банк России {step} ключевую ставку",
+                       "warn" if surprise not in (0, None) else "info", now,
+                       before=_pct(old_rate, 2), after=_pct(key_rate, 2),
+                       detail=f"Шаг {_num(delta_bp, 0, True)} базисных пунктов.",
+                       meaning=meaning))
     return out
 
 
@@ -263,9 +324,14 @@ def _orfr(payload, prev, now):
     if not asof or not prev.get("orfr_asof") or asof == prev.get("orfr_asof"):
         return []
     pl = tile.get("payload") or {}
-    exhaust = (pl.get("seller_exhaustion") or {}).get("text") or ""
+    exhaust = wording.ru_decimals((pl.get("seller_exhaustion") or {}).get("text") or "")
+    head = wording.ru_decimals(tile.get("headline") or "").rstrip(".")
     return [_ev(f"orfr:{asof}", "orfr_published",
-                f"Потоки ОРФР за {asof}: {tile.get('headline')}. {exhaust}.", "info", now)]
+                "Банк России опубликовал, кто покупал и продавал акции", "info", now,
+                detail=(f"{wording.ru_month(asof).capitalize()}: {head}." if head else ""),
+                meaning=(wording.sentence(exhaust) if exhaust else
+                         "Это единственный официальный ответ на вопрос, чьи деньги "
+                         "двигали рынок в прошлом месяце."))]
 
 
 # Тревога об аукционе — про СЕГОДНЯШНИЙ провал. Аукционы идут по средам, четырёх
@@ -301,12 +367,15 @@ def _auction(payload, prev, now):
     # единица, приклеенная к отсутствующему числу (та же ошибка, что уже правили на
     # тайле), поэтому про молчание говорим словами.
     demand = pl.get("demand_bn")
-    tail = (f" при спросе {_num(demand, 1)} млрд" if isinstance(demand, (int, float))
-            else "; спрос не раскрыт")
+    tail = (f", при спросе {_num(demand, 1)} млрд рублей"
+            if isinstance(demand, (int, float)) else "; спрос биржа не раскрывает")
     return [_ev(f"auction_failed:{date_}", "auction_failed",
-                f"Аукцион ОФЗ {date_} провален: размещено {_num(pl.get('placed_bn'), 1)} млрд"
-                f"{tail}. Минфин не даёт премию — давление уходит в длинный конец.",
-                "warn", now)]
+                "Аукцион ОФЗ не состоялся", "warn", now,
+                detail=f"{wording.ru_day(date_)}: размещено "
+                       f"{_num(pl.get('placed_bn'), 1)} млрд рублей{tail}.",
+                meaning="Минфин не захотел занимать дороже и отказался давать премию "
+                        "к рынку. Занимать всё равно придётся — позже и, скорее всего, "
+                        "длинными выпусками: давление переезжает на дальний конец кривой.")]
 
 
 def _deposit(payload, prev, now):
@@ -317,10 +386,19 @@ def _deposit(payload, prev, now):
         return []
     if new - old < DEPOSIT_UPTICK_PP:
         return []
+    spread = pl.get("spread_pp")
+    step = round(new - old, 2)
+    meaning = ""
+    if isinstance(spread, (int, float)):
+        meaning = (f"Вклад теперь даёт на {wording.points(spread)}"
+                   + (" больше" if spread > 0 else " меньше")
+                   + " дивидендной доходности акций. Чем выгоднее вклад, тем дольше "
+                     "деньги не пойдут с депозитов на биржу.")
     return [_ev(f"deposit_uptick:{pl.get('deposit_asof')}", "deposit_uptick",
-                f"Максимальная ставка по вкладам {_num(new, 2)}% "
-                f"({_num(new - old, 2, True)} п.п.). Спред к дивдоходности "
-                f"{_num(pl.get('spread_pp'), 1)} п.п. — ротация в акции отдаляется.", "info", now)]
+                "Банки подняли ставки по вкладам", "info", now,
+                before=_pct(old, 2), after=_pct(new, 2),
+                detail=f"Прибавка {wording.points(step, 2)}.",
+                meaning=meaning)]
 
 
 def _sources(payload, prev, now):
@@ -335,11 +413,18 @@ def _sources(payload, prev, now):
         if old.get(name) in ("stale", "error"):
             continue  # уже сообщали, повторять каждый прогон нельзя
         age = meta.get("lag_min")
-        age_txt = f", возраст {int(age // 60)} ч" if isinstance(age, (int, float)) and age >= 60 \
-            else (f", возраст {int(age)} мин" if isinstance(age, (int, float)) else "")
-        out.append(_ev(f"source_stale:{name}:{payload.get('asof_trading_day')}", "source_stale",
-                       f"Источник {name}: {st}{age_txt}, данные от {meta.get('asof')}. "
-                       f"Панель считает по кэшу.", "warn", now))
+        age_txt = (f" Последний удачный опрос {wording.hours_minutes(age)} назад."
+                   if isinstance(age, (int, float)) else "")
+        word = "не отвечает" if st == "error" else "отдаёт устаревшие данные"
+        out.append(_ev(f"source_stale:{name}:{payload.get('asof_trading_day')}",
+                       "source_stale", f"источник {name} {word}", "warn", now,
+                       fact=f"Данные в панели от "
+                            f"{wording.ru_day(meta.get('asof') or payload.get('asof_trading_day'))}."
+                            + age_txt,
+                       meaning="Панель считает по последним удачным числам и выглядит "
+                               "рабочей — тайлы этого источника помечены жёлтой точкой.",
+                       where=f"Смотреть: journalctl -u moex-radar-daily -n 50 "
+                             f"и раздел «Источники» на панели."))
     return out
 
 
@@ -349,8 +434,14 @@ def _health(payload, prev, now):
     if st != "dead" or prev.get("health") == "dead":
         return []
     return [_ev(f"health_dead:{payload.get('asof_trading_day')}", "health_dead",
-                f"Здоровье ядра: IC за {health.get('n')} мес {_num(health.get('ic_24m'), 2, True)} — "
-                f"статус dead. Композит не использовать до разбора.", "warn", now)]
+                "модель перестала работать на свежей истории", "warn", now,
+                fact=f"Связь оценки с последующим движением рынка за последние "
+                     f"{health.get('n')} {wording.plural(health.get('n'), 'месяц', 'месяца', 'месяцев')}"
+                     f" — {_num(health.get('ic_24m'), 2, True)} при норме выше нуля.",
+                meaning="Пока так, знаку оценки на панели доверять нельзя: она "
+                        "продолжает считаться и выглядит исправной.",
+                where="Смотреть: карточку «Здоровье модели» на панели и "
+                      "docs/ARCHITECTURE.md §7.")]
 
 
 def _health_review(payload, prev, now):
@@ -367,12 +458,18 @@ def _health_review(payload, prev, now):
     health = ((payload.get("core") or {}).get("health") or {})
     if not health.get("review_due") or prev.get("health_review_due"):
         return []
+    months = health.get("below_zero_months")
     return [_ev(f"health_review_due:{health.get('below_since')}", "health_review_due",
-                f"Здоровье ядра ниже нуля {health.get('below_zero_months')} мес подряд "
-                f"(с {health.get('below_since')}), IC {_num(health.get('ic_24m'), 2, True)} — "
-                f"достигнут порог регламента §7 на пересмотр состава. Это повод запустить "
-                f"реколибровку (ops/recalibrate.py), а не менять ноги: второе условие "
-                f"регламента — механизм у кандидата — проверяется человеком.", "warn", now)]
+                "достигнут порог пересмотра модели", "warn", now,
+                fact=f"Связь оценки с рынком держится ниже нуля {months} "
+                     f"{wording.plural(months, 'месяц', 'месяца', 'месяцев')} подряд "
+                     f"(с {wording.ru_month(health.get('below_since'))}), сейчас "
+                     f"{_num(health.get('ic_24m'), 2, True)}.",
+                meaning="Регламент требует пересмотра состава модели — но это работа "
+                        "человека: второе условие, наличие механизма у кандидата, "
+                        "панель проверить не может.",
+                where="Смотреть: отчёт реколибровки в state/recalibration/ "
+                      "и docs/ARCHITECTURE.md §7.")]
 
 
 def _core_missing(payload, prev, now):
@@ -389,11 +486,17 @@ def _core_missing(payload, prev, now):
     lost_cell = not cell and bool(prev.get("cell"))
     if not lost_core and not lost_cell:
         return []
-    what = " и ".join(p for p in ("ядро" if lost_core else "", "вердикт" if lost_cell else "") if p)
-    was = _num(prev.get("core_value"), 2, True) if lost_core else prev.get("cell")
+    what = ("оценку и режим рынка" if (lost_core and lost_cell)
+            else ("оценку рынка" if lost_core else "режим рынка"))
+    was = (_num(prev.get("core_value"), 2, True) if lost_core
+           else wording.cell_words(prev.get("cell")))
     return [_ev(f"core_missing:{payload.get('asof_trading_day')}", "core_missing",
-                f"Витрина потеряла {what}: было {was}, стало «нет данных». "
-                f"Похоже на неполный стор — публиковать такую панель нельзя.", "warn", now)]
+                f"панель потеряла {what}", "warn", now,
+                fact=f"Вчера было {was}, сегодня «нет данных».",
+                meaning="Похоже на неполный набор рядов: публиковать такую панель "
+                        "нельзя, читатель увидит прочерки вместо чисел.",
+                where="Смотреть: journalctl -u moex-radar-daily -n 50 и полноту "
+                      "стора в /var/lib/moex-radar/raw.")]
 
 
 def detect(payload, state, now=None):
@@ -424,12 +527,15 @@ def detect(payload, state, now=None):
 # ------------------------------------------------------------------ доставка
 
 def render(event):
-    prefix = "Внимание. " if event.get("severity") == "warn" else ""
-    body = f"{prefix}{event.get('text', '')}"
-    comment = (event.get("comment") or "").strip()
-    # Комментарий отделён пустой строкой и меткой — той же, что у 837/838, чтобы в
-    # общей ленте хаба разбор выглядел одинаково у всех панелей.
-    return f"{body}\n\n💬 {comment}" if comment else body
+    """Текст для телеграма. Санитарные — в формате общего мостика панелей.
+
+    Слово «Внимание.» перед тревогой убрано намеренно: его роль теперь несёт значок
+    вида события в заголовке, а как ПЕРВОЕ слово сообщения оно съедало место, в
+    котором читатель ищет суть. Ровно по той же причине его нет у 837/838.
+    """
+    if is_ops(event):
+        return wording.render_ops(event)
+    return wording.render_market(event)
 
 
 def dispatch(events, dry_run=False, enabled=True):
@@ -634,20 +740,30 @@ def after_publish(publish_result, dry_run=False, enabled=True, now=None):
     events, lease_events = [], []
     if had and not have:
         lease_events.append(_ev(f"lease_lost:{now.strftime('%Y-%m-%d')}", "lease_lost",
-                                f"Лиз писателя потерян: {res.get('lease_reason')}. "
-                                f"Этот раннер публикацию пропустил.", "warn", now))
+                                "публикация пропущена: писала другая машина", "warn", now,
+                                fact=f"Право на запись занято: {res.get('lease_reason')}.",
+                                meaning="Витрину обновил кто-то другой, этот прогон "
+                                        "свои числа не опубликовал. Один раз — норма "
+                                        "при пересменке, подряд — нет.",
+                                where="Смотреть: journalctl -u moex-radar-daily -n 50 "
+                                      "и объект lease в бакете."))
     events += lease_events
     if res.get("oversize"):
         # Лестница обрезки прошла целиком, а payload всё равно за лимитом: это
         # дефект лестницы (раздулся блок, которого в ней нет), и молчать о нём
         # нельзя — иначе о нарушении контракта §3 узнаёт только тот, кто читает
         # journald руками.
-        events.append(_ev(f"payload_oversize:{now.strftime('%Y-%m-%d')}", "payload_oversize",
-                          f"data.json {_num(res.get('bytes'), 0)} Б больше лимита "
-                          f"{_num(res.get('limit'), 0)} Б после всей обрезки "
-                          f"(вырезано: {', '.join(res.get('trimmed') or []) or 'нечего'}). "
-                          f"Первая отрисовка на мобильной сети замедлится — чинить лестницу.",
-                          "warn", now))
+        events.append(_ev(f"payload_oversize:{now.strftime('%Y-%m-%d')}",
+                          "payload_oversize", "витрина не помещается в свой лимит",
+                          "warn", now,
+                          fact=f"Файл витрины {_num(res.get('bytes'), 0)} байт при "
+                               f"пределе {_num(res.get('limit'), 0)}; обрезка уже "
+                               f"прошла целиком (вырезано: "
+                               f"{', '.join(res.get('trimmed') or []) or 'нечего'}).",
+                          meaning="Раздулся блок, которого в лестнице обрезки нет. "
+                                  "Панель откроется, но на мобильной сети заметно "
+                                  "медленнее.",
+                          where="Смотреть: pipeline/publish.py, лестница fit_size."))
     dispatch(events, dry_run=dry_run, enabled=enabled)
     if not dry_run:
         _feed_add(state, [e for e in events if e.get("delivered")])

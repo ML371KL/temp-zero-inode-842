@@ -74,11 +74,20 @@ def compose(event):
     Разбор модели идёт последним абзацем после «💬» — ровно так же, как его шлют в
     ленту 837 и 838, чтобы у всех панелей хаба комментарий выглядел одинаково.
     """
+    title = (event.get("title") or "").strip()
     text = (event.get("text") or "").strip()
-    if not text:
+    if not title and not text:
         return ""
-    parts = _SENTENCE.split(text, maxsplit=1)
-    body = parts[0] if len(parts) == 1 else f"{parts[0]}\n{parts[1].strip()}"
+    if title:
+        # У события есть готовый заголовок — режем по нему, а не угадываем границу
+        # предложения. Разрез по точке был вынужденным, пока событие приходило одной
+        # строкой; теперь заголовок и подробности разделены в самом событии, и
+        # угадывать нечего. Заодно исчезает целый класс ошибок с сокращениями.
+        rest = text[len(title):].lstrip(" .") if text.startswith(title) else text
+        body = f"{title}\n{rest}".rstrip() if rest else title
+    else:
+        parts = _SENTENCE.split(text, maxsplit=1)
+        body = parts[0] if len(parts) == 1 else f"{parts[0]}\n{parts[1].strip()}"
     comment = (event.get("comment") or "").strip()
     return f"{body}\n\n💬 {comment}" if comment else body
 

@@ -154,15 +154,41 @@ class TestCompose(NexusCase):
         text = self.nexus.compose(self.event("Смена ячейки: A → B (токсичная)."))
         self.assertNotIn("\n", text)
 
-    def test_warning_prefix_never_becomes_the_headline(self):
-        # alerts.render добавляет «Внимание. » для severity=warn — в ленту уходит
-        # ev['text'], иначе заголовком всех тревог станет слово «Внимание.».
+    def test_hub_gets_plain_text_while_telegram_gets_markup(self):
+        """У хаба и телеграма РАЗНЫЙ вид одного события, и путать их нельзя.
+
+        Телеграм принимает parse_mode=HTML и рисует значок вида события плюс жирный
+        заголовок. Хаб же кладёт присланное в свою ленту как текст — уехавшие туда
+        теги читатель увидит тегами. Раньше эту границу держал префикс «Внимание.»
+        (его добавлял только телеграм); теперь её держит разметка, и проверка та же
+        по смыслу: разметка обязана остаться на своей стороне.
+        """
         alerts = need(self, "pipeline.alerts", "render")
-        ev = self.event("Аукцион ОФЗ провален. Минфин не даёт премию.")
-        self.assertTrue(alerts.render(ev).startswith("Внимание. "))
+        ev = {"key": "auction_failed:2026-08-12", "kind": "auction_failed",
+              "severity": "warn", "ts": "2026-08-12T09:00:00Z",
+              "title": "Аукцион ОФЗ не состоялся",
+              "text": "Аукцион ОФЗ не состоялся 12.08.2026: размещено 0,0 млрд рублей."}
+        message = alerts.render(ev)
+        self.assertTrue(message.startswith("⚠️ <b>Аукцион ОФЗ не состоялся</b>"), message)
+
         with self._urlopen():
             self.nexus.deliver(ev)
-        self.assertEqual(self.calls[0]["body"]["text"].split("\n")[0], "Аукцион ОФЗ провален.")
+        sent = self.calls[0]["body"]["text"]
+        self.assertEqual(sent.split("\n")[0], "Аукцион ОФЗ не состоялся")
+        self.assertNotIn("<b>", sent, "разметка телеграма уехала в ленту хаба")
+        self.assertNotIn("⚠️", sent, "значок телеграма уехал в ленту хаба")
+
+    def test_structured_event_splits_by_its_own_title(self):
+        # Заголовок у события теперь свой, и угадывать границу предложения не нужно:
+        # хаб получает ровно ту же первую строку, что и телеграм.
+        ev = {"key": "cb:1", "kind": "cb_decision", "ts": "2026-08-12T09:00:00Z",
+              "title": "Банк России снизил ключевую ставку",
+              "text": "Банк России снизил ключевую ставку 16,00% → 15,75%. "
+                      "Шаг −25 базисных пунктов."}
+        got = self.nexus.compose(ev)
+        head, tail = got.split("\n", 1)
+        self.assertEqual(head, "Банк России снизил ключевую ставку")
+        self.assertIn("−25 базисных пунктов", tail)
 
 
 class TestDelivery(NexusCase):

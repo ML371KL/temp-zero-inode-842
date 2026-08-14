@@ -26,6 +26,8 @@ import time
 import urllib.error
 import urllib.request
 
+from pipeline.lib import wording
+
 ENDPOINT = "https://openrouter.ai/api/v1/chat/completions"
 TIMEOUT = 90
 
@@ -224,8 +226,22 @@ def _post(model, events, payload, key, with_reasoning=True):
             {"role": "system", "content": SYSTEM},
             {"role": "user", "content": json.dumps({
                 "market_now": market_now(payload),
-                "events": [{"i": i, "kind": e.get("kind"), "text": e.get("text")}
-                           for i, e in enumerate(events)],
+                # Событие уходит модели РАЗОБРАННЫМ на части — так же, как у 837:
+                # отдельно вид, отдельно заголовок, отдельно движение и отдельно
+                # смысл. Прежде уезжала одна склеенная строка, и модель тратила
+                # первую фразу на её пересказ, хотя пересказ прямо запрещён
+                # промптом: ей просто не с чем было работать, кроме этой строки.
+                # `kind` даётся человеческим ярлыком, а не служебным ключом.
+                "events": [{
+                    "i": i,
+                    "тип": (wording.KIND.get(e.get("kind")) or {}).get("label")
+                           or e.get("kind"),
+                    "событие": e.get("title") or e.get("text"),
+                    "было": e.get("before"),
+                    "стало": e.get("after"),
+                    "подробность": e.get("detail"),
+                    "что_это_значит": e.get("meaning"),
+                } for i, e in enumerate(events)],
             }, ensure_ascii=False)},
         ],
     }

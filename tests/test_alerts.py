@@ -47,7 +47,7 @@ def payload(core=0.68, trend=0, vol=1, bond=1, asof=ASOF, health="ok",
                             "below_since": "2026-01-30" if streak else None,
                             "review_months": 6}},
         "states": {"current": {"trend": trend, "vol": vol, "bond": bond},
-                   "distances": [{"id": "bond", "text": "просадка RGBI −1.2% от максимума"}]},
+                   "distances": [{"id": "bond", "text": "просадка RGBI −1,2% от максимума"}]},
         "verdict": {"cell_code": cell, "cell_label": "токсичная",
                     "core_label": "умеренный лонг",
                     "cell_stats": {"mean_fwd1m_pct": -0.55, "hit": 0.4, "n": 12}},
@@ -155,15 +155,15 @@ class TestCoreFlip(AlertsCase):
     def test_real_flip_reported_once(self):
         got = self.flips([0.66, -0.35, -0.40])
         self.assertEqual(len(got), 1)
-        self.assertIn("-0.35", got[0]["text"])
+        self.assertIn("−0,35", got[0]["text"])
 
     def test_was_value_is_the_alerted_one_not_yesterday(self):
         # мутация: печатать prev['core_value'] -> «развернулось: -0.66, было -0.02»,
         # оба числа одного знака (путь через мёртвую зону гистерезиса).
         got = self.flips([0.66, 0.02, -0.02, -0.66])
         self.assertEqual(len(got), 1)
-        self.assertIn("+0.66", got[0]["text"])
-        self.assertNotIn("-0.02", got[0]["text"])
+        self.assertIn("+0,66", got[0]["text"])
+        self.assertNotIn("0,02", got[0]["text"])
 
 
 class TestBuyWindow(AlertsCase):
@@ -208,12 +208,12 @@ class TestDelivery(AlertsCase):
         self.online = True
         self.alerts.run(payload(bond=0, cell="bear|stress|ok"), dry_run=False,
                         now=NOW + timedelta(hours=1))
-        self.assertEqual(len([t for t in self.sent if "Облигационный флаг снят" in t]), 1)
+        self.assertEqual(len([t for t in self.sent if "Долговой рынок вышел из стресса" in t]), 1)
         self.assertEqual(self.pending_keys(), [])
         # третий прогон ничего не повторяет
         self.alerts.run(payload(bond=0, cell="bear|stress|ok"), dry_run=False,
                         now=NOW + timedelta(hours=2))
-        self.assertEqual(len([t for t in self.sent if "Облигационный флаг снят" in t]), 1)
+        self.assertEqual(len([t for t in self.sent if "Долговой рынок вышел из стресса" in t]), 1)
 
     def test_stale_pending_is_dropped_after_a_day(self):
         self.seed(payload(bond=1))
@@ -395,7 +395,7 @@ class TestAuctionFreshness(AlertsCase):
         # Биржа спрос не раскрывает вовсе, и это надо сказать словами.
         text = self.fire(ASOF, demand=None)[0]["text"]
         self.assertNotIn("н/д млрд", text)
-        self.assertIn("спрос не раскрыт", text)
+        self.assertIn("спрос биржа не раскрывает", text)
 
     def test_битая_дата_не_роняет_правило(self):
         self.assertEqual(self.fire("не дата"), [])
@@ -451,16 +451,31 @@ class TestTexts(AlertsCase):
         # раннера»), а число в нём — только то, что пришло из причины лиза.
         for ev in self.all_kinds():
             if ev["kind"] == "lease_lost":
-                self.assertIn("публикацию пропустил", ev["text"])
+                self.assertIn("свои числа не опубликовал", ev["text"])
                 continue
             self.assertRegex(ev["text"], r"\d", f"{ev['kind']} без единого числа")
 
-    def test_decimal_separator_is_a_dot_everywhere(self):
-        # мутация: вернуть запятую в жёсткие строки -> в одном прогоне рядом висят
-        # «+1.4%/мес (hit 0.6)» и «+1,4%/мес (hit 0,64)» — читатель считает это опечаткой.
+    def test_decimal_separator_is_a_comma_everywhere(self):
+        """Десятичный разделитель — ЗАПЯТАЯ, как на самой панели и в 837/838.
+
+        Раньше здесь требовалась точка, и требование было по-своему логичным: лишь бы
+        в одном сообщении не оказалось «+1.4%» рядом с «+1,4%». Но выбрана была не та
+        сторона: панель рисует «+3,78%», соседние панели пишут «312 б.п.» и «1,97 %»,
+        а в телеграм из этой же панели уезжало «+0.66» — то есть разнобой был не
+        внутри сообщения, а между сообщением и всем остальным, что видит владелец.
+        """
         for ev in self.all_kinds():
-            self.assertIsNone(re.search(r"\d,\d", ev["text"]),
-                              f"{ev['kind']}: запятая как десятичный разделитель — {ev['text']}")
+            # Даты (11.08.2026) из проверки вычёркиваем: точка там разделитель
+            # частей даты, а не дробной части, и пишется она так намеренно.
+            body = re.sub(r"\b\d{2}\.\d{2}\.\d{4}\b", " ", ev["text"])
+            self.assertIsNone(re.search(r"\d\.\d", body),
+                              f"{ev['kind']}: точка как десятичный разделитель — {ev['text']}")
+
+    def test_minus_is_typographic(self):
+        # Дефис в роли минуса рядом с переносами и тире читается как дефис.
+        for ev in self.all_kinds():
+            self.assertIsNone(re.search(r"(?<![\w])-\d", ev["text"]),
+                              f"{ev['kind']}: минус дефисом — {ev['text']}")
 
     def test_severity_is_from_the_contract(self):
         for ev in self.all_kinds():
@@ -726,7 +741,7 @@ class TestNexusMirror(AlertsCase):
         self.assertEqual(self.pending_keys(), [])
         self.assertEqual(self.mirrored.count("bond_off:" + ASOF), 2)
         # Телеграм на повторе отвечает DUP: второго сообщения в канал не уходит.
-        self.assertEqual(len([t for t in self.sent if "Облигационный флаг снят" in t]), 1)
+        self.assertEqual(len([t for t in self.sent if "Долговой рынок вышел из стресса" in t]), 1)
 
     def test_unconfigured_hub_never_blocks_delivery(self):
         # мутация: OFF трактовать как FAIL -> на машине без NEXUS_* очередь повторов

@@ -117,7 +117,12 @@ def send(text, silent=False, retries=2, channel="alerts"):
     cfg = config(channel)
     if cfg is None:
         return False, "не заданы " + "/".join(CHANNELS.get(channel) or CHANNELS["alerts"])
+    # parse_mode=HTML — тот же режим, что у 837/838 и у общего мостика панелей
+    # (dash-notify). Разметка ограничена <b> и <i>: жирным идёт заголовок и «стало»,
+    # курсивом — пометки. Данные экранирует lib/wording.esc, собственную разметку
+    # экранировать нельзя, иначе она уедет читателю тегами.
     body = json.dumps({"chat_id": cfg["chat"], "text": text[:4000],
+                       "parse_mode": "HTML",
                        "disable_web_page_preview": True,
                        "disable_notification": bool(silent)}, ensure_ascii=False)
     req = urllib.request.Request(f"{API}/bot{cfg['token']}/sendMessage",
