@@ -15,7 +15,7 @@ TIER_NOTES, а не вес в модели.
 import math
 from datetime import date, datetime, timedelta, timezone
 
-from pipeline.lib import calc, registry
+from pipeline.lib import calc, registry, schedule
 from pipeline.lib.constants import (
     CB_MEETINGS_2026,
     MONITOR_TIERS,
@@ -147,6 +147,49 @@ def _age_min(ts, now):
     return (now - dt).total_seconds() / 60.0
 
 
+# Сколько времени даём прогону доехать от срабатывания таймера до записи ряда.
+# Суточный прогон занимает секунды, но может ждать замок стора (до 240 с) и
+# повторяться; полчаса закрывают это с запасом и не прячут настоящий пропуск.
+RUN_GRACE_MIN = 30
+
+
+def _poll_missed(sid, meta, now):
+    """Был ли ПЛАНОВЫЙ опрос этого ряда, о котором в сторе нет следа.
+
+    ЗАЧЕМ ЭТО ВООБЩЕ. Раньше свежесть считалась одним вопросом: «сколько часов
+    прошло с последнего удачного опроса». Вопрос неверный там, где конвейер молчит
+    ПО РАСПИСАНИЮ. Замер 14.08.2026 на боевом сторе: в ближайшие выходные так
+    протухли бы 23 ряда из 26 — пять сообщений в ops-канал о том, что биржа закрыта.
+    А ряд аукционов ОФЗ краснел КАЖДУЮ НЕДЕЛЮ: его норма 26 часов, а опрашивают его
+    недельным режимом, между тактами которого до 97 часов. Именно это сообщение и
+    пришло владельцу в пятницу 08:25 — при исправном источнике и верных числах.
+
+    Теперь спрашиваем иначе: прошёл ли с момента последней записи ТАКТ, который
+    обязан был этот ряд опросить. Если следующий такт ещё не наступил, возраст ряда
+    не значит ничего — так же, как тишина панели ночью не значит поломки
+    (`lib/schedule.next_publish_at`, тот же урок).
+
+    Ответ «не знаю» (расписание не прочиталось) трактуется как «пропуск был»: тогда
+    решает прежняя проверка по SLA, и поведение остаётся старым.
+    """
+    modes = [m for m, ids in registry.MODES.items() if sid in ids]
+    if not modes:
+        base = max((k for k in registry.SERIES if sid.startswith(k)), key=len, default=None)
+        modes = [m for m, ids in registry.MODES.items() if base in ids] if base else []
+    if not modes:
+        return True
+    deadline = now - timedelta(minutes=RUN_GRACE_MIN)
+    due = []
+    for mode in modes:
+        moment = schedule.last_run_at(mode, deadline)
+        if moment is not None:
+            due.append(moment)
+    if not due:
+        return True
+    fetched = _parse_ts((meta or {}).get("fetched_at"))
+    return fetched is None or fetched < max(due)
+
+
 def _st(sid, pts, meta, now):
     """Статус ряда по CONTRACT §7: missing → error → stale → ok.
 
@@ -166,7 +209,7 @@ def _st(sid, pts, meta, now):
     sla_key = spec.get("sla")
     sla = SLA_MINUTES.get(sla_key) if sla_key else None
     age = _age_min((meta or {}).get("fetched_at"), now)
-    if sla and age is not None and age > sla:
+    if sla and age is not None and age > sla and _poll_missed(sid, meta, now):
         return "stale"
     if declared in _STATUS_RANK:
         return declared

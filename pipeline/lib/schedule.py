@@ -20,10 +20,12 @@
 
 import glob
 import os
+import pathlib
 import re
 from datetime import datetime, timedelta, timezone
 
-__all__ = ["starts_of_day", "max_starts_in_window", "next_publish_at", "expand_field"]
+__all__ = ["starts_of_day", "max_starts_in_window", "next_publish_at",
+           "expand_field", "last_run_at", "mode_calendars"]
 
 ON_CALENDAR = re.compile(r"^OnCalendar=(.+?)\s*$", re.M)
 DAYS = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
@@ -112,6 +114,14 @@ def max_starts_in_window(starts, window_min):
     return best
 
 
+def _ops_path(ops_dir=None):
+    """Каталог с юнитами. По умолчанию — ops/ рядом с пакетом."""
+    if ops_dir is None:
+        ops_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "..", "..", "ops")
+    return pathlib.Path(os.path.normpath(str(ops_dir)))
+
+
 def _timer_files(ops_dir):
     return sorted(glob.glob(os.path.join(ops_dir, "*.timer")))
 
@@ -133,6 +143,45 @@ def publishing_calendars(ops_dir, modes=None):
     return lines
 
 
+UNIT_BY_MODE = "moex-radar-%s.timer"
+
+
+def mode_calendars(mode, ops_dir=None):
+    """Строки OnCalendar таймера конкретного режима. Нет файла -> пусто."""
+    path = _ops_path(ops_dir) / (UNIT_BY_MODE % mode)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return ON_CALENDAR.findall(fh.read())
+    except OSError:
+        return []
+
+
+def last_run_at(mode, now=None, ops_dir=None, horizon_days=40):
+    """Последний ПЛАНОВЫЙ запуск режима не позже `now`. None — расписания нет.
+
+    Зеркало `next_publish_at`. Нужно, чтобы отвечать на вопрос «должен ли ряд быть
+    свежее, чем он есть»: сравнивать возраст с плоским числом часов бессмысленно там,
+    где конвейер по расписанию молчит (выходные, недельный режим).
+
+    Горизонт в 40 суток закрывает самый редкий такт проекта — реколибровку 5-го
+    числа: без запаса на длинный февраль ответ был бы None ровно в первые дни месяца.
+    """
+    now = now or datetime.now(timezone.utc)
+    lines = mode_calendars(mode, ops_dir)
+    if not lines:
+        return None
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    now_min = (now - midnight).total_seconds() / 60.0
+    for day in range(horizon_days):
+        moment = midnight - timedelta(days=day)
+        starts = starts_of_day(lines, weekday=moment.weekday())
+        for minute in reversed(starts):
+            if day == 0 and minute > now_min:
+                continue
+            return moment + timedelta(minutes=minute)
+    return None
+
+
 def next_publish_at(now=None, ops_dir=None, horizon_days=8):
     """Ближайший момент СТРОГО после `now`, когда витрину ждёт очередная публикация.
 
@@ -140,10 +189,7 @@ def next_publish_at(now=None, ops_dir=None, horizon_days=8):
     остаётся на плоской норме — подсказки не будет, но и вранья тоже).
     """
     now = now or datetime.now(timezone.utc)
-    if ops_dir is None:
-        ops_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                               "..", "..", "ops")
-    ops_dir = os.path.normpath(ops_dir)
+    ops_dir = str(_ops_path(ops_dir))
     try:
         lines = publishing_calendars(ops_dir)
     except OSError:
