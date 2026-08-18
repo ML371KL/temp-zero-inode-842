@@ -29,11 +29,11 @@ for _s in (sys.stdout, sys.stderr):
         pass
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-PAGE = os.path.join(ROOT, "web", "index.html")
+WEB = os.path.join(ROOT, "web")
 MIDDLEWARE = os.path.join(ROOT, "functions", "_middleware.js")
 
 INLINE_SCRIPT = re.compile(r"<script(?![^>]*\bsrc=)[^>]*>(.*?)</script>", re.S)
-DECLARED_HASH = re.compile(r"THEME_SCRIPT_HASH\s*=\s*\"(sha256-[A-Za-z0-9+/=]+)\"")
+DECLARED_HASH = re.compile(r"\"(sha256-[A-Za-z0-9+/=]+)\"")
 
 
 def read_lf(path):
@@ -46,30 +46,45 @@ def sha256_csp(text):
 
 
 def main():
-    page = read_lf(PAGE)
-    scripts = INLINE_SCRIPT.findall(page)
-    if len(scripts) != 1:
-        print(f"ОШИБКА: в web/index.html инлайн-скриптов {len(scripts)}, а CSP знает про один. "
-              f"Добавьте хэши остальных в script-src или вынесите их в отдельный файл.",
-              file=sys.stderr)
+    # ВСЕ страницы, а не только index.html: middleware ставит один CSP на каждый
+    # ответ, значит хэш каждого инлайн-скрипта каждой страницы обязан быть в
+    # списке. Урок 18.08.2026: страж читал только index.html, и тема руководства
+    # стояла заблокированной политикой в проде при зелёном CI.
+    actual = {}  # хэш -> откуда
+    for name in sorted(os.listdir(WEB)):
+        if not name.endswith(".html"):
+            continue
+        for script in INLINE_SCRIPT.findall(read_lf(os.path.join(WEB, name))):
+            actual[sha256_csp(script)] = f"web/{name}"
+    if not actual:
+        print("ОШИБКА: в web/*.html не нашлось ни одного инлайн-скрипта — "
+              "стражу нечего сверять, проверьте регэксп.", file=sys.stderr)
         return 1
 
-    actual = sha256_csp(scripts[0])
-    declared = DECLARED_HASH.search(read_lf(MIDDLEWARE))
-    if not declared:
-        print("ОШИБКА: в functions/_middleware.js не нашлось THEME_SCRIPT_HASH — "
-              "CSP больше не про хэш? Проверьте руками.", file=sys.stderr)
+    block = re.search(r"THEME_SCRIPT_HASHES\s*=\s*\[(.*?)\]", read_lf(MIDDLEWARE), re.S)
+    if not block:
+        print("ОШИБКА: в functions/_middleware.js не нашлось THEME_SCRIPT_HASHES — "
+              "CSP больше не про хэши? Проверьте руками.", file=sys.stderr)
+        return 1
+    declared = set(DECLARED_HASH.findall(block.group(1)))
+
+    missing = {h: src for h, src in actual.items() if h not in declared}
+    stale = declared - set(actual)
+    if missing or stale:
+        lines = ["ОШИБКА: хэши инлайн-скриптов разошлись с CSP."]
+        for h, src in sorted(missing.items()):
+            lines.append(f"  скрипт из {src} не разрешён: {h}")
+        for h in sorted(stale):
+            lines.append(f"  разрешён хэш, которому не соответствует ни один скрипт: {h}")
+        lines.append("Список THEME_SCRIPT_HASHES должен быть ровно таким:")
+        for h, src in sorted(actual.items(), key=lambda kv: kv[1]):
+            lines.append(f'  "{h}", // {src}')
+        print("\n".join(lines), file=sys.stderr)
         return 1
 
-    if declared.group(1) != actual:
-        print(f"ОШИБКА: инлайн-скрипт темы изменился, а CSP разрешает старый хэш.\n"
-              f"  в functions/_middleware.js: {declared.group(1)}\n"
-              f"  по содержимому web/index.html: {actual}\n"
-              f"Замените строку на:\n"
-              f'const THEME_SCRIPT_HASH = "{actual}";', file=sys.stderr)
-        return 1
-
-    print(f"хэш инлайн-скрипта сходится: {actual}")
+    print("хэши инлайн-скриптов сходятся: "
+          + "; ".join(f"{src} {h}"
+                      for h, src in sorted(actual.items(), key=lambda kv: kv[1])))
     return 0
 
 

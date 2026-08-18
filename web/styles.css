@@ -428,7 +428,10 @@ button { font: inherit; color: inherit; }
 .sig__row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
 .sig__k { font-size: 15px; font-weight: 600; }
 .sig__z { font-size: 15px; font-variant-numeric: tabular-nums; }
-.sig__verdict { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; margin-top: 5px; }
+.sig__verdict { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13px; margin-top: 5px; }
+/* Бейдж возраста числа: сигнал со структурно отстающим рядом (позиция физлиц без
+   подписки — до двух недель) обязан говорить об этом сам, а не подписью «сейчас». */
+.sig__lag { font-size: 11px; color: var(--warn-ink); border: 1px solid currentColor; border-radius: 4px; padding: 0 5px; white-space: nowrap; }
 .sig__why { font-size: 13px; color: var(--ink-3); margin-top: 4px; line-height: 1.45; max-width: 68ch; }
 .sig__ico { width: 13px; height: 13px; flex: none; }
 

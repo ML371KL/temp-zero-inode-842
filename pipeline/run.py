@@ -36,7 +36,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from pipeline import alerts, publish as publish_mod             # noqa: E402
-from pipeline.lib import constants, lease, r2, registry, telegram  # noqa: E402
+from pipeline.lib import constants, lease, r2, registry, runbudget, telegram  # noqa: E402
 from pipeline.lib.http import FetchError                        # noqa: E402
 
 MISSING_MODULES = {}
@@ -188,10 +188,21 @@ def plan(mode, now, only=None):
 def fetch_all(items, journal, bootstrap=False):
     """Загрузка с изоляцией отказов. Возвращает сводку по каждому ряду."""
     report = {}
+    budget_said = False
     for sid, spec, skip in items:
         if skip:
             journal.line("fetch", f"{sid} пропуск ({skip})")
             report[sid] = {"status": "skip", "note": skip}
+            continue
+        if runbudget.exhausted():
+            # Висящий (не отказавший) источник стоит ~93 с на ряд, а публикация
+            # важнее последнего ряда: остальное пропускаем и идём считать по кэшу.
+            # Иначе timeout юнита убивал прогон ДО publish (lib/runbudget.py).
+            if not budget_said:
+                journal.warn("fetch", "бюджет времени фетча исчерпан — оставшиеся "
+                                      "ряды пропускаю, публикую по кэшу")
+                budget_said = True
+            report[sid] = {"status": "skip", "note": "бюджет времени фетча исчерпан"}
             continue
         t0 = time.time()
         try:
@@ -627,6 +638,9 @@ def main(argv=None):
         journal.warn("start", "нет pipeline/lib/store.py — публиковать нечего")
         return 3
 
+    if runbudget.arm_from_env():
+        journal.line("plan", f"бюджет фетча {runbudget.remaining():.0f} с "
+                             f"(RADAR_FETCH_BUDGET_S)")
     items = plan(args.mode, now, args.only)
     journal.line("plan", f"рядов к опросу {sum(1 for _, _, s in items if not s)} "
                          f"из {len(items)} (пропуск по окнам: {sum(1 for _, _, s in items if s)})")

@@ -287,24 +287,47 @@ def _press_number(keywords, series_id, patterns, sign_words=None, month_hint=Non
 
 
 def _match_number(text, patterns, sign_words=None):
-    """(значение, позиция в тексте, пояснение|None) по первому сработавшему шаблону."""
+    """(значение, позиция в тексте, пояснение|None) по САМОМУ РАННЕМУ совпадению.
+
+    Раннему, а не первому по списку шаблонов: итог релиза стоит в лиде, а
+    сравнение с прошлым годом — ниже. Порядок «по списку» позволял шаблону
+    «дефицит…составил» выхватить ПРОШЛОГОДНЕЕ число из YoY-сравнения раньше, чем
+    «сложился с профицитом» дойдёт до настоящего итога (аудит 18.08.2026).
+
+    Знак: если шаблон захватил само слово группой (?P<word>…) — знак из НЕГО.
+    Оконный поиск sign_words в ±160 символах на бюджетных текстах давал
+    «профицит… против дефицита годом ранее» -> минус у профицита; окно остаётся
+    только для шаблонов без именованной группы (продажи валюты).
+    """
+    best = None
     for pattern in patterns:
         m = re.search(pattern, text, re.I)
         if not m:
             continue
-        value = _num(m.group(1))
-        if value is None:
-            continue
-        if (m.groupdict().get("unit") or "").lower().startswith("млн"):
-            value = round(value / 1000.0, 4)   # ряды храним в млрд руб.
-        if sign_words:
-            window = text[max(0, m.start() - 160):m.end() + 40].lower()
-            # знак определяет слово (покупку/продажу, дефицит/профицит),
-            # а не тире перед числом — оно у Минфина разделитель
-            if any(w in window for w in sign_words):
-                value = -value
-        return value, m.start(), None
-    return None
+        if best is None or m.start() < best.start():
+            best = m
+    if best is None:
+        return None
+    m = best
+    groups = m.groupdict()
+    value = _num(groups.get("num") or m.group(1))
+    if value is None:
+        return None
+    if (groups.get("unit") or "").lower().startswith("млн"):
+        value = round(value / 1000.0, 4)   # ряды храним в млрд руб.
+    word = (groups.get("word") or "").lower()
+    if word:
+        if word.startswith("дефицит"):
+            value = -abs(value)
+        else:
+            value = abs(value)
+    elif sign_words:
+        window = text[max(0, m.start() - 160):m.end() + 40].lower()
+        # знак определяет слово (покупку/продажу), а не тире перед числом —
+        # оно у Минфина разделитель
+        if any(w in window for w in sign_words):
+            value = -value
+    return value, m.start(), None
 
 
 # ------------------------------------------------------------------- Urals
@@ -613,11 +636,13 @@ def budget():
     """
     return _press_number(
         ("предварительн", "исполнени"), "budget_deficit",
-        [r"дефицит[^.]{0,160}?составил[^.]{0,60}?([\d\s.,]+)\s*млрд",
-         r"профицит[^.]{0,160}?составил[^.]{0,60}?([\d\s.,]+)\s*млрд",
-         r"сложился с (?:дефицитом|профицитом)[^.]{0,60}?([\d\s.,]+)\s*млрд",
-         r"(?:дефицит|профицит)[^.]{0,60}?в размере\s*([\d\s.,]+)\s*млрд"],
-        sign_words=("дефицит",), derive=_budget_from_parts)
+        [r"(?P<word>дефицит|профицит)[а-яё]*[^.]{0,160}?составил[^.]{0,60}?"
+         r"(?P<num>[\d\s.,]+)\s*млрд",
+         r"сложился с (?P<word>дефицитом|профицитом)[^.]{0,60}?"
+         r"(?P<num>[\d\s.,]+)\s*млрд",
+         r"(?P<word>дефицит|профицит)[а-яё]*[^.]{0,60}?в размере\s*"
+         r"(?P<num>[\d\s.,]+)\s*млрд"],
+        derive=_budget_from_parts)
 
 
 def _fnb_month(text_before):

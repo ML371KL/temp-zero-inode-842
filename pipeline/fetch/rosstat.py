@@ -29,6 +29,14 @@ import zipfile
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta, timezone
 
+try:                                       # чтение xlsx по адресам ячеек (lib/xlsx)
+    from lib import xlsx as _xlsx
+except ImportError:
+    try:
+        from pipeline.lib import xlsx as _xlsx
+    except ImportError:                    # автономный запуск без пакета
+        _xlsx = None
+
 try:                                       # прод: общий HTTP-слой (CONTRACT.md §4)
     from lib.http import get_text, get_bytes, FetchError
 except ImportError:
@@ -281,39 +289,43 @@ _NSR = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 def xlsx_sheet(data, wanted_name=None):
     """xlsx (байты) -> [[значения строки]] нужного листа (первого, если не задан).
 
-    Своя мини-читалка: нужны только значения ячеек и общие строки. Формулы,
-    стили и типы дат игнорируем — в файлах Росстата всё лежит текстом и числами.
+    Читает pipeline/lib/xlsx: там ячейки раскладываются ПО АДРЕСАМ (r="B2"), а не
+    подряд. Разница не косметическая — прежняя своя читалка складывала ячейки в
+    порядке появления, а ПУСТЫЕ ЯЧЕЙКИ В XML ПРОСТО ОТСУТСТВУЮТ: перегенерённый
+    без пустых ячеек файл (обычная нормализация writer'а) молча сдвигал весь
+    месячный ИПЦ на соседний ГОД — значения 100,x проходят стражу диапазона, и по
+    графику сдвиг неотличим от правды (аудит 18.08.2026).
     """
-    zf = zipfile.ZipFile(io.BytesIO(data))
-    names = zf.namelist()
-    shared = []
-    if "xl/sharedStrings.xml" in names:
-        root = ET.fromstring(zf.read("xl/sharedStrings.xml"))
-        shared = ["".join(t.text or "" for t in si.iter(_NS + "t")) for si in root]
-    rels = {r.get("Id"): r.get("Target")
-            for r in ET.fromstring(zf.read("xl/_rels/workbook.xml.rels"))}
-    sheets = [(s.get("name"), rels.get(s.get(_NSR + "id")))
-              for s in ET.fromstring(zf.read("xl/workbook.xml")).iter(_NS + "sheet")]
-    target = None
-    for name, path in sheets:
-        if path and (wanted_name is None or name.strip() == wanted_name):
-            target = path
-            break
-    if target is None:
-        raise FetchError("в книге нет листа %r (есть: %s)"
-                         % (wanted_name, [n for n, _ in sheets]))
-    sheet = ET.fromstring(zf.read("xl/" + target.lstrip("/")))
-    rows = []
-    for row in sheet.iter(_NS + "row"):
-        values = []
-        for cell in row.findall(_NS + "c"):
-            node = cell.find(_NS + "v")
-            value = node.text if node is not None else None
-            if cell.get("t") == "s" and value is not None:
-                value = shared[int(value)]
-            values.append(value)
-        rows.append(values)
-    return rows
+    if _xlsx is None:
+        raise FetchError("pipeline/lib/xlsx недоступен — книгу разобрать нечем")
+    try:
+        book = _xlsx.open_bytes(data)
+    except _xlsx.XlsxError as exc:
+        raise FetchError(str(exc)) from exc
+    name = wanted_name
+    if name is not None and name.strip() not in book.sheets:
+        raise FetchError("в книге нет листа %r (есть: %s)" % (name, book.sheets))
+    if name is None:
+        if not book.sheets:
+            raise FetchError("в книге нет ни одного листа")
+        name = book.sheets[0]
+    try:
+        rows = book.rows(name.strip())
+    except _xlsx.XlsxError as exc:
+        raise FetchError(str(exc)) from exc
+    # Прежний контракт этой функции: значения-СТРОКИ (числа разбирают вызывающие),
+    # None вместо пустых. lib/xlsx отдаёт float — возвращаем в текст без хвоста
+    # «.0» у целых, чтобы не трогать разборщики ниже.
+    out = []
+    for row in rows:
+        vals = []
+        for v in row:
+            if isinstance(v, float):
+                vals.append(("%d" % v) if v == int(v) else repr(v))
+            else:
+                vals.append(v)
+        out.append(vals)
+    return out
 
 
 def parse_cpi_monthly(rows):

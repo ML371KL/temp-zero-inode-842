@@ -61,6 +61,14 @@
       });
   }
 
+  // «2026-08-04» -> «04.08» — так даты пишет вся панель. Год опускается: подпись
+  // сигнала живёт в строке рядом с z и значением, и полный год съедал бы её ширину;
+  // отставание больше года невозможно — ffill в панели ограничен днями.
+  function ruDay(iso) {
+    var s = String(iso || '');
+    return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(8, 10) + '.' + s.slice(5, 7) : s;
+  }
+
   // Перцентили конвейер публикует уже в процентах: monitors._pct_last возвращает
   // 0..100, и headline тайла говорит «78-й перцентиль» из того же числа. Умножение
   // на сто давало на экране «7800-й перцентиль». Доли (hit, weight) — другая
@@ -241,9 +249,16 @@
         age = Math.max(age == null ? 0 : age,
                        x.age_min + (isNum(x.delay_min) ? x.delay_min : 0));
       }
-      return h('span', { 'class': 'bit', title: (x.label || k) + ' на ' + fmtDay(x.asof) }, [
+      // intraday === false — источник отдал ЗАКРЫТИЕ вместо живой цены (откат с
+      // T-Invest на историю ISS). Контракт §3 требует сказать это подписью:
+      // иначе вчерашнее закрытие в шапке «Рынок сейчас» читается как текущая
+      // цена, а свежий age_min это ещё и «подтверждает».
+      var closed = x.intraday === false;
+      return h('span', { 'class': 'bit', title: (x.label || k) + ' на ' + fmtDay(x.asof)
+          + (closed ? ' — закрытие, живой цены нет' : '') }, [
         h('span', { 'class': 'bit__k', text: x.label || k }),
-        h('span', { 'class': 'bit__v', text: fmtNum(x.value, QUOTE_DIGITS[k] == null ? 2 : QUOTE_DIGITS[k]) }),
+        h('span', { 'class': 'bit__v', text: fmtNum(x.value, QUOTE_DIGITS[k] == null ? 2 : QUOTE_DIGITS[k])
+          + (closed ? ' (закрытие)' : '') }),
         isNum(x.chg_pct)
           ? h('span', { 'class': 'bit__since ' + toneOf(x.chg_pct), text: fmtNum(x.chg_pct, 2, true) + '%' })
           : null
@@ -276,6 +291,14 @@
         ]);
       }
       var on = raw === 1 || raw === true;
+      // Возраст бита: ряд-питатель мог умереть, и last_valid отдаёт значение
+      // произвольной давности как «текущее». Модель это не меняет, но подпись
+      // обязана сказать, что бит стоит на старом наблюдении (> 7 суток от
+      // торгового дня витрины) — иначе «облигации спокойны» читается как сегодня.
+      var bitAsof = (st.bit_asof || {})[key];
+      var tradingDay = d.asof_trading_day || '';
+      var bitStale = bitAsof && tradingDay &&
+        (Date.parse(tradingDay) - Date.parse(bitAsof)) > 7 * 86400 * 1000;
       // Для тренда «единица» — это бык, то есть хорошо; для волы и облигаций
       // единица означает стресс. Цвет ставим по СМЫСЛУ, а не по значению бита.
       var good = key === 'trend' ? on : !on;
@@ -285,7 +308,10 @@
         h('span', { 'class': 'bit__dot' }),
         h('span', { 'class': 'bit__k', text: BIT_LABEL[key].k }),
         h('span', { 'class': 'bit__v', text: word }),
-        since[key] ? h('span', { 'class': 'bit__since', text: 'с ' + fmtDay(since[key]) }) : null
+        bitStale
+          ? h('span', { 'class': 'bit__since', title: 'Ряд-источник бита отстал: показано последнее наблюдение',
+              text: 'данные от ' + fmtDay(bitAsof) })
+          : (since[key] ? h('span', { 'class': 'bit__since', text: 'с ' + fmtDay(since[key]) }) : null)
       ]);
     });
     bits.push(h('span', { 'class': 'bit bit--neutral' }, [
@@ -528,7 +554,12 @@
           h('span', { 'class': 'dist__k', text: x.label || x.id }),
           h('span', { 'class': 'dist__v', text: fmtNum(x.value, 1, true) + ' → ' + fmtNum(x.threshold, 1, true) })
         ]),
-        C.thresholdBar(x.value, x.threshold, { invert: x.id === 'bond' }),
+        // Полярность объявлена у ВСЕХ трёх строк, как требует контракт thresholdBar
+        // (charts.js: «либо у всех, либо ни у одной»; старый ключ invert там
+        // намеренно выпилен и молча игнорировался). Тренд: плохо НИЖЕ MA200;
+        // облигации: плохо ГЛУБЖЕ порога просадки; волатильность: плохо ВЫШЕ
+        // 80-го перцентиля.
+        C.thresholdBar(x.value, x.threshold, { bad: x.id === 'vol' ? 'above' : 'below' }),
         h('p', { 'class': 'dist__t', text: ruText(x.text) })
       ]);
     });
@@ -548,8 +579,19 @@
         ]),
         h('div', { 'class': 'sig__verdict' }, [
           vIco, h('span', { text: ruText(s.verdict) || 'нет данных' }),
+          // Число подписывается СВОЕЙ датой, а не словом «сейчас»: часть рядов
+          // структурно отстаёт (позиция физлиц без подписки — до двух недель, плюс
+          // протяжка), и «сейчас +0,57» выдавало двухнедельную позицию за
+          // сегодняшнюю. asof/lag_days пайплайн кладёт ровно для этой подписи
+          // (CONTRACT §3: «фронт обязан показать дату, при большом lag_days —
+          // бейджем»).
           isNum(s.value) ? h('span', { 'class': 'tone-mut',
-            text: '· z ' + fmtNum(s.z, 2, true) + ', сейчас ' + fmtNum(s.value, 2, true) }) : null
+            text: '· z ' + fmtNum(s.z, 2, true) + ', ' + fmtNum(s.value, 2, true)
+              + (s.asof ? ' на ' + ruDay(s.asof) : '') }) : null,
+          (isNum(s.lag_days) && s.lag_days > 5) ? h('span', {
+            'class': 'sig__lag',
+            title: 'Возраст показанного числа: источник отстаёт структурно',
+            text: 'данные отстают на ' + s.lag_days + ' дн.' }) : null
         ]),
         h('p', { 'class': 'sig__why', text: ruText(s.why) })
       ]);
@@ -617,6 +659,13 @@
         if (p.series) out.push(C.miniSeries(p.series, { digits: 1, zero: true, label: 'спред', unit: ' п.п.', color: tok('--s1') }));
         break;
       case 'cb_meeting':
+        if (!isNum(p.days_left)) {
+          // Календарь заседаний кончился (после 18.12.2026 до ручного обновления
+          // константы): «— дн.» ничего не объясняет, а конвейер уже положил
+          // честный заголовок «календарь закончился, нужен новый» — показываем его.
+          out.push(h('div', { 'class': 'tile__sub', text: ruText(m.headline || 'календарь заседаний закончился — нужен новый') }));
+          break;
+        }
         out.push(num(p.days_left, 0, ' дн.'));
         out.push(h('div', { 'class': 'tile__sub', text: 'до заседания ' + fmtDay(p.next_meeting) + '; ключевая ' + fmtNum(p.key_rate, 2, false) + '%' +
           (isNum(p.consensus) ? ', консенсус ' + fmtNum(p.consensus, 2, false) + '%' : ', консенсус не внесён') }));
@@ -634,7 +683,9 @@
         // читался как «физики в шорте».
         out.push(h('div', { 'class': 'tile__sub', text: 'z нетто-позиции физлиц за 120 дней' +
           (isNum(p.net_share) ? '; сейчас нетто ' + fmtNum(p.net_share * 100, 1, true) + '% от брутто' : '') +
-          '; лонгов ' + fmtNum(p.holders_long, 0, false) + ', шортов ' + fmtNum(p.holders_short, 0, false) }));
+          // holders_* — число ЛИЦ (unit=persons), а не контракты: «лонгов 70 000»
+          // рядом с z нетто-позиции читалось как объём длинных позиций.
+          '; держателей лонга ' + fmtNum(p.holders_long, 0, false) + ', шорта ' + fmtNum(p.holders_short, 0, false) }));
         if (p.series) out.push(C.miniSeries(p.series, { digits: 2, zero: true, label: 'нетто/брутто', color: tok('--s3') }));
         break;
       case 'rub_barrel':
@@ -792,7 +843,10 @@
         var body = [h('span', { 'class': 'evt__t', text: ruText(e.text) })];
         if (e.comment) body.push(h('p', { 'class': 'evt__c', text: ruText(e.comment) }));
         return h('div', { 'class': 'evt' }, [
-          h('span', { 'class': 'evt__ts', text: (e.ts || '').slice(5, 16).replace('T', ' ') }),
+          // МСК и ДД.ММ, как во всей панели: сырой UTC относил событие закрывающего
+          // такта (00:00 МСК = 21:00 UTC) ко вчерашнему дню, а «08-11» читалось
+          // как 8 ноября.
+          h('span', { 'class': 'evt__ts', text: evtStamp(e.ts) }),
           h('div', { 'class': 'evt__body' }, body)
         ]);
       }))
@@ -871,6 +925,18 @@
   var MODE_WORD = { daily: 'ежедневный прогон', intraday: 'прогон внутри дня', monthly: 'месячный прогон' };
 
   /** Дата и время публикации по-московски: панель русская, а метка была машинной. */
+  // Метка события журнала: «11.08 19:05» по Москве. Тот же сдвиг UTC+3, что в
+  // fmtStamp, — подпись обязана совпадать со временем прогонов, а не с часами
+  // читателя.
+  function evtStamp(iso) {
+    var t = Date.parse(iso);
+    if (!isFinite(t)) return String(iso || '');
+    var msk = new Date(t + 3 * 3600 * 1000);
+    function p2(n) { return (n < 10 ? '0' : '') + n; }
+    return p2(msk.getUTCDate()) + '.' + p2(msk.getUTCMonth() + 1) + ' ' +
+      p2(msk.getUTCHours()) + ':' + p2(msk.getUTCMinutes());
+  }
+
   function fmtStamp(iso) {
     var t = Date.parse(iso);
     if (!isFinite(t)) return String(iso || '—');

@@ -184,6 +184,45 @@ class TestCorruptedDisk(StoreCase):
         self.store.upsert_points("imoex", {"2026-08-11": 2301.0})
         self.assertEqual(self.store.load_series("imoex")["points"], {"2026-08-11": 2301.0})
 
+    def test_повторный_карантин_не_затирает_первый_bad(self):
+        # .bad — единственная локальная копия ряда после порчи. os.replace при
+        # второй порче молча уничтожал первую (обычно полную) — аудит 18.08.2026.
+        path = self.root / "raw" / "imoex.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"полная история": [обрыв', encoding="utf-8")
+        self.assertIsNone(self.store.load_series("imoex"))
+        first = (self.root / "raw" / "imoex.json.bad").read_text(encoding="utf-8")
+        path.write_text('{"огрызок": [обрыв', encoding="utf-8")
+        self.assertIsNone(self.store.load_series("imoex"))
+        self.assertEqual((self.root / "raw" / "imoex.json.bad").read_text(encoding="utf-8"),
+                         first, "первый .bad перезаписан второй порчей")
+        self.assertTrue((self.root / "raw" / "imoex.json.bad.2").exists())
+
+    def test_ошибка_чтения_не_карантинит_и_не_даёт_затереть(self):
+        """OSError — «не смогли прочитать», а не «файл испорчен».
+
+        До 18.08.2026 транзиентная ошибка чтения (диск, антивирус, сетевая ФС)
+        уводила ЗДОРОВЫЙ файл в .bad, а следующий upsert строил ряд из одной
+        свежей точки — и зеркало R2 затиралось огрызком. Теперь: файл на месте,
+        чтение отвечает None, а ПУТЬ ЗАПИСИ останавливается, не тронув историю.
+        """
+        self.store.save_series("imoex", {"points": {f"2026-08-{d:02d}": 2300.0 + d
+                                                    for d in range(1, 11)}})
+        real_open = open
+
+        def flaky(path, *a, **kw):
+            if str(path).endswith("imoex.json"):
+                raise PermissionError("антивирус держит файл")
+            return real_open(path, *a, **kw)
+
+        with mock.patch("builtins.open", side_effect=flaky):
+            self.assertIsNone(self.store.load_series("imoex"))
+            with self.assertRaises(OSError):
+                self.store.upsert_points("imoex", {"2026-08-12": 2312.0})
+        # Файл цел, в карантин не уехал, история не потеряна.
+        self.assertFalse((self.root / "raw" / "imoex.json.bad").exists())
+        self.assertEqual(len(self.store.load_series("imoex")["points"]), 10)
+
     def test_broken_meta_does_not_lose_dirty_mechanism(self):
         (self.root).mkdir(parents=True, exist_ok=True)
         (self.root / "_meta.json").write_text("не json вовсе", encoding="utf-8")

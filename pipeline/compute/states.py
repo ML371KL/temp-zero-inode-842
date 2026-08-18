@@ -145,17 +145,25 @@ def compute_states(panel):
                 "active_signals": [], "cells": [], "series": []}
 
     bits = _bits(dates, cols)
-    current, since = {}, {}
+    current, since, bit_asof = {}, {}, {}
     for name, series in bits.items():
         j, v = calc.last_valid(series)
         current[name] = None if j is None else int(v)
         since[name] = None if j is None else _run_start(series, dates, j)
+        # Дата ПОСЛЕДНЕГО НАБЛЮДЕНИЯ, на котором бит стоит. Ряд-питатель живёт с
+        # лимитом протяжки (rgbi_dd — 5 строк), но last_valid дальше лимита честно
+        # возвращает значение произвольной давности: умерший ряд RGBI показывал
+        # «облигации спокойны» как ТЕКУЩЕЕ состояние без всякой датировки, и
+        # ворота стояли открытыми, пока RGBI реально падал (аудит 18.08.2026).
+        # Модель не трогаем — это подпись: витрина обязана показать возраст бита.
+        bit_asof[name] = None if j is None else dates[j]
 
     era_post22 = dates[-1] >= constants.ERA_POST22_START
     current["era_post22"] = era_post22
     # since дублируется и внутрь current: §3 контракта кладёт его в states.current.since,
     # §4 — рядом. Дублировать три даты дешевле, чем спорить с фронтом.
     current["since"] = dict(since)
+    current["bit_asof"] = bit_asof
 
     key = (current["trend"], current["vol"], current["bond"])
     cell = None

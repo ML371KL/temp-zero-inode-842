@@ -162,39 +162,58 @@ class TestMoexFeedDepth(unittest.TestCase):
     а не от «сегодня» (правило набора №1).
     """
 
+    PER_PAGE = 50  # столько строк sitenews.json отдаёт НА САМОМ ДЕЛЕ (замер 13.08)
+
     def setUp(self):
         self.press = need(self, "pipeline.fetch.moex_press", "_candidates",
                           "MAX_AGE_DAYS", "MAX_PAGES")
         self.http = need(self, "pipeline.lib.http", "get_bytes")
 
-    def feed(self, hit_page, step_days=1, top="2026-08-11"):
-        """Лента, где нужный заголовок лежит на странице hit_page."""
+    def feed(self, hit_row, total=2000, days_per_page=1, top="2026-08-11"):
+        """Лента как у настоящего ISS: ПЛОСКИЙ список, из которого запрос со
+        start=s получает срез [s, s+50) — ровно 50 строк, что бы ни думал клиент.
+
+        До 18.08.2026 фиктивный сервер строился из клиентского же PAGE_SIZE=100 и
+        по построению не мог поймать главный дефект: обход шагал по 100 при
+        страницах в 50, и строки 50–99, 150–199, … не читались НИКОГДА. Релиз в
+        такой слепой зоне (в проде — позиция 75) не находился при зелёном тесте.
+        """
         top_day = date.fromisoformat(top)
+
+        def row(i):
+            day = (top_day - timedelta(days=(i // self.PER_PAGE) * days_per_page)).isoformat()
+            if i == hit_row:
+                return [777, "", "Частные инвесторы вложили в июле 1,5 трлн рублей",
+                        day + " 11:30:00", day + " 11:30:00"]
+            return [900000 + i, "", "Об установлении риск-параметров",
+                    day + " 18:30:00", day + " 18:30:00"]
 
         def responder(url, **_kw):
             start = int(re.search(r"start=(\d+)", url).group(1))
-            page = start // self.press.PAGE_SIZE
-            day = (top_day - timedelta(days=page * step_days)).isoformat()
-            rows = [[900000 + start + i, "", "Об установлении риск-параметров",
-                     day + " 18:30:00", day + " 18:30:00"] for i in range(100)]
-            if page == hit_page:
-                rows[5] = [777, "", "Частные инвесторы вложили в июле 1,5 трлн рублей",
-                           day + " 11:30:00", day + " 11:30:00"]
+            rows = [row(i) for i in range(start, min(start + self.PER_PAGE, total))]
             body = {"sitenews": {"columns": ["id", "tag", "title", "published_at",
                                              "modified_at"], "data": rows}}
             return json.dumps(body, ensure_ascii=False).encode("utf-8")
 
         return mock.patch.object(self.http, "get_bytes", side_effect=responder)
 
+    def test_релиз_в_бывшей_слепой_зоне_находится(self):
+        # Позиция 75 — строки 50–99, которые обход с шагом 100 не читал никогда.
+        # Ровно там лежал июльский релиз в проде, пока тайл стоял в error.
+        with self.feed(hit_row=75):
+            ids, errors = self.press._candidates()
+        self.assertEqual([i[0] for i in ids], [777], f"слепая зона вернулась: {errors}")
+
     def test_релиз_месячной_давности_находится(self):
-        with self.feed(hit_page=15):
+        # 15 настоящих страниц вглубь (позиция 750) — замер 12.08.2026.
+        with self.feed(hit_row=750):
             ids, errors = self.press._candidates()
         self.assertEqual([i[0] for i in ids], [777], f"не дошли до релиза: {errors}")
 
     def test_обход_прекращается_по_возрасту_ленты(self):
         # Шаг 5 суток на страницу: окно в 45 суток кончается на десятой странице,
         # и лежащий за ним релиз уже не ищется — это граница, а не поломка.
-        with self.feed(hit_page=15, step_days=5) as fake:
+        with self.feed(hit_row=750, days_per_page=5) as fake:
             ids, _errors = self.press._candidates()
         self.assertEqual(ids, [])
         self.assertLess(fake.call_count, self.press.MAX_PAGES,

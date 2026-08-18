@@ -82,6 +82,14 @@ def parse_calendar(line):
     tokens = line.replace(" UTC", "").split()
     if not tokens:
         return set(), set()
+    # Компонент даты. Разбирается только «каждый день» (*-*-*): форма с числом
+    # месяца («*-*-05» у реколибровки) БЕЗ этой проверки молча читалась как
+    # ежедневный такт — last_run_at('recalibrate') отвечал «вчера» на 29 днях
+    # месяца из 30. Контракт модуля — незнакомое не угадывать: честный отказ
+    # оставляет решение старой норме, неверный ответ строит ложное ожидание.
+    date_token = next((t for t in tokens if "-" in t and ":" not in t), None)
+    if date_token is not None and date_token != "*-*-*":
+        return set(), set()
     clock = next((t for t in tokens if ":" in t), None)
     if clock is None:
         return set(), set()
@@ -114,16 +122,33 @@ def max_starts_in_window(starts, window_min):
     return best
 
 
+# Куда systemd кладёт установленные юниты. Исполняются ОНИ, а не рабочая копия.
+INSTALLED_DIR = "/etc/systemd/system"
+
+
 def _ops_path(ops_dir=None):
-    """Каталог с юнитами. По умолчанию — ops/ рядом с пакетом."""
-    if ops_dir is None:
-        ops_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                               "..", "..", "ops")
-    return pathlib.Path(os.path.normpath(str(ops_dir)))
+    """Каталог с юнитами: установленные, если они есть, иначе ops/ рядом с пакетом.
+
+    Рабочая копия на VPS самообновляется (git reset в обвязке на каждом прогоне),
+    а юниты в /etc/systemd/system переустанавливаются только руками. После пуша с
+    правкой таймера они расходятся — и обещание next_publish_at, прочитанное из
+    репозитория, рассказывало бы о расписании, которое никто не исполняет: баннер
+    свежести врал бы в обе стороны до переустановки. Поэтому источник правды —
+    установленные юниты; ops/ остаётся для машин без systemd (раннер GHA, разработка).
+    """
+    if ops_dir is not None:
+        return pathlib.Path(os.path.normpath(str(ops_dir)))
+    installed = pathlib.Path(INSTALLED_DIR)
+    if glob.glob(str(installed / "moex-radar-*.timer")):
+        return installed
+    return pathlib.Path(os.path.normpath(os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "..", "ops")))
 
 
 def _timer_files(ops_dir):
-    return sorted(glob.glob(os.path.join(ops_dir, "*.timer")))
+    # Только СВОИ таймеры: в /etc/systemd/system живут юниты и соседних панелей,
+    # и голый *.timer втянул бы их расписания в обещание витрины.
+    return sorted(glob.glob(os.path.join(ops_dir, "moex-radar-*.timer")))
 
 
 def publishing_calendars(ops_dir, modes=None):
@@ -138,8 +163,11 @@ def publishing_calendars(ops_dir, modes=None):
         base = os.path.basename(path)[: -len(".timer")]
         if base.rsplit("-", 1)[-1] in skip:
             continue
-        with open(path, encoding="utf-8") as fh:
-            lines += ON_CALENDAR.findall(fh.read())
+        try:
+            with open(path, encoding="utf-8") as fh:
+                lines += ON_CALENDAR.findall(fh.read())
+        except (OSError, UnicodeDecodeError):
+            continue  # битый файл не отменяет расписание остальных
     return lines
 
 
@@ -152,7 +180,11 @@ def mode_calendars(mode, ops_dir=None):
     try:
         with open(path, encoding="utf-8") as fh:
             return ON_CALENDAR.findall(fh.read())
-    except OSError:
+    except (OSError, UnicodeDecodeError):
+        # Пересохранённый в cp1251 юнит — не повод ронять прогон: UnicodeDecodeError
+        # не OSError, и без этой строки он пролетал через monitors._poll_missed в
+        # run._sources и валил такт целиком. Контракт слоя: «не знаю -> решает
+        # старая норма».
         return []
 
 

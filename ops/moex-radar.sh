@@ -91,7 +91,12 @@ cd "$repo"
 # скрипт на этой строке, то есть в аварии GitHub данные не собирались бы вовсе — ровно
 # в том отказе, ради выживания в котором сбор сюда и увезли. Код в рабочем дереве
 # последний, прошедший проверки, и собрать им лучше, чем не собрать ничем.
-if git fetch --quiet origin main && git reset --quiet --hard origin/main; then
+#
+# `timeout 60` обязателен: git fetch без него ждёт СТОЙЛЯЩИЙ (не отказавший) GitHub
+# неограниченно — а мы стоим ПОД ОБЩИМ ЗАМКОМ прогона. Висящий fetch съедал бы
+# дедлайн юнита целиком, и такт за тактом умирал бы до сбора данных: отказ GitHub
+# останавливал бы сбор рыночных рядов, хотя коду GitHub вообще не нужен.
+if timeout 60 git fetch --quiet origin main && git reset --quiet --hard origin/main; then
   log "код: $(git log --oneline -1)"
 else
   log "ВНИМАНИЕ: origin недоступен, работаю кодом из рабочего дерева: $(git log --oneline -1)"
@@ -106,7 +111,14 @@ if ! "$python" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 12) else 1)
 fi
 
 started=$(date -u +%s)
-log "старт: режим $mode, писатель ${RADAR_WRITER}/${RADAR_WRITER_ID}, дедлайн ${deadline} с"
+# Бюджет ФЕТЧА — дедлайн минус резерв на расчёт, публикацию и алерты. Висящий (не
+# отказавший) источник стоит ~93 с на ряд; без бюджета timeout убивал прогон ДО
+# публикации, и blackhole одного ISS замораживал панель целиком (lib/runbudget.py).
+# Резерв 150 с померен по журналу: расчёт+публикация+алерты укладываются в 40–60 с
+# даже с походом комментатора к модели.
+export RADAR_FETCH_BUDGET_S="${RADAR_FETCH_BUDGET_S:-$(( deadline > 300 ? deadline - 150 : deadline / 2 ))}"
+
+log "старт: режим $mode, писатель ${RADAR_WRITER}/${RADAR_WRITER_ID}, дедлайн ${deadline} с, бюджет фетча ${RADAR_FETCH_BUDGET_S} с"
 
 status=0
 # --kill-after: у конвейера есть шанс закрыть запись и снять лиз по TERM; если не успел

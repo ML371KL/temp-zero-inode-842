@@ -124,6 +124,25 @@ class TimerCase(unittest.TestCase):
             self.assertTrue(os.path.exists(os.path.join(OPS, name)), name)
         self.assertIn("moex-radar recalibrate", unit_text("moex-radar-recalibrate.service"))
 
+    def test_установщик_знает_каждый_юнит_репозитория(self):
+        """Юнит-файл, которого нет в UNITS установщика, молча не будет установлен.
+
+        Список в ops/install-vps.sh — рукописный, и его никто не сверял: новая
+        пара service+timer в репозитории прошла бы CI зелёной, а на VPS её не
+        включил бы никто (класс «режим без юнита», уже стоивший пяти рядов,
+        которые не обновлялись с установки). Проверяем в обе стороны: и забытый
+        юнит, и юнит-призрак, оставшийся в списке после удаления файлов.
+        """
+        sh = open(os.path.join(OPS, "install-vps.sh"), encoding="utf-8").read()
+        m = re.search(r"UNITS=\(([^)]*)\)", sh, re.S)
+        self.assertIsNotNone(m, "в install-vps.sh пропал список UNITS")
+        installed = set(m.group(1).split())
+        on_disk = {f[:-len(".service")] for f in os.listdir(OPS)
+                   if f.startswith("moex-radar-") and f.endswith(".service")}
+        self.assertEqual(installed, on_disk,
+                         f"забытые установщиком: {sorted(on_disk - installed)}; "
+                         f"призраки списка: {sorted(installed - on_disk)}")
+
     def _jitter(self, unit):
         m = re.search(r"^RandomizedDelaySec=(\d+)", unit_text(unit), re.M)
         return int(m.group(1)) // 60 if m else 0

@@ -780,9 +780,17 @@ def flows_from_workbook(url=None):
         return None, "таблица не разобралась: %s" % exc, None
 
     points = {_month_end(m): dict(v) for m, v in months.items()}
-    meta = _meta("ok", wb_url,
-                 "таблица ЦБ, месяцев: %d%s"
-                 % (len(points), ("; " + "; ".join(notes)) if notes else ""),
+    # Выпуск БЕЗ строки своего месяца — не успех: числа могли лечь текстом («н/д»,
+    # артефакт ручной правки xlsx), и «ok/asof=2026-07» без июльских точек выглядел
+    # бы свежей сводкой, а ручной фолбэк inputs/orfr.yml не задействовался бы
+    # никогда. Комментарий в parse_workbook сам требует «угадывать нельзя» — но
+    # до 18.08.2026 требование жило только запиской в notes.
+    status = "ok" if period in months else "error"
+    note = "таблица ЦБ, месяцев: %d%s" % (
+        len(points), ("; " + "; ".join(notes)) if notes else "")
+    if status == "error":
+        note = ("в выпуске %s НЕТ строки своего месяца (числа текстом?); " % period) + note
+    meta = _meta(status, wb_url, note,
                  {"asof": period, "selfcheck": _selfcheck(period, months.get(period, {})),
                   "months": sorted(months), "format": "xlsx"})
     return points, meta, period
@@ -910,7 +918,19 @@ def flows(url=None):
     if key is None:
         return _fallback("не определился период выпуска", pdf_url)
     check = _selfcheck(period, found)
-    meta = _meta("ok", pdf_url, "разобрано категорий: %d" % len(found),
+    # Если сюда пришли ПОСЛЕ отказа таблицы — это не успех, а деградация: PDF-
+    # приложение ЦБ кончилось на феврале 2026, и «успешно разобранный PDF» означает
+    # «февраль навсегда». Разобранные точки честно отдаём (для своего месяца они
+    # верны), но статус — error с причиной отказа ЖИВОГО источника: иначе разовый
+    # 503 на .xlsx замораживал ряд на феврале с вечным «ok» в журнале, и никто не
+    # узнавал, что таблица не читается (ровно так полгода держалось «asof 2026-02»).
+    table_failed = table_why != "запрошен конкретный PDF"
+    status = "error" if table_failed else "ok"
+    note = "разобрано категорий: %d" % len(found)
+    if table_failed:
+        note += ("; ТАБЛИЦА НЕ ПРОЧИТАНА (%s) — PDF ископаемый, свежих месяцев "
+                 "не будет" % table_why)
+    meta = _meta(status, pdf_url, note,
                  {"asof": period, "selfcheck": check, "candidates": audit[:20],
                   "text_chars": len(text)})
     return _flatten({key: dict(found)}, meta)

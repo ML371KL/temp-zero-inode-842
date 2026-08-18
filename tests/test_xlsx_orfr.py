@@ -18,6 +18,7 @@ PDF — февральский. `latest_pdf()` продолжал честно �
 import io
 import unittest
 import zipfile
+from unittest import mock
 
 from tests import need
 
@@ -282,6 +283,24 @@ class FlowsCase(unittest.TestCase):
         meta = self.orfr.flows()[0][2]
         self.assertIn(meta["status"], ("manual_needed", "error"))
         self.assertIn("таблица", (meta.get("note") or "").lower())
+
+    def test_успешный_ископаемый_pdf_не_прячет_отказ_таблицы(self):
+        """PDF-приложение ЦБ кончилось на феврале 2026 — «удачно разобранный PDF»
+        после отказа таблицы означает «февраль навсегда». До 18.08.2026 такой
+        прогон отчитывался status=ok/asof=2026-02: разовый 503 на .xlsx замораживал
+        ряд на полгода, и в журнале каждый месяц стояло «ok»."""
+        self.serve(self.page(), workbook=b"<html>503</html>")
+        with mock.patch.object(self.orfr, "_get_pdf", return_value=b"%PDF"), \
+             mock.patch.object(self.orfr, "pdf_text", return_value="т" * 3000), \
+             mock.patch.object(self.orfr, "parse_flows",
+                               return_value=({"fiz": 12.3, "nfo_du": -37.9}, [])):
+            rows = self.orfr.flows()
+        meta = rows[0][2]
+        self.assertEqual(meta["status"], "error",
+                         "отказ живого источника спрятан за успехом ископаемого")
+        self.assertIn("ТАБЛИЦА НЕ ПРОЧИТАНА", meta.get("note") or "")
+        # Числа февраля при этом не выбрасываются: для своего месяца они верны.
+        self.assertTrue(any("2026-02-28" in vals for _sid, vals, _m in rows))
 
 
 if __name__ == "__main__":

@@ -164,12 +164,19 @@ class TestMirrorIndex(PublishCase):
         self.assertEqual(bucket.objects["raw/_index.json"]["series"], ["imoex"])
         self.assertTrue(res["ok"])
 
-    def test_недоступный_бакет_не_стирает_манифест(self):
-        # Чтение упало — но запись манифеста идёт всё равно, и в ней не должно
-        # оказаться пусто: иначе одна 503 обнуляет перечень зеркала.
-        bucket = self.install(FakeBucket(self.publish, read_fails=True).install(self))
-        self.publish.publish(self.payload(), "daily", store=FakeStore(["imoex", "rgbi"]))
-        self.assertEqual(bucket.objects["raw/_index.json"]["series"], ["imoex", "rgbi"])
+    def test_отказ_чтения_манифеста_не_перезаписывает_его(self):
+        # «Манифеста нет» и «манифест не прочитался» — разные исходы. У запасного
+        # писателя local — 23 суточных ряда: перезапись при временной 503 вычеркнула
+        # бы 80+ имён, включая ногу ядра. При отказе чтения манифест не трогаем.
+        bucket = self.install(FakeBucket(
+            self.publish, {"raw/_index.json": {"series": ["urals_tax", "imoex"]}},
+            read_fails=True).install(self))
+        res = self.publish.publish(self.payload(), "daily", store=FakeStore(["imoex", "rgbi"]))
+        self.assertEqual(bucket.objects["raw/_index.json"]["series"],
+                         ["urals_tax", "imoex"], "манифест перезаписан вслепую")
+        self.assertIsNone(res["raw_indexed"])
+        self.assertTrue(any("манифест не прочитался" in e for e in res["errors"]))
+        self.assertTrue(res["ok"], "витрину это ронять не должно")
 
     def test_без_стора_манифест_не_трогаем(self):
         # Прогон без стора ничего о зеркале не знает: пустой манифест был бы враньём.
@@ -235,6 +242,134 @@ class TestMonitorsHistory(PublishCase):
         self.assertNotIn("history/monitors.json", res["objects"])
 
 
+class TestTrimLadder(PublishCase):
+    """Лестница обрезки: ПОРЯДОК ступеней и остановка «влезло — не режем дальше».
+
+    До 18.08.2026 ни то, ни другое не закреплялось: переворот TRIM_STEPS (события
+    режутся первыми, спарклайны последними) и снятие ранней остановки проходили
+    зелёными. Порядок — содержательное решение: сверху то, чего меньше всего жалко.
+    """
+
+    def fat(self, n=15000):
+        p = self.payload(states={"current": {"trend": 0, "vol": 1, "bond": 1},
+                                 "series": pairs(n)},
+                         core_extra={"series": pairs(n)},
+                         monitors=[{"id": "rvi", "status": "ok", "asof": ASOF,
+                                    "headline": "х", "payload": {"series": pairs(800)}}])
+        p["events"] = [{"ts": ASOF + "T10:00:00Z", "kind": "state_cell_change",
+                        "severity": "info", "text": "событие %d" % i}
+                       for i in range(30)]
+        p["core"]["components"] = [{"id": "usd_mom63", "spark": pairs(500)}]
+        return p
+
+    def test_события_режутся_последними(self):
+        # Журнал — самое дорогое: он режется, только когда всё остальное не помогло.
+        payload = self.fat()
+        data, cut = self.publish.fit_size(payload, limit=200 * 1024)
+        self.assertIn("core_series", cut)
+        self.assertNotIn("events", cut, "события порезаны раньше дешёвых ступеней")
+        self.assertEqual(len(payload["events"]), 30)
+
+    def test_остановка_как_только_влезло(self):
+        # Лимит, который закрывается первой же ступенью: остальные не трогаем.
+        payload = self.fat(n=600)
+        big = len(self.publish.dumps(payload))
+        data, cut = self.publish.fit_size(payload, limit=big - 1000)
+        self.assertEqual(cut, ["monitor_series"],
+                         "лестница продолжила резать после того, как влезла")
+        self.assertTrue(payload["core"]["components"][0].get("spark"),
+                        "спарклайны срезаны, хотя лимит уже был выдержан")
+
+    def test_порядок_ступеней_заморожен(self):
+        self.assertEqual([name for name, _ in self.publish.TRIM_STEPS],
+                         ["monitor_series", "spark", "core_series",
+                          "states_series", "events"])
+
+    def test_события_режутся_с_хвоста_старого(self):
+        # мутация ev[-20:] -> ev[:20]: остаются двадцать СТАРЕЙШИХ, свежее событие
+        # (то, ради которого журнал и читают) вылетает первым.
+        payload = self.fat()
+        self.publish.fit_size(payload, limit=10 * 1024)
+        texts = [e["text"] for e in payload["events"]]
+        self.assertEqual(len(texts), 20)
+        self.assertIn("событие 29", texts, "свежайшее событие срезано")
+        self.assertNotIn("событие 0", texts, "старьё пережило обрезку вместо свежего")
+
+
+class TestMirrorShrinkGuard(PublishCase):
+    """raw/{sid}.json — единственная восстановимая копия рядов, которых нет в git.
+
+    Сценарий катастрофы (аудит 18.08.2026): карантин битого файла в сторе -> ряд
+    строится заново из одной свежей точки -> зеркало затирается огрызком, и
+    реколибровка на пустом раннере молча считает по нему. Дорогие ряды (zcyc ~2900
+    запросов ISS) штатным прогоном не бэкфиллятся — затирание необратимо.
+    """
+
+    def full(self, n=60):
+        return {"id": "urals_tax", "points": {f"20{i:02d}-01-31": 40.0 + i for i in range(n)}}
+
+    def dirty_store(self, points):
+        store = FakeStore(["urals_tax"])
+        store.list_dirty = lambda: ["urals_tax"]
+        store.load_series = lambda sid: {"id": sid, "points": points}
+        return store
+
+    def install(self, bucket):
+        p = mock.patch.object(self.publish.r2, "get", bucket._get)
+        p.start()
+        self.addCleanup(p.stop)
+        return bucket
+
+    def test_огрызок_не_затирает_полное_зеркало(self):
+        bucket = self.install(FakeBucket(
+            self.publish, {"raw/urals_tax.json": self.full(60)}).install(self))
+        res = self.publish.publish(self.payload(), "daily",
+                                   store=self.dirty_store({"2026-08-18": 41.0}))
+        self.assertEqual(len(bucket.objects["raw/urals_tax.json"]["points"]), 60,
+                         "канон затёрт огрызком")
+        self.assertTrue(any("сжался 60 -> 1" in e for e in res["errors"]), res["errors"])
+        self.assertNotIn("urals_tax", res["raw_mirrored"])
+
+    def test_ретро_правка_и_рост_проходят(self):
+        # Штатные случаи: ряд вырос, ряд чуть уточнён — зеркалим как раньше.
+        grown = {f"20{i:02d}-01-31": 40.0 + i for i in range(61)}
+        bucket = self.install(FakeBucket(
+            self.publish, {"raw/urals_tax.json": self.full(60)}).install(self))
+        self.publish.publish(self.payload(), "daily", store=self.dirty_store(grown))
+        self.assertEqual(len(bucket.objects["raw/urals_tax.json"]["points"]), 61)
+
+    def test_первое_зеркало_пишется_без_вопросов(self):
+        bucket = self.install(FakeBucket(self.publish).install(self))
+        self.publish.publish(self.payload(), "daily",
+                             store=self.dirty_store({"2026-08-18": 41.0}))
+        self.assertIn("raw/urals_tax.json", bucket.objects)
+
+    def test_нечитаемый_бакет_не_перезаписывается_вслепую(self):
+        # Если старое зеркало не прочиталось, писать поверх нельзя: перезаписывать
+        # канон, не увидев его, — исходная ошибка. Ряд останется dirty и приедет
+        # следующим прогоном.
+        bucket = self.install(FakeBucket(
+            self.publish, {"raw/urals_tax.json": self.full(60)}, read_fails=True
+        ).install(self))
+        store = self.dirty_store({"2026-08-18": 41.0})
+        res = self.publish.publish(self.payload(), "daily", store=store)
+        self.assertEqual(len(bucket.objects["raw/urals_tax.json"]["points"]), 60)
+        self.assertTrue(any("не перезаписываю вслепую" in e for e in res["errors"]))
+        self.assertEqual(store.cleared, [], "ряд обязан остаться в очереди зеркала")
+
+
+class TestNanGate(PublishCase):
+    def test_nan_не_уезжает_в_бакет_и_не_роняет_прогон(self):
+        # json.dumps по умолчанию пишет NaN литералом, JSON.parse браузера падает
+        # на нём первым символом — один NaN убивал всю витрину для всех читателей.
+        bucket = FakeBucket(self.publish, {"data.json": self.payload()}).install(self)
+        res = self.publish.publish(self.payload(core=float("nan")), "daily", store=None)
+        self.assertFalse(res["ok"])
+        self.assertIn("не сериализуется", res["reason"])
+        self.assertEqual(bucket.objects["data.json"]["core"]["value"], 0.68,
+                         "прежняя витрина обязана уцелеть")
+
+
 class TestIntegrityGate(PublishCase):
     def test_empty_core_is_not_published_over_a_good_panel(self):
         # мутация: публиковать как раньше -> авария конвейера доезжает до читателя
@@ -256,6 +391,20 @@ class TestIntegrityGate(PublishCase):
         res = self.publish.publish(broken, "daily", store=None, dry_run=True)
         self.assertFalse(res["ok"])
         self.assertIsNotNone(self.local("data.json"))
+
+    def test_нечитаемый_эталон_блокирует_битую_витрину(self):
+        # Fail-closed: «эталон не прочитался» ≠ «эталона нет». В бакете может лежать
+        # живая витрина, и публиковать поверх неё пустоту вслепую нельзя.
+        bucket = FakeBucket(self.publish, {"data.json": self.payload()},
+                            read_fails=True).install(self)
+        broken = self.publish.build_payload(core={"value": None}, states={"current": {}},
+                                            monitors=[], sources={}, mode="daily", asof=ASOF)
+        res = self.publish.publish(broken, "daily", store=None)
+        self.assertFalse(res["ok"])
+        self.assertFalse(res["published"])
+        self.assertIn("вслепую", res["reason"])
+        self.assertEqual(bucket.objects["data.json"]["core"]["value"], 0.68,
+                         "живая витрина затёрта при недоступном эталоне")
 
     def test_runner_without_local_copy_asks_the_bucket_first(self):
         # У фолбэка GHA STATE_DIR пустой каждый прогон: без этого вопроса подмена

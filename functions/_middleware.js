@@ -28,13 +28,22 @@
  * разберёт путь.
  */
 
-// Хэш инлайн-скрипта темы из web/index.html (он ставит тему ДО первой отрисовки,
-// иначе ночью моргает светлая). Считается по содержимому <script> с переводами строк
-// LF: в git файлы лежат с LF (.gitattributes), рабочая копия на Windows может быть с
-// CRLF — хэш от CRLF-версии не совпадёт с тем, что увидит браузер. Пересчитывать при
-// любой правке того скрипта; расхождение ловит шаг «CSP: хэш инлайн-скрипта» в CI и
-// печатает готовую строку на замену.
-const THEME_SCRIPT_HASH = "sha256-PA8O/+/oTkckcd/QPa19vldLqOXpYDStFgytBGbPYIg=";
+// Хэши инлайн-скриптов темы — ПО ОДНОМУ НА КАЖДУЮ СТРАНИЦУ, где такой скрипт
+// есть (index.html и guide.html; скрипты РАЗНЫЕ — у руководства своя ветка
+// ?theme=). Middleware ставит один CSP на все ответы, поэтому разрешён должен
+// быть каждый. До 18.08.2026 здесь жил только хэш index.html — и на проде тема
+// руководства была молча заблокирована политикой: сохранённая тёмная не
+// применялась, ссылка guide.html?theme=dark была мертва, а CI-страж читал только
+// index.html и оставался зелёным.
+// Хэш считается по содержимому <script> с переводами строк LF: в git файлы лежат
+// с LF (.gitattributes), рабочая копия на Windows может быть с CRLF — хэш от
+// CRLF-версии не совпадёт с тем, что увидит браузер. Расхождение ловит шаг
+// «CSP: хэш инлайн-скрипта» в CI (ops/check_csp_hash.py, теперь по ВСЕМ
+// web/*.html) и печатает готовые строки на замену.
+const THEME_SCRIPT_HASHES = [
+  "sha256-PA8O/+/oTkckcd/QPa19vldLqOXpYDStFgytBGbPYIg=", // web/index.html
+  "sha256-4COtdqL63LhN3YXNnAJwaSWYBx/Qn6WXFR268NuVrKA=", // web/guide.html
+];
 
 // 'unsafe-inline' в style-src — вынужденно и осознанно: web/charts.js ставит атрибут
 // style через setAttribute в шести местах (отступы карточек и сетка), и без него
@@ -45,7 +54,7 @@ const THEME_SCRIPT_HASH = "sha256-PA8O/+/oTkckcd/QPa19vldLqOXpYDStFgytBGbPYIg=";
 // iframe.
 const CSP = [
   "default-src 'none'",
-  `script-src 'self' '${THEME_SCRIPT_HASH}'`,
+  `script-src 'self' ${THEME_SCRIPT_HASHES.map((h) => `'${h}'`).join(" ")}`,
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self'",
   "connect-src 'self'",

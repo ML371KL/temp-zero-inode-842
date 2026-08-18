@@ -234,10 +234,23 @@ def get_text(url, encoding="utf-8", **kw):
                          url=url, cause=e) from e
 
 
+def _reject_nonfinite(name):
+    """NaN/Infinity в ответе источника — отказ, а не число.
+
+    json.loads по умолчанию принимает их (расширение Python), а дальше они
+    неотличимы от обычного float: пролезают в стор, в композит и в data.json,
+    где json.dumps сериализует NaN литералом — и JSON.parse браузера падает на
+    ПЕРВОМ символе, убивая всю витрину разом (publish.dumps закрывает выход тем
+    же правилом: allow_nan=False). Ловим на входе, где ещё известно, какой
+    источник виноват.
+    """
+    raise ValueError(f"источник прислал {name} вместо числа")
+
+
 def get_json(url, encoding="utf-8", **kw):
     """JSON ответа. Битый JSON — тоже отказ источника, а не крах прогона."""
     text = get_text(url, encoding=encoding, **kw)
     try:
-        return json.loads(text)
+        return json.loads(text, parse_constant=_reject_nonfinite)
     except ValueError as e:
         raise FetchError(f"не JSON в ответе {url}: {e}", url=url, cause=e) from e

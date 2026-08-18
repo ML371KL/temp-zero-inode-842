@@ -19,7 +19,8 @@ from tests import need, panel_small
 
 class StatesCase(unittest.TestCase):
     def setUp(self):
-        self.states = need(self, "pipeline.compute.states", "compute_states", "cell_code")
+        self.states = need(self, "pipeline.compute.states", "compute_states", "cell_code",
+                           "_gate_ok")
         self.constants = need(self, "pipeline.lib.constants", "CELL_STATS", "STATE_RULES", "CELL_RULES")
         self.panel = panel_small()
         self.expect = self.panel["expect"]
@@ -243,6 +244,43 @@ class TestRibbon(StatesCase):
         known = {self.states.cell_code(*key) for key in self.constants.CELL_STATS}
         for _day, code in self.out["series"]:
             self.assertIn(code, known)
+
+
+class TestEraGate(StatesCase):
+    """Era-ворота dy_trail в ЗАКРЫТОМ состоянии.
+
+    До 18.08.2026 они не проверялись нигде: мутации «снять era-проверку из
+    _gate_ok» и «era_post22 всегда True» проходили зелёными. Цена — сигнал,
+    валидированный ТОЛЬКО на эре после 2022 (структурный слом дивполитики),
+    молча включался бы на всей истории.
+    """
+
+    def test_до_эры_ворота_закрыты(self):
+        gate = self.states._gate_ok
+        self.assertFalse(gate({"era": "post22"}, {"era_post22": False}),
+                         "era-ворота пропустили сигнал до 2022 года")
+        self.assertTrue(gate({"era": "post22"}, {"era_post22": True}))
+
+    def test_чужая_эра_не_угадывается(self):
+        # Неизвестное значение эры не должно тихо превращаться в «открыто».
+        self.assertTrue(self.states._gate_ok({"era": "post22"},
+                                             {"era_post22": True}))
+        # want, которого _gate_ok не знает («post30»), сегодня проходит ветку
+        # молча — это осознанное ограничение: реестр значений эры один (post22),
+        # и появление второго обязано прийти вместе с правкой ворот. Закрепляем
+        # ХОТЯ БЫ то, что post22 при выключенном флаге не пропускается.
+        self.assertFalse(self.states._gate_ok({"era": "post22", "trend": 1},
+                                              {"era_post22": False, "trend": 1}))
+
+    def test_dy_trail_неактивен_до_эры(self):
+        # Сквозной прогон: та же панель, но с датами до 2022 года — сигнал
+        # с воротами эры обязан пропасть из активных.
+        dates = [d.replace("202", "201", 1) for d in self.panel["dates"]]
+        out = self.states.compute_states({"dates": dates, "cols": self.panel["cols"]})
+        self.assertFalse(out["current"]["era_post22"])
+        active = {s["id"] for s in out["active_signals"]}
+        self.assertNotIn("dy_trail", active,
+                         "сигнал эры после 2022 активен в 2010-х")
 
 
 class TestDegenerate(unittest.TestCase):

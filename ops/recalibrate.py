@@ -41,7 +41,7 @@ for _stream in (sys.stdout, sys.stderr):
         pass
 
 from pipeline.compute import core, panel as panel_mod, states as states_mod  # noqa: E402
-from pipeline.lib import calc, constants, r2, registry, store  # noqa: E402
+from pipeline.lib import calc, constants, mirror, r2, registry, store  # noqa: E402
 
 REFERENCE = ROOT / "validation" / "data" / "walkforward_results.csv"
 OOS_START = "2010-01-01"          # окно walk-forward исследования (REGIME.md §4)
@@ -65,25 +65,13 @@ TONE_CRIT_PCT = -1.5
 # --------------------------------------------------------------- восстановление
 
 def restore_from_r2(target):
-    """Скачать зеркало raw/ в пустой стор. -> (сколько рядов, чего не хватило)."""
-    if not r2.configured():
-        raise SystemExit("стор пуст, а R2 не сконфигурирован — нечем восстанавливать")
-    index = r2.get("raw/_index.json")
-    if not index:
-        raise SystemExit(
-            "в бакете нет raw/_index.json — манифест пишет publish._mirror_index, "
-            "он появится после первого прогона конвейера новой версии. "
-            "До тех пор запускайте реколибровку на VPS, где стор есть локально.")
-    ids = json.loads(index.decode("utf-8")).get("series") or []
-    target.mkdir(parents=True, exist_ok=True)
-    missing = []
-    for sid in ids:
-        body = r2.get(f"raw/{sid}.json")
-        if body is None:
-            missing.append(sid)
-            continue
-        (target / f"{sid}.json").write_bytes(body)
-    return len(ids) - len(missing), missing
+    """Обёртка над общей реализацией (pipeline/lib/mirror.py — ею же пользуется
+    фолбэк-писатель): RestoreError переводится в SystemExit с подсказкой."""
+    try:
+        return mirror.restore_from_r2(target)
+    except mirror.RestoreError as exc:
+        raise SystemExit(f"{exc} До тех пор запускайте реколибровку на VPS, "
+                         f"где стор есть локально.") from exc
 
 
 # ------------------------------------------------------------------- статистика
@@ -245,7 +233,7 @@ def section_cells(labels, fwd, cells, out):
     out.append("")
     # Все пять величин сверяются с кодом, а не только среднее: раздел называется
     # «против constants.CELL_STATS», а сверял одну из пяти и три печатал без базы.
-    out.append("| ячейка | n | средн сейчас / в коде | Δ в ст.ош. | медиана сейчас / в коде "
+    out.append("| ячейка | n | средн (лог-%) сейчас / в коде | Δ в ст.ош. | медиана сейчас / в коде "
                "| плюсовых сейчас / в коде | худший сейчас / в коде |")
     out.append("|---|---|---|---|---|---|---|")
     BITS = {"bull": 1, "bear": 0, "calm": 0, "stress": 1, "ok": 0}
@@ -259,10 +247,15 @@ def section_cells(labels, fwd, cells, out):
         v = sorted(rows[code])
         n = len(v)
         raw_mean = sum(v) / n
-        mean = pc(raw_mean)
+        # Среднее сравнивается с ref.mean_fwd1m_pct, а тот — ЛОГ-СРЕДНЕЕ
+        # исследования (constants.py). pc() здесь давал фантомный зазор Йенсена
+        # 0,04–0,07 п.п. до всякого дрейфа: одно состояние описывалось тремя
+        # числами. Медиана/худший/лучший остаются в простых процентах — их
+        # замороженные визави посчитаны так же (expm1 с обеих сторон).
+        mean = raw_mean * 100.0
         med = pc(v[n // 2] if n % 2 else (v[n // 2 - 1] + v[n // 2]) / 2)
         sd = math.sqrt(sum((x - raw_mean) ** 2 for x in v) / (n - 1)) if n > 1 else 0.0
-        se_pp = pc(sd / math.sqrt(n)) if n > 1 else 0.0
+        se_pp = (sd / math.sqrt(n)) * 100.0 if n > 1 else 0.0  # та же лог-мера, что mean
         p = code.split("|")
         ref = constants.CELL_STATS.get((BITS[p[0]], BITS[p[1]], BITS[p[2]])) or {}
         ref_mean = ref.get("mean_fwd1m_pct")
@@ -485,23 +478,48 @@ def notify(verdicts, health, mode, out_path, now=None):
         findings.append(("health_review",
                          f"здоровье ниже нуля {health.get('below_zero_months')} мес подряд — "
                          f"порог §7 на пересмотр состава достигнут"))
+    idents = sorted(ident for ident, _ in findings)
     quarter = now.month in QUARTER_MONTHS
-    if mode == "auto" and not findings and not quarter:
-        return "молчу: расхождений нет, месяц не квартальный"
 
-    head = "Реколибровка: есть расхождения" if findings else "Реколибровка: расхождений нет"
-    lines = [head] + [f"• {text}" for _, text in findings]
+    # Память о ПОСЛЕДНЕМ ДОЛОЖЕННОМ составе — файл, а не маркеры телеграма.
+    # Маркерная память ломала оба обещания докстринга: вернувшаяся находка с тем
+    # же составом молчала, пока жив маркер (400 суток), а ИСЧЕЗНОВЕНИЕ находок в
+    # неквартальный месяц не сообщалось вовсе — владелец, получивший «есть
+    # расхождения», оставался с этим знанием навсегда. Сообщаем на ПЕРЕХОДАХ
+    # состава в обе стороны; файл двигается только после успешной доставки.
+    state_path = telegram.state_dir() / "recalibration" / "last_findings.json"
+    try:
+        reported = json.loads(state_path.read_text(encoding="utf-8")).get("idents")
+    except (OSError, ValueError, AttributeError):
+        reported = None
+    changed = (sorted(reported) != idents) if isinstance(reported, list) else bool(idents)
+
+    if mode == "auto" and not changed and not (quarter and not idents):
+        return "молчу: состав находок не менялся" + ("" if idents else ", месяц не квартальный")
+
+    if idents:
+        lines = ["Реколибровка: есть расхождения"] + [f"• {text}" for _, text in findings]
+    elif isinstance(reported, list) and reported:
+        lines = ["Реколибровка: прежние расхождения сняты",
+                 "Состав, о котором сообщалось раньше, больше не воспроизводится."]
+    else:
+        lines = ["Реколибровка: расхождений нет"]
     if out_path:
         lines.append(f"Полный отчёт: {out_path}")
 
-    if findings:
-        idents = "\n".join(sorted(ident for ident, _ in findings))
-        digest = hashlib.sha256(idents.encode("utf-8")).hexdigest()[:16]
-        key = f"recalibrate:{digest}"
-    else:
-        # Подтверждение «всё чисто» — не находка, а сердцебиение: ровно одно на квартал.
-        key = f"recalibrate-ok:{now.year}Q{(now.month - 1) // 3 + 1}"
+    digest = hashlib.sha256("\n".join(idents).encode("utf-8")).hexdigest()[:16]
+    # Ключ несёт состав И день: дедуп двойного запуска в один день остаётся за
+    # маркером (в т.ч. в режиме always), межзапусковый — за файлом состава выше.
+    key = f"recalibrate:{digest}:{now.strftime('%Y-%m-%d')}"
     outcome = telegram.deliver(key, "\n".join(lines), channel="ops")
+    if outcome in (telegram.SENT, telegram.DUP):
+        try:
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text(json.dumps({"idents": idents,
+                                              "reported_at": now.strftime("%Y-%m-%d")},
+                                             ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass  # память не записалась — в худшем случае скажем ещё раз
     return f"telegram({outcome})"
 
 
@@ -523,8 +541,12 @@ def main():
         # уведомление докладывали вердикты как достоверные. Отсутствие ноги ядра даёт
         # композит из двух ног вместо трёх — то есть «композит разошёлся с эталоном»
         # и health=dead на ровном месте. Такое считать нельзя вовсе.
-        critical = [sid for sid in missing
-                    if (registry.SERIES.get(sid) or {}).get("required")]
+        # Полнота меряется по ФАЙЛАМ на диске, а не по списку missing: ряд,
+        # выпавший из самого манифеста, в missing не попадает, а отсутствует так же.
+        # Критичны и required, и ноги ядра (role=core): urals_tax не required —
+        # разовый отказ месячного источника прогон не роняет, — но модель без него
+        # ДРУГАЯ, и «композит разошёлся с эталоном» был бы ложным выводом отчёта.
+        critical = mirror.missing_critical(raw)
         if critical:
             raise SystemExit(
                 "восстановление неполное: не хватает обязательных рядов "

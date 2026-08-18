@@ -85,8 +85,22 @@ def _yes_price(market):
 
 
 def _yes_token(market):
+    """Токен исхода YES — по ИМЕНИ исхода, как в _yes_price, а не tokens[0].
+
+    Порядок outcomes API не обещан (сам модуль говорит это строчкой выше), и
+    рынок с порядком [No, Yes] превращал бы ВСЮ историю цен в 1−p: тайл
+    «Вероятность перемирия» показывал бы 95% вместо 5% со статусом ok. Если
+    сопоставить токен исходу нельзя (длины разошлись) — честный None, а не
+    угаданный первый.
+    """
     tokens = _as_list(market.get("clobTokenIds"))
-    return str(tokens[0]) if tokens else None
+    outcomes = [str(o).lower() for o in _as_list(market.get("outcomes"))]
+    if tokens and outcomes and len(tokens) == len(outcomes):
+        for name, token in zip(outcomes, tokens):
+            if name.startswith("yes"):
+                return str(token)
+        return None  # исхода Yes в рынке нет — чужой токен брать нельзя
+    return str(tokens[0]) if tokens and not outcomes else None
 
 
 def _meta(status, url, note=None, extra=None):

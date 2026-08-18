@@ -87,6 +87,14 @@ def can_write(wid=None, role=None, now=None):
            else DEFAULT_TTL)
     if age is None:
         return True, "в лизе нет heartbeat — считаем его протухшим"
+    # Метка из БУДУЩЕГО — битые часы, а не свежесть: отрицательный возраст проходил
+    # проверку age > ttl «свежим» ВСЕГДА, и сломанный NTP на VPS блокировал ручной
+    # фолбэк на всю величину сдвига плюс TTL — витрина стояла, сторож кричал, а
+    # оператор считал, что фолбэк работает. Допуск 10 минут прощает обычный дрейф
+    # часов двух машин.
+    if age < -600:
+        return True, (f"heartbeat из будущего на {int(-age // 60)} мин — часы VPS "
+                      f"сломаны, лиз считаем битым")
     if age > ttl:
         return True, f"heartbeat VPS протух: {int(age // 60)} мин > {ttl // 60} мин"
     return False, f"пишет VPS, heartbeat {int(age // 60)} мин назад"

@@ -32,6 +32,19 @@ ExecStart=/usr/local/sbin/moex-radar recalibrate
 ExecStopPost=-+/usr/local/sbin/dash-alert %n
 # Дедлайн обвязки — 900 с, здесь потолок выше: юнит ждёт ещё и замок стора (240 с).
 TimeoutStartSec=1500
+
+# Песочница и лимиты — те же, что у сборочных юнитов: реколибровка строит ПОЛНУЮ
+# панель (та же память, что суточный прогон), а машина общая — отказ этого юнита
+# обязан оставаться его отказом, а не смертью sshd от глобального OOM.
+StateDirectory=moex-radar
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+NoNewPrivileges=yes
+# Репозиторий пишется: обвязка делает git fetch/reset перед каждым прогоном.
+ReadWritePaths=/srv/dash/repo-842
+MemoryHigh=512M
+MemoryMax=1G
 Nice=10
 
 [Install]

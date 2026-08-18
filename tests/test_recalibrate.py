@@ -102,6 +102,16 @@ class NotifyCase(unittest.TestCase):
     def setUp(self):
         self.rc = need(self, "ops.recalibrate", "notify", "QUARTER_MONTHS")
         self.telegram = need(self, "pipeline.lib.telegram", "deliver", "SENT")
+        # Свой STATE_DIR: notify помнит последний доложенный состав в файле, и без
+        # изоляции тесты травили бы друг друга (и рабочий .state репозитория).
+        import os
+        from tempfile import TemporaryDirectory
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        prev = os.environ.get("STATE_DIR")
+        os.environ["STATE_DIR"] = self.tmp.name
+        self.addCleanup(lambda: os.environ.__setitem__("STATE_DIR", prev)
+                        if prev is not None else os.environ.pop("STATE_DIR", None))
         self.sent = []
 
         def fake(key, text, silent=False, cooldown_hours=None, channel="alerts"):
@@ -178,6 +188,24 @@ class NotifyCase(unittest.TestCase):
     def test_режим_never_молчит_всегда(self):
         self.assertEqual(self.call(verdicts=[("что-то", "текст")], when=JAN, mode="never"), "выключено")
         self.assertEqual(self.sent, [])
+
+    def test_исчезновение_находок_сообщается(self):
+        # Обещание докстринга: «появилась ИЛИ УШЛА проблема — сообщение». Раньше
+        # пустой набор в неквартальный месяц молчал, и владелец, получивший «есть
+        # расхождения», оставался с этим знанием навсегда.
+        self.call(verdicts=[("cell:x", "разошлось")], when=FEB)
+        self.call(when=MAR)
+        self.assertEqual(len(self.sent), 2)
+        self.assertIn("сняты", self.sent[1]["text"])
+
+    def test_вернувшаяся_находка_говорит_заново(self):
+        # Память — последний ДОЛОЖЕННЫЙ состав, а не маркер на 400 суток: состав
+        # «разошлось -> чисто -> снова разошлось» обязан дать три сообщения.
+        self.call(verdicts=[("cell:x", "разошлось")], when=FEB)
+        self.call(when=MAR)
+        self.call(verdicts=[("cell:x", "разошлось")], when=APR)
+        self.assertEqual(len(self.sent), 3)
+        self.assertIn("есть расхождения", self.sent[2]["text"])
 
 
 if __name__ == "__main__":

@@ -284,6 +284,37 @@ class TestCbrFx(FetcherCase):
         self.assertAlmostEqual(points["2026-08-03"], 123.4567, places=6)
 
 
+class TestCbrFutureDates(FetcherCase):
+    """Дата из будущего в ответе ЦБ не попадает в ряд.
+
+    Инвариант «точка вне запрошенного окна в ряд не попадает» жил только в
+    ISS-фетчерах. Цена дыры у ЦБ выше: один битый Record Date (2099-12-31 — класс
+    сбоя, уже ловленный у ISS) отравляет usd_cbr — НОГУ ЯДРА — навсегда: upsert
+    сливает точки, incremental_start видит «последняя точка в будущем» и каждый
+    прогон заново тянет историю с 2003-го, а вычистить фантом можно только рукой.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.cbr = need(self, "pipeline.fetch.cbr", "fx", "_drop_future")
+
+    def test_битая_дата_из_будущего_отбрасывается(self):
+        xml = ('<ValCurs><Record Date="11.08.2026" Id="R01235">'
+               '<VunitRate>91,3388</VunitRate></Record>'
+               '<Record Date="31.12.2099" Id="R01235">'
+               '<VunitRate>999,0</VunitRate></Record></ValCurs>')
+        self.serve_const(xml.encode("windows-1251"))
+        _sid, points, _meta = self.cbr.fx(code="R01235", start="2026-08-03",
+                                          end="2026-08-11")
+        self.assertEqual(points, {"2026-08-11": 91.3388})
+
+    def test_законное_завтра_переживает_фильтр(self):
+        # ЦБ публикует курс на завтра сегодня: точка чуть дальше края окна легальна.
+        pts = {"2026-08-11": 91.0, "2026-08-12": 91.5, "2026-09-30": 999.0}
+        self.cbr._drop_future(pts, "2026-08-11", "usd_cbr")
+        self.assertEqual(sorted(pts), ["2026-08-11", "2026-08-12"])
+
+
 class TestCbrTables(FetcherCase):
     def setUp(self):
         super().setUp()

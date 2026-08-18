@@ -87,6 +87,12 @@ class TestRequestWindow(IssCase):
     def test_futures_window_compares_dates_as_strings(self):
         # У futures_br frm/till — datetime.date, а дата из ответа строка: наивное
         # `frm <= day <= till` роняет фетчер TypeError на КАЖДОМ прогоне.
+        #
+        # Часы ЗАМОРОЖЕНЫ: _front_contract отбирает живые контракты по today_msk(),
+        # и фикстура с экспирацией 2026-08-31 была календарной бомбой — с 01.09
+        # весь набор краснел бы «не нашёл живых контрактов BR» на любом прогоне.
+        # CI-гард часов такое не видит: он ищет вызовы часов В тестах, а не
+        # зависимость через прод-код (аудит 18.08.2026).
         def responder(url):
             if "securities.columns" in url:
                 return _payload({"securities": {
@@ -96,7 +102,9 @@ class TestRequestWindow(IssCase):
                             columns=("TRADEDATE", "CLOSE", "SETTLEPRICE"))
 
         self.serve(responder)
-        _sid, points, _meta = self.iss.futures_br(start="2026-08-03", end="2026-08-11")
+        with mock.patch.object(self.iss.dates, "today_msk",
+                               return_value=date(2026, 8, 11)):
+            _sid, points, _meta = self.iss.futures_br(start="2026-08-03", end="2026-08-11")
         self.assertEqual(points, {"2026-08-10": 70.0})
 
     def test_futoi_drops_row_outside_window(self):

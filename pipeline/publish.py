@@ -40,7 +40,13 @@ def _iso(dt=None):
 
 def dumps(payload):
     """Ровно те байты, которые уйдут в бакет (и по которым меряется лимит)."""
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    # allow_nan=False: json.dumps по умолчанию пишет NaN/Infinity ЛИТЕРАЛАМИ, а
+    # JSON.parse браузера падает на них первым же символом — один NaN из любого
+    # источника убивал бы всю витрину для всех читателей до ручной починки.
+    # Здесь это ValueError -> публикация громко падает, прежняя витрина цела.
+    # Вход закрыт тем же правилом в http.get_json (parse_constant).
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"),
+                      allow_nan=False).encode("utf-8")
 
 
 # ------------------------------------------------------------------- вердикт
@@ -90,6 +96,13 @@ def build_verdict(core, states):
 
 def _next_publish():
     """Когда витрину ждёт следующая публикация. None — расписание не прочиталось."""
+    if (os.environ.get("RADAR_WRITER") or "").strip() == "gha":
+        # Обещание расписания исполняет systemd VPS — а фолбэк-раннер жив ровно
+        # потому, что VPS мёртв. Публиковать с раннера «следующий такт в 16:05»
+        # значит гасить баннер свежести обещанием, которое некому сдержать: панель
+        # стояла бы «свежей» до следующего ручного запуска. None возвращает фронт
+        # к плоской норме stale_after_minutes — консервативной и честной в аварии.
+        return None
     try:
         moment = schedule.next_publish_at()
     except Exception:  # noqa: BLE001 — подсказка не имеет права ронять публикацию
@@ -317,13 +330,24 @@ def _mirror_index(store, errors):
         # 105, включая ногу ядра urals_tax и все потоки ОРФР. Следующее восстановление
         # дало бы композит из двух ног вместо трёх, то есть ложное «композит разошёлся
         # с эталоном» и health=dead на ровном месте.
+        # «Манифеста нет» и «манифест не прочитался» — разные исходы, и склеивать их
+        # нельзя: у запасного писателя local — это 23 суточных ряда, и перезапись при
+        # временной 503 вычеркнула бы из манифеста 80+ имён, включая ногу ядра. При
+        # ОТКАЗЕ ЧТЕНИЯ манифест не трогаем вовсе — следующий прогон допишет. Пустой
+        # union позволен только когда бакет ЧЕСТНО ответил «объекта нет» (body None)
+        # или манифест битый (перезапись его лечит).
         previous = set()
         try:
             body = r2.get("raw/_index.json")
-            if body:
+        except (r2.R2Error, OSError) as exc:
+            errors.append(f"raw/_index.json: манифест не прочитался ({exc}) — "
+                          f"не перезаписываю вслепую")
+            return None
+        if body:
+            try:
                 previous = set(json.loads(body.decode("utf-8")).get("series") or [])
-        except (r2.R2Error, OSError, ValueError, TypeError):
-            previous = set()  # манифеста нет или он битый — пишем то, что знаем сами
+            except (ValueError, TypeError, AttributeError, UnicodeDecodeError):
+                previous = set()  # манифест битый — перезапись его только лечит
         ids = sorted(local | previous)
         r2.put_json("raw/_index.json",
                     {"series": ids, "written_at": _iso(), "written_by_local": len(local)},
@@ -334,9 +358,32 @@ def _mirror_index(store, errors):
         return None
 
 
+# Ряд «сжался» — новый объект зеркала на столько меньше прежнего, что это уже не
+# ретро-правка источника, а потеря истории. Порог намеренно грубый: штатные правки
+# (ISS пересчитал обороты, ЦБ уточнил декаду) меняют единицы точек, а сценарий
+# катастрофы — огрызок из 1 свежей точки после карантина против сотен в зеркале.
+MIRROR_SHRINK_RATIO = 0.5
+
+
 def _mirror_raw(store, errors, limit=100):
-    """Зеркалирование грязных рядов в raw/. Без обратной вычитки: их десятки, а
-    критичен только data.json — цена лишней пары запросов выше пользы."""
+    """Зеркалирование грязных рядов в raw/ — с защитой канонической копии от усушки.
+
+    raw/{sid}.json — ЕДИНСТВЕННАЯ восстановимая копия рядов, которых нет в git:
+    из неё поднимаются реколибровка на пустом раннере (ops/recalibrate.py) и стор
+    после потери машины. До 18.08.2026 зеркало писалось без оглядки: карантин
+    битого файла в сторе (store._read_json) оставлял load_series пустым, следующий
+    прогон строил ряд из одной свежей точки — и этот огрызок затирал в бакете
+    последнюю полную копию. Дорогие ряды (zcyc ~2900 запросов ISS, futoi ~750,
+    breadth ~1300) при этом сознательно не бэкфиллятся штатным прогоном, то есть
+    затирание было необратимым до ручного вмешательства.
+
+    Поэтому перед перезаписью объект вычитывается обратно: если новый ряд меньше
+    половины прежнего (MIRROR_SHRINK_RATIO), зеркало НЕ трогаем и говорим вслух.
+    Цена — один GET на грязный ряд (их единицы за прогон). Если старое зеркало не
+    прочиталось (R2 недоступен) — тоже не пишем: перезаписывать канон, не увидев,
+    что перезаписываешь, и есть исходная ошибка. Ряд остаётся dirty и приедет со
+    следующим прогоном.
+    """
     if store is None or not hasattr(store, "list_dirty"):
         return []
     try:
@@ -348,10 +395,27 @@ def _mirror_raw(store, errors, limit=100):
     for sid in dirty[:limit]:
         try:
             obj = store.load_series(sid)
-            if obj:
-                r2.put_json(f"raw/{sid}.json", obj, cache_control="public, max-age=300",
-                            verify=False)
-                done.append(sid)
+            if not obj:
+                continue
+            n_new = len(obj.get("points") or {})
+            try:
+                body = r2.get(f"raw/{sid}.json")
+            except (r2.R2Error, OSError) as exc:
+                errors.append(f"raw/{sid}: старое зеркало не прочиталось ({exc}) — "
+                              f"не перезаписываю вслепую")
+                continue
+            if body:
+                try:
+                    n_old = len((json.loads(body.decode("utf-8")).get("points")) or {})
+                except (ValueError, AttributeError, UnicodeDecodeError):
+                    n_old = 0  # зеркало битое — перезапись его только лечит
+                if n_old and n_new < n_old * MIRROR_SHRINK_RATIO:
+                    errors.append(f"raw/{sid}: ряд сжался {n_old} -> {n_new} точек — "
+                                  f"похоже на потерю истории, зеркало НЕ тронуто")
+                    continue
+            r2.put_json(f"raw/{sid}.json", obj, cache_control="public, max-age=300",
+                        verify=False)
+            done.append(sid)
         except (r2.R2Error, OSError, ValueError) as exc:
             errors.append(f"raw/{sid}: {exc}")
     clear = getattr(store, "clear_dirty", None) or getattr(store, "mark_clean", None)
@@ -391,7 +455,16 @@ def publish(payload, mode="daily", store=None, dry_run=False, history=None):
     # называет «полной историей». Заметно только за 250 КБ, поэтому и не всплывало.
     hist = history if history is not None else build_history(store, payload)
 
-    data, cut = fit_size(payload)
+    try:
+        data, cut = fit_size(payload)
+    except ValueError as exc:
+        # Единственный источник ValueError здесь — allow_nan=False в dumps: где-то в
+        # payload лежит NaN/Infinity. Публиковать нечего (эти байты не разберёт ни
+        # один браузер), но и падать всем прогоном нельзя — контракт publish()
+        # «исключений наружу не выпускает». Прежняя витрина остаётся нетронутой.
+        result["reason"] = f"payload не сериализуется: {exc}"
+        result["errors"].append(result["reason"])
+        return result
     result["bytes"], result["trimmed"] = len(data), cut
     if len(data) > MAX_BYTES:
         # Публикуем всё равно: тяжёлая панель лучше вчерашней. Но это состояние
@@ -403,6 +476,7 @@ def publish(payload, mode="daily", store=None, dry_run=False, history=None):
     if problems:
         result["errors"] += problems
         result["reason"] = "целостность: " + "; ".join(problems)
+        reference_unreadable = False
         if previous is None and not dry_run and r2.configured():
             # Локальной копии нет только у раннера с пустым STATE_DIR (фолбэк GHA).
             # Прежде чем положить «нет данных» поверх живой витрины, спрашиваем бакет:
@@ -411,6 +485,18 @@ def publish(payload, mode="daily", store=None, dry_run=False, history=None):
                 previous = r2.get_json(DATA_KEY)
             except (r2.R2Error, OSError, ValueError) as exc:
                 result["errors"].append(f"чтение {DATA_KEY}: {exc}")
+                reference_unreadable = True
+        if reference_unreadable:
+            # Гейт обязан быть fail-closed. «Эталон не прочитался» и «эталона нет» —
+            # разные исходы: первый значит, что в бакете МОЖЕТ лежать живая витрина,
+            # которую мы сейчас затрём пустотой. Битый payload при недоступном
+            # эталоне не публикуется вовсе; исправного этот путь не касается.
+            result["reason"] += "; эталон не прочитался — битую витрину не публикуем вслепую"
+            try:
+                _write_local(DATA_KEY + ".rejected", data)
+            except OSError as exc:
+                result["errors"].append(f"локальная копия: {exc}")
+            return result
         # Регрессия: вчера число было, сегодня null. Публиковать НЕЛЬЗЯ — иначе
         # авария конвейера доедет до читателя как «нет данных» и станет неотличима
         # от рыночного состояния. Локальную копию тоже не трогаем: из неё интрадей

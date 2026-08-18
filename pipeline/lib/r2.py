@@ -196,7 +196,10 @@ def _verify(key, data):
 
 
 def put_json(key, obj, cache_control="public, max-age=60", verify=True):
-    data = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    # allow_nan=False — как в publish.dumps: NaN литералом ломает JSON.parse у
+    # любого читателя объекта (история, манифест зеркала, леджер).
+    data = json.dumps(obj, ensure_ascii=False, separators=(",", ":"),
+                      allow_nan=False).encode("utf-8")
     return put(key, data, "application/json; charset=utf-8", cache_control, verify)
 
 

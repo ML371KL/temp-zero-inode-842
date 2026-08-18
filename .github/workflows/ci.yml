@@ -105,7 +105,7 @@ jobs:
           # кода с вызовом той же функции — верно при любой поломке. Строки-комментарии
           # (`^[^#]*`) отброшены: имя функции упоминается в объяснениях.
           if git ls-files 'tests/*.py' \
-             | xargs -r grep -nE '^[^#]*(datetime\.now|datetime\.utcnow|date\.today|time\.time|today_msk|msk_now|utc_now)[[:space:]]*\(' \
+             | xargs -r grep -nE '^[^#]*\b(datetime\.now|datetime\.utcnow|[a-zA-Z_]*\.?today|utcnow|time\.time|today_msk|msk_now|utc_now)[[:space:]]*\(' \
              | grep -v 'ci: allow-now'; then
             echo "::error::тест опирается на текущее время (см. строки выше)"
             exit 1

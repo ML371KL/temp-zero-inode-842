@@ -106,7 +106,7 @@ def _sub(store, ids, keys=()):
     """Подряд: сначала отдельные series_id из списка кандидатов, потом словарь в точке.
 
     Имена подрядов в реестре и у фетчеров разошлись (registry описывает futoi_mx с
-    subkeys, а iss.futoi пишет futoi_mx_fiz_pos), поэтому кандидаты перечисляются
+    subkeys, а iss.futoi пишет futoi_mx_pos и родственные), поэтому кандидаты перечисляются
     явно и в порядке предпочтения — то же решение, что в compute/panel.py.
     """
     for sid in ids:
@@ -203,7 +203,7 @@ def _st(sid, pts, meta, now):
         return "error"
     spec = registry.SERIES.get(sid)
     if spec is None:
-        # Подряд вида futoi_mx_fiz_pos в реестре не описан — SLA берём у базового ряда.
+        # Подряды futoi_mx_pos/…_long/…_short в реестре не описаны — SLA у базового ряда.
         base = max((k for k in registry.SERIES if sid.startswith(k)), key=len, default=None)
         spec = registry.SERIES.get(base) or {}
     sla_key = spec.get("sla")
@@ -511,9 +511,14 @@ def _t_dividends(store, now):
                          "index_drag_pct": _r(it.get("index_drag_pct"), 3),
                          "weight_pct": _r(it.get("weight_pct"), 2)})
     else:
-        # Фолбэк: без meta.items ряд несёт только суммы/доходности по датам отсечек.
+        # Фолбэк: без meta.items ряд несёт по датам отсечек ДИВДОХОДНОСТИ в
+        # процентах (контракт обоих источников: fetch/dividends.py unit='pct',
+        # fetch/manual.py). Класть их в amount_bn значило печатать проценты как
+        # миллиарды («выплат 9 млрд» из точки 9,13%) — ошибка масштаба на два
+        # порядка в денежном поле; сумм в этом ряде нет вовсе.
         for d, v in pts:
-            rows.append({"ticker": "?", "ex_date": d[:10], "yield_pct": None, "amount_bn": _r(v, 1)})
+            rows.append({"ticker": "?", "ex_date": d[:10],
+                         "yield_pct": _r(v, 2), "amount_bn": None})
     if not rows:
         return _empty("dividends", "Источник — inputs/dividends.yml (ручной ввод).")
 

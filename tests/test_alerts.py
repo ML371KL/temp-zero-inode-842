@@ -249,7 +249,13 @@ class TestDelivery(AlertsCase):
         keys = self.pending_keys()
         self.assertLessEqual(len(keys), self.alerts.PENDING_MAX)
         self.assertIn("bond_off:" + ASOF, keys)
-        self.assertIn("bond_off:" + ASOF, keys)
+        # Свёрнутые в семейство ключи тоже обязаны пережить срез очереди (дубль
+        # первой проверки, стоявший здесь, закреплял присутствие лишь одного
+        # события — аудит 18.08.2026): без merged повтор слал бы слитую тройку
+        # заново по отдельности.
+        queued = next(e for e in self.state()["pending"]
+                      if e["key"] == "bond_off:" + ASOF)
+        self.assertIn("cell:%s:bear|calm|ok" % ASOF, queued.get("merged") or [])
 
     def test_dry_run_does_not_eat_the_transition(self):
         self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
@@ -306,6 +312,80 @@ class TestSeedFromPublishedPayload(AlertsCase):
         self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
         state = self.state()
         self.assertFalse(self.alerts.seed_from_payload(state, payload(bond=0), NOW))
+
+    def test_журнал_витрины_переживает_подмену_писателя(self):
+        # Фолбэк с чистым STATE_DIR публиковал ленту из одних событий своего прогона
+        # поверх журнала, который читатели видели минуту назад: авария VPS выглядела
+        # как «панель забыла всё, что рассказывала».
+        published = payload()
+        published["events"] = [
+            {"key": "old:1", "ts": "2026-08-10T10:00:00Z", "kind": "state_cell_change",
+             "severity": "info", "text": "Смена режима: было и прошло."},
+            {"key": "old:2", "ts": "2026-08-11T10:00:00Z", "kind": "core_flip",
+             "severity": "warn", "text": "Разворот, о котором рассказывали вчера."},
+            # Санитарное в опубликованной ленте не живёт по построению, но витрина —
+            # внешний вход: если оно там оказалось, восстанавливать его нельзя.
+            {"key": "ops:x", "ts": "2026-08-11T11:00:00Z", "kind": "source_stale",
+             "severity": "warn", "text": "источник отстал"},
+        ]
+        self.alerts.run(payload(), dry_run=False, now=NOW, seed_payload=published)
+        feed = self.alerts.payload_events()
+        texts = " | ".join(e.get("text") or "" for e in feed)
+        self.assertIn("было и прошло", texts,
+                      "журнал прошлых событий потерян при подмене писателя")
+        self.assertIn("рассказывали вчера", texts)
+        self.assertNotIn("источник отстал", texts,
+                         "санитарное событие въехало в журнал из витрины")
+        # А дедуп по ключу продолжает работать: то же событие не задвоится.
+        state = self.state()
+        self.assertEqual([e.get("key") for e in state.get("feed") or []],
+                         ["old:1", "old:2"])
+
+
+class TestCbDecision(AlertsCase):
+    """Сюрприз решения ЦБ меряется от консенсуса ПРОШЕДШЕГО заседания.
+
+    Ставка попадает в ряд key_rate на 1–3 рабочих дня позже решения (16 из 17 смен
+    с 2023 — ровно +3 дня), и к этому моменту consensus тайла смотрит уже на
+    СЛЕДУЮЩЕЕ заседание. До 18.08.2026 сюрприз считался от него: в типовом сценарии
+    флагманский вердикт («в линию» или «выше/ниже ожиданий») был всегда неверен, а
+    поле last_consensus, заведённое тайлом ровно для этого, не читал никто.
+    """
+
+    def tile(self, key_rate, consensus=None, last_consensus=None):
+        t = tile_cb(days_left=30, key_rate=key_rate, consensus=consensus)
+        t["payload"]["last_meeting"] = "2026-09-11"
+        t["payload"]["last_consensus"] = last_consensus
+        return t
+
+    def decide(self, old, new, consensus=None, last_consensus=None):
+        self.seed(payload(monitors=[self.tile(old)]))
+        evs = self.alerts.run(payload(monitors=[self.tile(new, consensus, last_consensus)]),
+                              dry_run=False, now=NOW)
+        return next(e for e in evs if e["kind"] == "cb_decision")
+
+    def test_сюрприз_от_прошедшего_заседания_а_не_будущего(self):
+        # Прошедшее: ждали удержания 16,00, ЦБ дал 15,00 (−100 б.п. к ожиданиям).
+        # Будущее заседание с консенсусом 14,00 обязано быть проигнорировано:
+        # от него «сюрприз» вышел бы +100 б.п. — противоположный знак.
+        ev = self.decide(16.0, 15.0, consensus=14.0, last_consensus=16.0)
+        self.assertEqual(ev["severity"], "warn")
+        self.assertIn("ниже", ev["meaning"])
+        self.assertIn("100", ev["meaning"])
+        self.assertIn("16,00", ev["meaning"])
+        self.assertNotIn("14,00", ev["meaning"])
+
+    def test_без_консенсуса_прошедшего_честное_нечем(self):
+        # Фолбэка на консенсус будущего заседания нет НАМЕРЕННО: честное «сказать
+        # нечем» лучше сюрприза от чужих ожиданий.
+        ev = self.decide(16.0, 15.0, consensus=14.0, last_consensus=None)
+        self.assertEqual(ev["severity"], "info")
+        self.assertIn("нечем", ev["meaning"])
+
+    def test_совпадение_с_ожиданиями_спокойное(self):
+        ev = self.decide(16.0, 15.0, last_consensus=15.0)
+        self.assertEqual(ev["severity"], "info")
+        self.assertIn("совпало", ev["meaning"])
 
 
 class TestCoreMissing(AlertsCase):
@@ -405,6 +485,93 @@ class TestAuctionFreshness(AlertsCase):
         self.assertEqual(self.fire("не дата"), [])
 
 
+class TestDepositAnchor(AlertsCase):
+    """Рост ставок меряется от последнего ОБЪЯВЛЕННОГО уровня, не от вчерашнего.
+
+    Якорь, ползущий за снимком, съедал цикл плавных повышений целиком: десять декад
+    по +0,04 п.п. (порог шума 0,05) — и события «ротация в акции отдаляется» не было
+    ни разу при суммарном сдвиге +0,40. Та же ошибка уже чинилась у _core_flip.
+    """
+
+    def tile(self, pct):
+        return [{"id": "deposit_spread", "status": "ok", "asof": ASOF,
+                 "headline": "ставка", "payload": {"deposit_pct": pct,
+                                                   "deposit_asof": ASOF,
+                                                   "spread_pp": 1.5}}]
+
+    def test_ползучий_рост_даёт_событие(self):
+        self.seed(payload(monitors=self.tile(16.00)))
+        got = []
+        for i in range(1, 11):
+            evs = self.alerts.run(payload(monitors=self.tile(16.00 + 0.04 * i)),
+                                  dry_run=False, now=NOW + timedelta(days=i))
+            got += [e for e in evs if e["kind"] == "deposit_uptick"]
+        self.assertTrue(got, "цикл повышений +0,40 п.п. прошёл без единого события")
+        # «Было» — уровень-якорь, о котором сообщали, а не вчерашний снимок.
+        self.assertIn("→", got[0]["text"])
+
+    def test_дрожь_ниже_порога_молчит(self):
+        self.seed(payload(monitors=self.tile(16.00)))
+        evs = self.alerts.run(payload(monitors=self.tile(16.04)),
+                              dry_run=False, now=NOW)
+        self.assertEqual([e for e in evs if e["kind"] == "deposit_uptick"], [])
+
+    def test_снижение_опускает_якорь(self):
+        # После отката вниз следующий цикл меряется от дна, а не от старого пика.
+        self.seed(payload(monitors=self.tile(16.00)))
+        self.alerts.run(payload(monitors=self.tile(15.00)), dry_run=False,
+                        now=NOW + timedelta(days=1))
+        evs = self.alerts.run(payload(monitors=self.tile(15.10)), dry_run=False,
+                              now=NOW + timedelta(days=2))
+        got = [e for e in evs if e["kind"] == "deposit_uptick"]
+        self.assertTrue(got, "рост от дна потерялся за старым пиком")
+        self.assertIn("15,00", got[0]["text"])
+
+
+class TestOrfrBackdate(AlertsCase):
+    """Смена asof назад — переезд источника, а не публикация.
+
+    Тот же класс, что инцидент аукционов 12.08: восстановление стора сдвинуло дату
+    задним числом, и в телеграм ушла «новость» месячной давности как сегодняшняя.
+    """
+
+    def tile(self, asof):
+        return [{"id": "orfr", "status": "ok", "asof": asof,
+                 "headline": "физлица купили на 12.3 млрд", "payload": {}}]
+
+    def test_откат_даты_назад_молчит(self):
+        self.seed(payload(monitors=self.tile("2026-07-31")))
+        evs = self.alerts.run(payload(monitors=self.tile("2026-05-31")),
+                              dry_run=False, now=NOW)
+        self.assertEqual([e for e in evs if e["kind"] == "orfr_published"], [])
+
+    def test_древний_релиз_не_подаётся_свежим(self):
+        self.seed(payload(monitors=self.tile("2026-01-31")))
+        evs = self.alerts.run(payload(monitors=self.tile("2026-02-28")),
+                              dry_run=False, now=NOW)
+        self.assertEqual([e for e in evs if e["kind"] == "orfr_published"], [])
+
+    def test_настоящая_публикация_проходит(self):
+        self.seed(payload(monitors=self.tile("2026-06-30")))
+        evs = self.alerts.run(payload(monitors=self.tile("2026-07-31")),
+                              dry_run=False, now=NOW)
+        self.assertEqual(len([e for e in evs if e["kind"] == "orfr_published"]), 1)
+
+
+class TestDedupKeepsLast(AlertsCase):
+    def test_при_повторе_ключа_остаётся_свежая_копия(self):
+        # Документированный контракт _dedup («остаётся ПОСЛЕДНЯЯ копия») не
+        # проверялся: мутация keep-first проходила зелёной, а повтор из pending
+        # затирал бы свежую версию события старой (аудит 18.08.2026).
+        old_ev = {"key": "k", "ts": "2026-08-10T10:00:00Z", "kind": "core_flip",
+                  "severity": "info", "text": "старая копия"}
+        new_ev = {"key": "k", "ts": "2026-08-11T10:00:00Z", "kind": "core_flip",
+                  "severity": "warn", "text": "свежая копия"}
+        got = self.alerts._dedup([old_ev, new_ev])
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["text"], "свежая копия")
+
+
 class TestTexts(AlertsCase):
     """Каждое событие обязано нести число и один десятичный разделитель — точку."""
 
@@ -413,7 +580,10 @@ class TestTexts(AlertsCase):
                 "vol": 0, "bond": 1, "health": "ok", "key_rate": 15.0, "deposit": 16.0,
                 "orfr_asof": "2026-06-30", "auction_date": "2026-07-29",
                 "sources": {"iss": "ok"}}
-        state = {"last": prev, "core_sign_alerted": 1, "core_value_alerted": 0.66}
+        state = {"last": prev, "core_sign_alerted": 1, "core_value_alerted": 0.66,
+                 # Якорь депозитной ставки — уровень, о котором СООБЩАЛИ (не
+                 # вчерашний снимок): рост меряется от него.
+                 "deposit_alerted": 16.0}
         mons = [tile_cb(days_left=1, key_rate=14.0, consensus=14.5),
                 {"id": "orfr", "status": "ok", "asof": "2026-07-31",
                  "headline": "физлица купили на 12.3 млрд",
@@ -582,6 +752,92 @@ class TestComment(AlertsCase):
                                lambda *a, **k: calls.append(1)):
             self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=True, now=NOW)
         self.assertEqual(calls, [])
+
+
+class TestRequeueKeepsStructure(AlertsCase):
+    """Повтор из очереди обязан выглядеть так же, как первая отправка.
+
+    События с 14.08 — структуры (title/fact/meaning/where), а телеграм рендерится
+    из СТРУКТУРЫ: render_ops вообще не читает text. EVENT_FIELDS при переходе не
+    расширили, и повтор из pending уходил владельцу пустым слэгом
+    «842 · source_stale» без факта и «куда смотреть» — ровно в аварии, ради
+    которой очередь существует (аудит 18.08.2026).
+    """
+
+    def test_повтор_санитарного_несёт_факт_и_адрес(self):
+        self.seed(payload())
+        self.online = False
+        broken = payload(sources={"iss": {"status": "error", "lag_min": 4300,
+                                          "asof": "2026-08-05"}})
+        self.alerts.run(broken, dry_run=False, now=NOW)
+        self.online = True
+        # Тот же прогон повторяется через час: событие приходит ИЗ ОЧЕРЕДИ.
+        self.alerts.run(broken, dry_run=False, now=NOW + timedelta(hours=1))
+        ops = "\n".join(self.by_channel.get("ops") or [])
+        self.assertIn("journalctl", ops, "повтор потерял «куда смотреть»")
+        self.assertIn("не отвечает", ops, "повтор потерял заголовок события")
+        self.assertIn("05.08.2026", ops, "повтор потерял факт с датой данных")
+
+    def test_повтор_рыночного_не_слипается_в_жирный_ком(self):
+        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
+        self.online = False
+        self.alerts.run(payload(vol=1, bond=0, cell="bear|stress|ok"),
+                        dry_run=False, now=NOW)
+        self.online = True
+        self.alerts.run(payload(vol=1, bond=0, cell="bear|stress|ok"),
+                        dry_run=False, now=NOW + timedelta(hours=1))
+        market = "\n".join(self.by_channel.get("alerts") or [])
+        self.assertIn("<b>", market)
+        # Заголовок закрывается до подробностей: жирным — только он.
+        head = market.split("</b>")[0]
+        self.assertLess(len(head), 120,
+                        "повтор завернул весь текст события в одну жирную строку")
+
+
+class TestOpsLatchAllKinds(AlertsCase):
+    """Защёлка недоставленных санитарных — для ВСЕХ видов, не только health.
+
+    До 18.08.2026 незащищённые source_stale и core_missing при недоставке умирали
+    в pending по TTL 24 ч и не рождались больше никогда: снимок уже зафиксировал
+    «error»/«None», и правило молчало как «уже сообщали». Стор частично теряется —
+    панель публикует «нет данных» поверх рабочего вердикта, watchdog видит свежий
+    Last-Modified, владелец не узнаёт об аварии вовсе.
+    """
+
+    def test_source_stale_переживает_суточный_обрыв_телеграма(self):
+        self.seed(payload())
+        self.online = False
+        broken = payload(sources={"iss": {"status": "error", "lag_min": 4300,
+                                          "asof": "2026-08-05"}})
+        first = self.alerts.run(broken, dry_run=False, now=NOW)
+        self.assertEqual([e["kind"] for e in first].count("source_stale"), 1)
+        # Прошло больше суток: очередь повторов пуста, спасает только защёлка.
+        self.online = True
+        broken2 = dict(broken, asof_trading_day="2026-08-12")
+        again = self.alerts.run(broken2, dry_run=False, now=NOW + timedelta(hours=30))
+        self.assertEqual([e["kind"] for e in again].count("source_stale"), 1)
+        self.assertIn("iss", " ".join(self.by_channel.get("ops") or []))
+
+    def test_core_missing_переживает_суточный_обрыв(self):
+        self.seed(payload(core=0.68))
+        self.online = False
+        lost = payload(core=None, cell=None)
+        first = self.alerts.run(lost, dry_run=False, now=NOW)
+        self.assertEqual([e["kind"] for e in first].count("core_missing"), 1)
+        self.online = True
+        lost2 = payload(core=None, cell=None, asof="2026-08-12")
+        again = self.alerts.run(lost2, dry_run=False, now=NOW + timedelta(hours=30))
+        self.assertEqual([e["kind"] for e in again].count("core_missing"), 1)
+
+    def test_доставленное_не_повторяется(self):
+        # Защёлка не имеет права превратиться в «состояние каждый день».
+        self.seed(payload())
+        broken = payload(sources={"iss": {"status": "error", "lag_min": 4300,
+                                          "asof": "2026-08-05"}})
+        self.alerts.run(broken, dry_run=False, now=NOW)
+        again = self.alerts.run(dict(broken, asof_trading_day="2026-08-12"),
+                                dry_run=False, now=NOW + timedelta(days=1))
+        self.assertEqual([e["kind"] for e in again].count("source_stale"), 0)
 
 
 class TestHealthReviewEvent(AlertsCase):

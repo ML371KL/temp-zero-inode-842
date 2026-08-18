@@ -19,6 +19,7 @@ RETRO_DAYS, а не всю историю.
 
 from urllib.parse import urlencode
 
+from ..lib import runbudget
 from . import (FetchError, RETRO_DAYS, dates, empty_is_fatal, http,
                incremental_start, make_meta, store)
 
@@ -346,10 +347,12 @@ def futoi(ticker="MX", series_prefix=None, start=None, end=None, chunk_days=3,
     day = frm
     lo, hi = _window(frm, till)
     asked = failed = 0
+    free_served = 0   # окна, фактически отданные БЕСПЛАТНОЙ базой при живом ключе
     while day <= till:
         chunk_end = min(dates.add_days(day, max(1, chunk_days) - 1), till)
         rows, cols, url, bad = _futoi_window(ticker, day, chunk_end)
         asked, failed = asked + 1, failed + bad
+        free_served += 0 if bad or url.startswith(ALGOPACK) else 1
         if len(rows) >= FUTOI_ROW_CAP:
             # Ответ обрезан по 1000 строк — окно надо сузить до одного дня,
             # иначе тихо потеряем начало периода.
@@ -357,6 +360,7 @@ def futoi(ticker="MX", series_prefix=None, start=None, end=None, chunk_days=3,
             for one in dates.iter_days(day, chunk_end):
                 r, c, url, bad = _futoi_window(ticker, one, one)
                 asked, failed = asked + 1, failed + bad
+                free_served += 0 if bad or url.startswith(ALGOPACK) else 1
                 rows.extend(r)
                 cols = cols or c
         _futoi_absorb(rows, cols, best, lo, hi)
@@ -382,9 +386,20 @@ def futoi(ticker="MX", series_prefix=None, start=None, end=None, chunk_days=3,
     # Записка обязана меняться вместе с режимом: если подписка есть, а в meta
     # по-прежнему «задержка 14 дней», то возраст сигнала на панели врёт в другую
     # сторону — теперь занижая свежесть (states.py подписывает lag_days по данным).
-    paid = algopack_ready()
-    note = ("ALGOPACK: позиции без задержки" if paid
-            else "бесплатный ISS публикует с задержкой ~14 дней")
+    # paid — по ФАКТИЧЕСКОМУ пути данных, а не по наличию ключа в окружении:
+    # протухшая подписка означала 401 на каждое окно, тихий откат на бесплатный
+    # поток — и meta с «позиции без задержки» при реальной задержке ~14 дней.
+    # Возраст сигнала на панели врал бы, а владелец узнавал бы об истёкшем ключе
+    # случайно (аудит 18.08.2026).
+    key_present = algopack_ready()
+    paid = key_present and free_served == 0
+    if paid:
+        note = "ALGOPACK: позиции без задержки"
+    elif key_present:
+        note = (f"ключ ALGOPACK есть, но {free_served} окон отданы бесплатным ISS "
+                f"(задержка ~14 дней) — проверьте подписку")
+    else:
+        note = "бесплатный ISS публикует с задержкой ~14 дней"
     status = "ok"
     if failed:
         note = f"окон опрошено {asked}, отказов {failed}; " + note
@@ -480,6 +495,13 @@ def breadth(tickers=None, start=None, end=None, bootstrap=False):
     till = end or dates.fmt_date(dates.today_msk())
     merged, fresh, urls, missing, failed = {}, {}, {}, [], []
     for ticker in names:
+        if runbudget.exhausted():
+            # 45 последовательных историй; висящий (не отказавший) ISS стоит ~93 с
+            # на КАЖДУЮ — один этот цикл способен съесть дедлайн юнита целиком.
+            # Частичной корзиной ширину не считаем (состав дня исказился бы), ряд
+            # остаётся на кэше — это громкий отказ, а не тихая деградация.
+            raise FetchError("breadth: бюджет времени фетча исчерпан "
+                             f"({len(fresh)} из {len(names)} бумаг успели)")
         sid = f"px_{ticker.lower()}"
         frm = start or incremental_start(sid, RETRO_DAYS, "2014-01-01", bootstrap)
         url = None
@@ -729,6 +751,20 @@ def futures_br(series_id="brent_moex", assetcode="BR", start=None, end=None,
     """
     secid, expiry = _front_contract(assetcode)
     window_start = dates.add_days(expiry, -31)
+    # На перекате окно НЕ должно накрывать дни, когда фронтом был предыдущий
+    # контракт: «месяц до экспирации нового» начинается раньше его первого дня в
+    # роли фронта (межэкспирационный зазор ≤31 дня), и без прижима первый же такт
+    # после переката переписывал бы официальные закрытия старого контракта ценами
+    # нового (контанго 0,3–2%) — ровно то, что докстринг обещает предотвращать.
+    # Границу даёт expiry прошлого фронта из meta собственного ряда.
+    stored_meta = (store.load_series(series_id) or {}).get("meta") or {}
+    if stored_meta.get("secid") and stored_meta.get("secid") != secid             and stored_meta.get("expiry"):
+        try:
+            boundary = dates.add_days(dates.parse_date(stored_meta["expiry"]), 1)
+        except (TypeError, ValueError):
+            boundary = None
+        if boundary and boundary > window_start:
+            window_start = boundary
     frm = dates.parse_date(start) if start else dates.parse_date(
         incremental_start(series_id, RETRO_DAYS,
                           dates.fmt_date(dates.add_days(dates.today_msk(), -120)),

@@ -23,7 +23,9 @@ except ImportError:  # sys.path указывает внутрь pipeline/
     import dates
 
 DEFAULT_STATE_DIR = ".state"
-_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_\-]*$")
+# \Z, а не $: $ в питоне пропускает ЗАВЕРШАЮЩИЙ перевод строки, и id с хвостовым
+# LF проходил санитизацию — имя файла с переводом строки внутри.
+_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_\-]*\Z")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -61,20 +63,51 @@ def _write_json(path, obj):
     os.replace(tmp, path)  # на Windows os.replace тоже атомарен и перезаписывает
 
 
+def _quarantine(path):
+    """Убрать битый файл с дороги, НЕ ТЕРЯЯ прежних улик.
+
+    .bad — единственная локальная копия ряда после порчи, и до 18.08.2026 повторная
+    порча перезаписывала её через os.replace: первый .bad (обычно полный ряд) погибал
+    молча. Теперь занятые имена не трогаются — второй карантин ложится в .bad.2 и так
+    далее. Потолок на случай зацикленной порчи: сотый инцидент затирает сотый файл,
+    но не первый.
+    """
+    for n in range(100):
+        bad = path.with_name(path.name + (".bad" if n == 0 else f".bad.{n + 1}"))
+        if not bad.exists():
+            break
+    try:
+        os.replace(path, bad)
+    except OSError:
+        return None
+    return bad
+
+
 def _read_json(path):
-    """None, если файла нет. Битый файл уводим в .bad и говорим об этом вслух."""
+    """None, если файла нет. Битый файл уводим в .bad и говорим об этом вслух.
+
+    В карантин отправляет ТОЛЬКО порча содержимого (не-JSON, битая кодировка).
+    OSError — это «не смогли прочитать», а не «файл испорчен»: зависший диск, обрыв
+    сетевой ФС, EPERM от антивируса. До 18.08.2026 транзиентная ошибка чтения уводила
+    ЗДОРОВЫЙ файл в .bad, load_series отвечал None, и следующий upsert_points строил
+    ряд заново из одной свежей точки — а зеркало R2 затиралось этим огрызком
+    (см. publish._mirror_raw). Теперь ошибка чтения — это ошибка чтения: файл остаётся
+    на месте, читатели видят None (тайл — «нет данных» на один прогон), а путь записи
+    останавливает upsert_points, сверяясь с _unreadable().
+    """
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     except FileNotFoundError:
         return None
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
-        bad = path.with_name(path.name + ".bad")
-        try:
-            os.replace(path, bad)
-        except OSError:
-            pass
-        print(f"[store] битый {path.name} ({e}) -> {bad.name}, читаю как пустой")
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        bad = _quarantine(path)
+        print(f"[store] битый {path.name} ({e}) -> "
+              f"{bad.name if bad else 'карантин не удался'}, читаю как пустой")
+        return None
+    except OSError as e:
+        print(f"[store] не прочитался {path.name} ({e}) — файл НЕ тронут, "
+              f"на этом прогоне ряд недоступен")
         return None
 
 
@@ -113,8 +146,16 @@ def upsert_points(series_id, points, meta_patch=None, unit=None, cadence=None):
     # целиком и про единицы не знает — иначе ряд навсегда остаётся с unit=null.
     unit = unit or (meta_patch or {}).get("unit")
     cadence = cadence or (meta_patch or {}).get("cadence")
-    series = load_series(series_id) or {"id": series_id, "unit": unit,
-                                        "cadence": cadence, "points": {}, "meta": {}}
+    series = load_series(series_id)
+    if series is None and series_path(series_id).exists():
+        # Файл ЕСТЬ, но не прочитался (OSError в _read_json: диск, антивирус, сетевая
+        # ФС). Продолжить как «ряда нет» значит через save_series ЗАТЕРЕТЬ здоровый
+        # файл огрызком из свежих точек. Останавливаемся: run.py ловит это как отказ
+        # ряда на прогон, история остаётся нетронутой до следующей попытки.
+        raise OSError(f"{series_id}: файл ряда есть, но не прочитался — "
+                      f"не затираю историю свежими точками")
+    series = series or {"id": series_id, "unit": unit,
+                        "cadence": cadence, "points": {}, "meta": {}}
     if unit and not series.get("unit"):
         series["unit"] = unit
     if cadence and not series.get("cadence"):

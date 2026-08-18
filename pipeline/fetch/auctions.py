@@ -89,8 +89,17 @@ def _day_rows(day):
     payload = http.get_json(url)
     block = payload.get("history") or {}
     idx = {name: n for n, name in enumerate(block.get("columns") or [])}
+    data = block.get("data") or []
+    # Схема блоков у ISS «плавает между эндпоинтами» (уже ловлено в ленте новостей):
+    # пропавшая SECID без этой проверки выбрасывала ВСЕ строки фильтром startswith,
+    # и переименование колонки навсегда превращало ряд в «аукционов не было» со
+    # status=ok — при реальной паузе это месяцами неотличимо от правды.
+    if data and not {"SECID", "VOLUME"} <= set(idx):
+        raise FetchError("доска %s сменила схему: нет колонок %s (есть: %s)"
+                         % (BOARD, sorted({"SECID", "VOLUME"} - set(idx)),
+                            sorted(idx)), url=url)
     rows = []
-    for row in block.get("data") or []:
+    for row in data:
         secid = str(row[idx["SECID"]]) if "SECID" in idx else ""
         # Только государственные выпуски: на этой же доске размещаются корпораты,
         # и без фильтра в «аукцион ОФЗ» уехал бы чужой выпуск.
@@ -188,6 +197,12 @@ def next_auction(max_pages=6, max_age_days=30):
             day = dates.fmt_date("%s-%02d-%02d" % (m.group(3), month, int(m.group(1))))
         except ValueError:
             continue
+        # Анонс живёт в ленте и ПОСЛЕ аукциона: со среды-вечера до следующего
+        # вторника свежайший подходящий анонс — прошлый, и тайл 5 дней из 7 писал
+        # «Назначен следующий: 19.08» про уже прошедшее размещение. Следующий —
+        # это не раньше сегодняшнего дня.
+        if day < dates.fmt_date(dates.today_msk()):
+            continue
         return day, title, "https://www.moex.com/n%d" % news_id
     return None, None, None
 
@@ -212,8 +227,13 @@ def auctions(series_id="ofz_auctions", start=None, end=None, bootstrap=False):
         try:
             rows, url = _day_rows(day)
         except FetchError as exc:
-            failures.append("%s: %s" % (dates.fmt_date(day), exc))
-            continue
+            # СТОП, а не continue: ретро-окно (5 суток) уже недельного шага ряда.
+            # Запиши мы более поздний аукцион в этом же прогоне — last_date уехал
+            # бы за сбойный день, и тот выпал бы из всех будущих окон НАВСЕГДА.
+            # Остановка держит last_date до сбоя: следующий прогон переспросит.
+            failures.append("%s: %s (обход остановлен, дальше — следующим прогоном)"
+                            % (dates.fmt_date(day), exc))
+            break
         if not rows:
             continue                        # аукциона в этот день не было
         if is_echo(rows, day):
@@ -233,7 +253,11 @@ def auctions(series_id="ofz_auctions", start=None, end=None, bootstrap=False):
         prev = ((store.load_series(series_id) or {}).get("meta") or {}).get("last")
         if isinstance(prev, dict) and prev.get("date"):
             last = dict(prev)
-    last_day = last.get("date") or store.last_date(series_id)
+    # ТОЛЬКО из собственного разбора (свежего или запомненного в meta.last): в
+    # затравке дни отменённых аукционов записаны нулями, и store.last_date выдавал
+    # нулевую точку за «последний аукцион» — тайл объявлял несостоявшимся аукцион
+    # дня, которого не проводили. Нет памяти — честное «неизвестно».
+    last_day = last.get("date")
     # Спроса у биржи нет: показываем это явным None, чтобы тайл написал «нет данных»,
     # а не унаследовал число из затравки и не выдал его за свежее.
     last.setdefault("demand_bn", None)

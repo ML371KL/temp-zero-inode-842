@@ -42,11 +42,18 @@ except ImportError:
 SERIES_ID = "moex_retail"
 NEWS_LIST = "https://iss.moex.com/iss/sitenews.json?start=%d"
 NEWS_ITEM = "https://iss.moex.com/iss/sitenews/%d.json"
-PAGE_SIZE = 100
-# Глубина обхода ленты: 45 суток покрывают месячный цикл релиза с запасом, потолок
-# в 20 страниц (2000 новостей) держит худший случай в разумных двух секундах.
+# Размер страницы НЕ предполагается: до 18.08.2026 обход шагал по PAGE_SIZE=100,
+# а sitenews.json отдаёт РОВНО 50 строк на любой start — половина ленты (строки
+# 50–99, 150–199, …) была в вечных слепых зонах. Июльский релиз про частных
+# инвесторов лежал на позиции 75: тайл retail стоял в error при живом релизе, и
+# тест ошибку не ловил — фиктивный сервер строился из того же PAGE_SIZE. Теперь
+# start двигается на СТОЛЬКО СТРОК, СКОЛЬКО РЕАЛЬНО ПРИШЛО, — обход переживёт и
+# 50, и 100, и смену размера у ISS.
+# Глубина обхода ленты: 45 суток покрывают месячный цикл релиза с запасом; потолок
+# в 40 запросов (~2000 новостей при нынешних 50 на страницу) держит худший случай
+# в разумных секундах.
 MAX_AGE_DAYS = 45
-MAX_PAGES = 20
+MAX_PAGES = 40
 
 _TITLE_RE = re.compile(r"частн\w+\s+инвестор", re.I)
 _MONTHS = {"январ": 1, "феврал": 2, "март": 3, "апрел": 4, "ма": 5, "июн": 6,
@@ -213,9 +220,10 @@ def _candidates(max_pages=MAX_PAGES, max_age_days=MAX_AGE_DAYS, pattern=None):
     title_re = pattern or _TITLE_RE
     ids, errors = [], []
     newest = None          # верх ленты: от него, а не от «сегодня», считается возраст
-    for page in range(max(1, int(max_pages))):
+    start = 0
+    for _ in range(max(1, int(max_pages))):
         try:
-            data = get_json(NEWS_LIST % (page * PAGE_SIZE))
+            data = get_json(NEWS_LIST % start)
         except FetchError as exc:
             errors.append(str(exc))
             break
@@ -240,6 +248,7 @@ def _candidates(max_pages=MAX_PAGES, max_age_days=MAX_AGE_DAYS, pattern=None):
                     ids.append((int(row[pos_id]), title, published))
                 except (TypeError, ValueError):
                     continue
+        start += len(rows)
         if _age_days(newest, oldest) > max_age_days:
             break
     return ids, errors
@@ -289,6 +298,14 @@ def retail(scan_pages=MAX_PAGES, max_open=4):
         low = body.lower()
         if "количество частных инвесторов" not in low or "народн" not in low:
             tried.append("%s: не месячный релиз (%s)" % (news_id, title[:60]))
+            continue
+        # ГОДОВОЙ релиз («Итоги года») содержит обе обязательные фразы и стоит в
+        # ленте ВЫШЕ декабрьского месячного: без этого фильтра в точку декабря
+        # уезжало годовое «сделки в течение года заключали 12,1 млн» (~3× от
+        # месячного), и ни один следующий релиз декабрь бы не переписал.
+        if re.search(r"итог[аи]м?\s+(?:20\d\d\s+)?года|в течение\s+(?:всего\s+)?года",
+                     (title + " " + body).lower()):
+            tried.append("%s: годовой релиз, а не месячный (%s)" % (news_id, title[:60]))
             continue
         payload = parse_retail(body)
         day, month = _period(title + " " + body, published)

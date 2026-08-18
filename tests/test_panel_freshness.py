@@ -122,9 +122,6 @@ class TestPublicationLagPath(unittest.TestCase):
         self.assertEqual(col, [None, 5.0, 5.0])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class TestStalenessFollowsTheSchedule(unittest.TestCase):
     """«Протух» — это ПРОПУЩЕННЫЙ ОПРОС, а не просто много часов без записи.
@@ -257,3 +254,7 @@ class TestStalenessFollowsTheSchedule(unittest.TestCase):
             self.assertEqual(
                 self.status("ofz_auctions", "2026-08-13T06:21:42Z", "2026-08-14 08:25"),
                 "stale")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -25,7 +25,17 @@ FEED_LIMIT = 20          # столько последних событий уе
 PENDING_MAX_HOURS = 24   # старше — не повторяем: новость протухла
 PENDING_MAX = 40         # длина очереди повторов; режем СТАРОЕ, а не свежее
 DEPOSIT_UPTICK_PP = 0.05  # декадная ставка шумит в сотых, порог отсекает дрожь
-EVENT_FIELDS = ("key", "ts", "kind", "severity", "text", "comment")
+# ВСЕ поля события, которые обязаны пережить очередь повторов и ленту. Плоский
+# text — свёртка для журнала витрины (контракт §3), но телеграм рендерится из
+# СТРУКТУРЫ: render_ops вообще не читает text, а render_market без title заворачивает
+# весь текст в одну жирную строку. Когда 14.08 события стали структурами, этот
+# кортеж не расширили — и повтор из pending уходил владельцу пустым слэгом
+# «842 · source_stale» без факта и «куда смотреть», ровно в аварии, ради которой
+# очередь существует (аудит 18.08.2026). merged — ключи свёрнутых переходов: без
+# него повтор слал бы слитую тройку заново по отдельности.
+EVENT_FIELDS = ("key", "ts", "kind", "severity", "text", "comment",
+                "title", "before", "after", "moves", "detail", "meaning",
+                "fact", "where", "merged")
 
 # САНИТАРНЫЕ события — отказы обвязки, а не движение рынка. Они уходят в общий
 # ops-канал панелей и НЕ попадают ни в журнал витрины, ни в ленту хаба.
@@ -297,6 +307,15 @@ def _cb(payload, prev, now):
     if isinstance(key_rate, (int, float)) and isinstance(old_rate, (int, float)) \
             and abs(key_rate - old_rate) > 1e-9:
         delta_bp = round((key_rate - old_rate) * 100)
+        # Сюрприз меряется от консенсуса ТОЛЬКО ЧТО ПРОШЕДШЕГО заседания, а не
+        # ближайшего будущего. Новая ставка попадает в ряд key_rate на 1–3 рабочих
+        # дня позже решения (16 из 17 смен с 2023 — ровно +3 дня), и к этому моменту
+        # pl['consensus'] уже смотрит на СЛЕДУЮЩЕЕ заседание: сюрприз считался бы от
+        # чужих ожиданий, а при пустой строке будущего — «не внесён» при внесённом.
+        # Поле last_consensus тайл кладёт ровно для этого (monitors._t_cb_meeting) и
+        # сам гасит его через неделю после заседания. Фолбэка на pl['consensus'] нет
+        # НАМЕРЕННО: честное «сказать нечем» лучше сюрприза от чужих ожиданий.
+        cons = pl.get("last_consensus")
         surprise = round((key_rate - cons) * 100) if isinstance(cons, (int, float)) else None
         if surprise is None:
             meaning = ("Консенсус аналитиков в данные не внесён — сказать, совпало ли "
@@ -318,10 +337,21 @@ def _cb(payload, prev, now):
     return out
 
 
+# «Публикация ОРФР» — про СВЕЖИЙ релиз. Данные месячные, выходят в середине
+# следующего месяца: 45 суток покрывают самый поздний релиз с запасом.
+ORFR_FRESH_DAYS = 45
+
+
 def _orfr(payload, prev, now):
     tile = _mons(payload).get("orfr") or {}
     asof = tile.get("asof")
     if not asof or not prev.get("orfr_asof") or asof == prev.get("orfr_asof"):
+        return []
+    # Смена asof НАЗАД или на глубокую древность — переезд источника либо
+    # восстановление стора, а не публикация: подписчикам уходила бы новость о
+    # потоках трёхмесячной давности, поданная как сегодняшняя. Тот же класс, что
+    # инцидент аукционов 12.08 (там уже стоит проверка возраста).
+    if asof < prev.get("orfr_asof") or (_age_days(asof, now) or 0) > ORFR_FRESH_DAYS:
         return []
     pl = tile.get("payload") or {}
     exhaust = wording.ru_decimals((pl.get("seller_exhaustion") or {}).get("text") or "")
@@ -378,14 +408,30 @@ def _auction(payload, prev, now):
                         "длинными выпусками: давление переезжает на дальний конец кривой.")]
 
 
-def _deposit(payload, prev, now):
+def _deposit(payload, prev, state, now):
+    """Рост ставок по вкладам — от ПОСЛЕДНЕГО ОБЪЯВЛЕННОГО уровня, не от вчерашнего.
+
+    Якорь в снимке двигался каждый прогон, и ползучий цикл повышений по 0,03–0,04
+    п.п. за декаду (+1 п.п. за квартал) не давал события НИКОГДА — каждый шаг
+    порознь меньше порога шума. Та же ошибка якоря уже чинилась у _core_flip
+    (core_value_alerted): сравниваем с уровнем, о котором СООБЩАЛИ, а снижение
+    опускает якорь ко дну, чтобы следующий цикл мерялся от него.
+    """
     tile = _mons(payload).get("deposit_spread") or {}
     pl = tile.get("payload") or {}
-    new, old = pl.get("deposit_pct"), prev.get("deposit")
-    if not isinstance(new, (int, float)) or not isinstance(old, (int, float)):
+    new = pl.get("deposit_pct")
+    if not isinstance(new, (int, float)):
+        return []
+    old = state.get("deposit_alerted")
+    if not isinstance(old, (int, float)):
+        state["deposit_alerted"] = new   # первый раз запоминаем молча
+        return []
+    if new < old:
+        state["deposit_alerted"] = new
         return []
     if new - old < DEPOSIT_UPTICK_PP:
         return []
+    state["deposit_alerted"] = new
     spread = pl.get("spread_pp")
     step = round(new - old, 2)
     meaning = ""
@@ -611,7 +657,7 @@ def detect(payload, state, now=None, merge=True):
     events += _cb(payload, prev, now)
     events += _orfr(payload, prev, now)
     events += _auction(payload, prev, now)
-    events += _deposit(payload, prev, now)
+    events += _deposit(payload, prev, state, now)
     events += _sources(payload, prev, now)
     events += _health(payload, prev, now)
     events += _health_review(payload, prev, now)
@@ -749,6 +795,16 @@ def seed_from_payload(state, payload, now=None):
     if snap.get("core_value") is None and not snap.get("cell"):
         return False  # витрина сама пустая — восстанавливать нечего
     state["last"] = snap
+    # Журнал витрины тоже восстанавливается: без этого фолбэк публиковал data.json
+    # с лентой из одних событий своего прогона (обычно пустой) поверх журнала,
+    # который читатели видели минуту назад, — авария VPS выглядела бы как «панель
+    # забыла всё, что рассказывала». Санитарного в опубликованной ленте не бывает
+    # по построению (payload_events фильтрует), но фильтр повторяем: витрина —
+    # внешний вход, а не доверенный.
+    if not state.get("feed"):
+        state["feed"] = [{k: e[k] for k in EVENT_FIELDS if k in e}
+                         for e in (payload.get("events") or [])
+                         if isinstance(e, dict) and not is_ops(e)][-FEED_LIMIT:]
     val = snap.get("core_value")
     if isinstance(val, (int, float)) and abs(val) > constants.CORE_FLIP_HYSTERESIS:
         # Знак из опубликованного ядра, иначе первый прогон на фолбэке объявит
@@ -766,17 +822,43 @@ def seed_from_payload(state, payload, now=None):
 # ERROR_* пустыми), так что путь этот не гипотетический.
 #
 # Поле-защёлка у каждого своё: у health_review_due — одноимённый флаг, у health_dead —
-# строка статуса. Тот же приём уже применён к lease_ok в after_publish.
-LATCH_FIELD = {"health_review_due": "health_review_due", "health_dead": "health"}
+# строка статуса, у core_missing — пара «оценка + режим» (правило сравнивает обе).
+# До 18.08.2026 защёлка покрывала только два health-вида, и это было хуже, чем
+# казалось: незащищённые source_stale и core_missing при недоставке умирали в
+# pending по TTL 24 ч и больше не рождались НИКОГДА — снимок уже зафиксировал
+# «error»/«None», и правило считало, что уже сообщало. Стор частично теряется —
+# панель публикует «нет данных» поверх рабочего вердикта, watchdog видит свежий
+# Last-Modified и молчит, владелец не узнаёт об аварии вовсе.
+# lease_lost и payload_oversize защищены отдельно (after_publish, lease_ok).
+LATCH_FIELDS = {
+    "health_review_due": ("health_review_due",),
+    "health_dead": ("health",),
+    "core_missing": ("core_value", "cell"),
+}
 
 
 def _snapshot_keeping_undelivered(payload, prev_last, batch, now):
     """Снимок текущего состояния, но защёлки недоставленных событий откатываются назад."""
     snap = snapshot(payload, now)
     for event in batch:
-        field = LATCH_FIELD.get(event.get("kind"))
-        if field and not event.get("delivered") and field in prev_last:
-            snap[field] = prev_last[field]
+        if event.get("delivered"):
+            continue
+        kind = event.get("kind")
+        for field in LATCH_FIELDS.get(kind, ()):
+            if field in prev_last:
+                snap[field] = prev_last[field]
+        if kind == "source_stale":
+            # Состояние этого правила — статус КОНКРЕТНОГО источника внутри словаря
+            # sources; имя достаётся из ключа события (source_stale:<имя>:<день>).
+            parts = str(event.get("key") or "").split(":")
+            name = parts[1] if len(parts) > 2 else None
+            prev_sources = prev_last.get("sources") or {}
+            if name and name in prev_sources:
+                snap.setdefault("sources", {})[name] = prev_sources[name]
+            elif name:
+                # Источник впервые появился уже сломанным: раньше его в снимке не
+                # было — убираем и сейчас, чтобы переход случился заново.
+                (snap.get("sources") or {}).pop(name, None)
     return snap
 
 

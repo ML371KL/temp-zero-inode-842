@@ -38,6 +38,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Предполётная проверка того, что публикуется
+        run: |
+          set -euo pipefail
+          # Публикация не дожидается ci.yml, и это уже стреляло: страница с новым
+          # инлайн-скриптом и старым CSP-хэшем уехала в прод — тема стояла
+          # заблокированной политикой (коммит bcc5dfc). Поэтому минимум проверок
+          # повторяется ЗДЕСЬ, перед выкладкой: хэши CSP всех страниц и синтаксис
+          # каждого .js, который увидит браузер и край Cloudflare.
+          python ops/check_csp_hash.py
+          for f in web/*.js functions/*.js functions/data/*.js; do
+            [ -e "$f" ] || continue
+            node --check "$f"
+          done
+
       - name: Проверить, что статика не перекрывает пути функции
         run: |
           set -euo pipefail

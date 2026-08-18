@@ -51,6 +51,28 @@ _DECADE_RE = re.compile(r"^(I{1,3})\.(\d{1,2})\.(\d{4})$")
 
 
 # --------------------------------------------------------------- курс валюты
+def _drop_future(points, till, sid, slack_days=7):
+    """Выбросить точки дальше запрошенного края + недельный запас.
+
+    Инвариант проекта «точка вне запрошенного окна в ряд не попадает» жил только в
+    ISS-фетчерах; ЦБ отдавал даты как есть. Цена: один битый Record Date (класс
+    сбоя, уже ловленный у ISS — 2099-12-31) отравляет ряд НАВСЕГДА: upsert сливает
+    точки, incremental_start видит «последняя точка в будущем» и каждый прогон
+    заново тянет историю с 2003-го, а вычистить фантом можно только рукой в сторе.
+    У usd_cbr это нога ядра. Запас в неделю пропускает законное «курс на завтра
+    опубликован сегодня» и длинные праздники; прошлое не режем — история в окне
+    правдива по построению.
+    """
+    edge = dates.fmt_date(dates.add_days(till, slack_days))
+    bad = sorted(d for d in points if d > edge)
+    for d in bad:
+        points.pop(d)
+    if bad:
+        http.LOG(f"{sid}: {len(bad)} точек дальше {edge} отброшено "
+                 f"(первая {bad[0]}) — дата из будущего не попадает в ряд")
+    return points
+
+
 def fx(code="R01235", series_id=None, start=None, end=None, bootstrap=False):
     """Официальный курс ЦБ по дате ПРИМЕНЕНИЯ.
 
@@ -72,6 +94,7 @@ def fx(code="R01235", series_id=None, start=None, end=None, bootstrap=False):
         if value is None:
             continue
         points[dates.fmt_date(day)] = value
+    _drop_future(points, till, sid)
     if not points and empty_is_fatal(sid):
         raise FetchError(f"ЦБ: пустой ряд курса {code} за {frm}..{till}", url=url)
     return sid, points, make_meta("cbr", url, points, unit="rub", code=code,
@@ -148,6 +171,7 @@ def keyrate(series_id="key_rate", start=None, end=None, bootstrap=False):
             value = to_float(row[1])
             if value is not None:
                 points[day] = value
+    _drop_future(points, till, series_id)
     if not points and empty_is_fatal(series_id):
         raise FetchError(f"ЦБ: ключевая ставка пуста за {frm}..{till}", url=url)
     return series_id, points, make_meta("cbr", url, points, unit="pct", note=note)
@@ -176,6 +200,9 @@ def deposit(series_id="deposit_decade", start=None, end=None, bootstrap=False):
         value = to_float(row[1])
         if day and value is not None:
             points[dates.fmt_date(day)] = value
+    # Запас шире дневных рядов: ключ точки — КОНЕЦ декады, и у третьей декады он
+    # впереди даты запроса почти на месяц.
+    _drop_future(points, till, series_id, slack_days=35)
     if not points and empty_is_fatal(series_id):
         raise FetchError(f"ЦБ: таблица депозитных декад пуста за {frm}..{till}", url=url)
     return series_id, points, make_meta("cbr", url, points, unit="pct",
