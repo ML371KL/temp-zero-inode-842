@@ -83,8 +83,11 @@ def build_verdict(core, states):
         "cell_label": (stats or {}).get("label"),
         # Среднее по ячейке — хвостовая статистика, поэтому рядом с ним обязаны ехать
         # медиана и края: одно среднее читается как прогноз на месяц (constants §CELL_STATS).
+        # n_closed едет вместе с ними не для красоты: доля плюсовых, медиана и
+        # края считаются по ЗАКРЫТЫМ месяцам, и без этого поля на экране стоят
+        # «54%» и «Наблюдений 25» — два числа из разных выборок и без объяснения.
         "cell_stats": ({k: stats[k] for k in
-                        ("mean_fwd1m_pct", "hit", "n", "median_fwd1m_pct",
+                        ("mean_fwd1m_pct", "hit", "n", "n_closed", "median_fwd1m_pct",
                          "worst_pct", "best_pct") if k in stats} if stats else None),
         "rule": constants.CELL_RULES.get(
             key, "Ячейка без исторической статистики: правила дня нет, смотреть на ядро."),

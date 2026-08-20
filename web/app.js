@@ -353,8 +353,16 @@
         stat('Худший месяц', isNum((v.cell_stats || {}).worst_pct)
           ? fmtNum(v.cell_stats.worst_pct, 1, true) + '%' : '—',
           'за что закрыты ворота', toneOf((v.cell_stats || {}).worst_pct)),
-        stat('Доля плюсовых', isNum((v.cell_stats || {}).hit) ? Math.round(v.cell_stats.hit * 100) + '%' : '—'),
-        stat('Наблюдений', isNum((v.cell_stats || {}).n) ? String(v.cell_stats.n) : '—', 'месяцев в ячейке')
+        /* Доля плюсовых, медиана и края посчитаны по ЗАКРЫТЫМ месяцам, а
+         * «наблюдений» — это пары исследования: у токсичной ячейки 24 против 25,
+         * потому что последний месяц ещё идёт. Раньше два числа из разных выборок
+         * стояли рядом молча, и доля выглядела арифметически невозможной — на этом
+         * её однажды уже «исправили» по незакрытому месяцу. */
+        stat('Доля плюсовых', isNum((v.cell_stats || {}).hit) ? Math.round(v.cell_stats.hit * 100) + '%' : '—',
+          isNum((v.cell_stats || {}).n_closed) ? 'из ' + v.cell_stats.n_closed + ' закрытых месяцев' : null),
+        stat('Наблюдений', isNum((v.cell_stats || {}).n) ? String(v.cell_stats.n) : '—',
+          (isNum((v.cell_stats || {}).n_closed) && v.cell_stats.n_closed !== v.cell_stats.n)
+            ? 'месяцев в ячейке; последний ещё идёт' : 'месяцев в ячейке')
       ])
     ]);
 
