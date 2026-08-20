@@ -48,9 +48,16 @@ TITLES = {
 # читатель обязан видеть, что как предиктор акций он опровергнут (VALIDATION §5).
 DEAD_MARK = "как предиктор акций опровергнуто"
 
-# Бюджет-2026 сходится примерно при 5440 ₽ за баррель (Urals ~$59 × ~92 ₽/$).
-# Это не рыночная величина, а точка безубыточности бюджета — от неё считаем гэп.
+# ОРИЕНТИР точки безубыточности бюджета-2026: Urals ~$59 × ~92 ₽/$ = 5440 ₽ за
+# баррель. Это НЕ измеренная величина и не строка закона о бюджете — произведение
+# двух допущений, и курсовое из них уже разошлось с жизнью (в августе 2026 доллар
+# ~85 ₽, то есть та же цена в долларах дала бы ~5000 ₽). Поэтому:
+#   * подпись обязана называть это ориентиром и раскрывать, из чего он сложен, —
+#     иначе «на 16% ниже бюджетных 5 440 ₽» читается как измеренный дефицит;
+#   * пересматривать вместе с бюджетным правилом, а не молча.
 BUDGET_BARREL_RUB = 5440.0
+BUDGET_BARREL_USD = 59.0
+BUDGET_BARREL_FX = 92.0
 # Дисконт Urals к Brent, если посчитать по факту не из чего (в 2026 ходил 10–15%).
 FALLBACK_URALS_DISCOUNT = 0.88
 # Доля дивидендов, возвращающаяся в рынок. ЦБ оценивал 40–60% — берём середину.
@@ -70,7 +77,11 @@ MONTHS_RU = ["января", "февраля", "марта", "апреля", "м
 MONTHS_RU_NOM = ["январь", "февраль", "март", "апрель", "май", "июнь", "июль",
                  "август", "сентябрь", "октябрь", "ноябрь", "декабрь"]
 
-_STATUS_RANK = {"ok": 0, "stale": 1, "error": 2, "missing": 3}
+# «manual_needed» — тоже НЕ «ok»: так фетчер говорит «живой источник молчит, взял
+# ручной резерв». Слова не было в наборе, и _st превращал его в зелёный: при мёртвых
+# T-Invest и smart-lab витрина показывала свежую точку над датами из
+# inputs/dividends.yml, а блок «Источники» — зелёную семью (аудит 20.08.2026).
+_STATUS_RANK = {"ok": 0, "stale": 1, "manual_needed": 1, "error": 2, "missing": 3}
 
 
 # ------------------------------------------------------------------ утилиты
@@ -412,27 +423,45 @@ def _t_lqdt(store, now):
     payload = {
         "unit": meta.get("unit") or "млрд ₽",
         "aum": _r(aum, 1),
-        "flow_1d": _r(_chg(pts, 1), 1),
-        "flow_5d": _r(_chg(pts, 5), 1),
-        "flow_21d": _r(_chg(pts, 21), 1),
-        "peak": _r(peak, 1),
-        "dd_from_peak_pct": _r(dd, 1),
+        # chg_*, а не flow_*: измерено ИЗМЕНЕНИЕ СЧА, приток отдельно не выделен.
+        "chg_1d": _r(_chg(pts, 1), 1),
+        "chg_5d": _r(_chg(pts, 5), 1),
+        "chg_21d": _r(_chg(pts, 21), 1),
+        "peak": _r(peak, 1) if len(pts) >= 60 else None,
+        "dd_from_peak_pct": _r(dd, 1) if len(pts) >= 60 else None,
+        "history_points": len(pts),
+        "market_total_bln": meta.get("moex_total_bln"),
+        "coverage_note": meta.get("coverage_note"),
         "rotation_started": rotation,
         "rotation_threshold_pct": ROTATION_DD_PCT,
         "series": [[d, _r(v, 1)] for d, v in pts[-120:]],
     }
-    tail = ("СЧА ниже пика на "
-            f"{_n(abs(dd or 0), 1)}% — похоже на первую ротацию" if rotation
-            else "большой ротации ещё не случалось")
-    # Дневной поток есть не всегда (у затравки одна точка): «за день н/д млрд» —
-    # это мусор в заголовке, лучше честно опустить кусок фразы.
+    # Ряд — это ОДИН фонд (LQDT), а не весь рынок денежных фондов: так его собирает
+    # fetch/investfunds и сам предупреждает об этом в meta.coverage_note. Заголовок
+    # «СЧА 755 млрд» под названием «Фонды денежного рынка» читался как объём всего
+    # рынка — ошибка более чем вдвое (весь рынок больше 1,8 трлн).
+    whose = meta.get("funds_label") or "LQDT"
+    # ПРИРОСТ СЧА — НЕ ПРИТОК. СЧА растёт сама на доходность пая: при 755 млрд и
+    # ключе 14% это ~0,29 млрд в день само по себе. Пока приток не выделен
+    # (investfunds.estimate_flow написан, но в реестре нет ряда цены пая), пишем
+    # честное «изменение», а не «поток».
+    dd_known = dd is not None and len(pts) >= 60
+    if rotation:
+        tail = f"СЧА ниже пика на {_n(abs(dd or 0), 1)}% — похоже на первую ротацию"
+    elif dd_known:
+        tail = "большой ротации ещё не случалось"
+    else:
+        # На коротком ряде «пик» — это просто максимум последних дней, и вывод об
+        # истории из него делать нельзя.
+        tail = f"истории мало ({len(pts)} набл.) — про ротацию судить рано"
     day_chg = _chg(pts, 1)
-    chg_txt = f", за день {_n(day_chg, 1, True)} млрд" if day_chg is not None else ""
-    headline = f"СЧА {_n(aum, 0)} млрд{chg_txt}; {tail}"
-    return _tile("lqdt", status, asof, headline, payload,
-                 "Индикатор ждёт первого срабатывания: перетока денег из фондов ликвидности "
-                 "в акции не было ни разу, проверить его на истории невозможно.",
-                 meta.get("fetched_at"))
+    chg_txt = f", изменение за день {_n(day_chg, 1, True)} млрд" if day_chg is not None else ""
+    headline = f"СЧА {whose} {_n(aum, 0)} млрд{chg_txt}; {tail}"
+    note = ("Индикатор ждёт первого срабатывания: перетока денег из фондов ликвидности "
+            f"в акции не было ни разу, проверить его на истории невозможно. Ряд — СЧА "
+            f"фонда {whose}, а не всего рынка денежных фондов; изменение СЧА включает "
+            "доходность пая и потому не равно притоку денег.")
+    return _tile("lqdt", status, asof, headline, payload, note, meta.get("fetched_at"))
 
 
 def _dy_trail(store):
@@ -453,6 +482,38 @@ def _dy_trail(store):
     return (math.log(m[d1] / m[d0]) - math.log(i[d1] / i[d0])) * 100.0, d1
 
 
+def _dy_at(store, days):
+    """{дата: трейлинг-дивдоходность} для запрошенных дат — тем же правилом.
+
+    Нужна, чтобы утверждение «спред положителен ВПЕРВЫЕ» проверялось по истории,
+    а не предполагалось: до 20.08.2026 заголовок обещал «событие впервые в
+    истории», посчитав ровно сегодняшний день.
+    """
+    m = dict(_ser(store, "mcftr")[0])
+    i = dict(_ser(store, "imoex")[0])
+    common = sorted(set(m) & set(i))
+    if len(common) < 253:
+        return {}
+    pos = {d: k for k, d in enumerate(common)}
+    out = {}
+    for day in days:
+        k = pos.get(day)
+        if k is None:
+            # У вкладов декадные даты, у индексов — торговые дни: берём ближайший
+            # предыдущий торговый день, а не пропускаем точку.
+            earlier = [d for d in common if d <= day]
+            if not earlier:
+                continue
+            k = pos[earlier[-1]]
+        if k < 252:
+            continue
+        d1, d0 = common[k], common[k - 252]
+        if min(m[d1], m[d0], i[d1], i[d0]) <= 0:
+            continue
+        out[day] = (math.log(m[d1] / m[d0]) - math.log(i[d1] / i[d0])) * 100.0
+    return out
+
+
 def _t_deposit_spread(store, now):
     dep_pts, dep_meta = _ser(store, "deposit_decade")
     dy, dy_asof = _dy_trail(store)
@@ -463,6 +524,11 @@ def _t_deposit_spread(store, now):
     status = _st("deposit_decade", dep_pts, dep_meta, now)
     if dy is None:
         status = _worst(status, "stale")
+    # Сколько дней в прошлом спред уже был положительным: считаем по ряду, а не
+    # по сегодняшнему значению.
+    dy_hist = _dy_at(store, [d for d, _ in dep_pts[:-1]])
+    before_positive = sum(1 for d, v in dep_pts[:-1]
+                          if d in dy_hist and dy_hist[d] - v > 0)
     payload = {
         "deposit_pct": _r(dep, 2),
         "deposit_asof": dep_asof,
@@ -470,14 +536,23 @@ def _t_deposit_spread(store, now):
         "dy_asof": dy_asof,
         "spread_pp": _r(spread, 2),
         "deposit_chg_pp": _r(_chg(dep_pts, 1), 2),
-        "ever_positive": bool(spread is not None and spread > 0),
+        # ever_positive обещает «когда-либо было положительным», а считало ТОЛЬКО
+        # сегодняшний день — при том что 72 точки истории лежат тут же, в series.
+        # Отсюда и заголовок «событие впервые в истории», который никто не проверял.
+        "positive_now": bool(spread is not None and spread > 0),
+        "positive_days_before": before_positive,
         "series": [[d, _r(v, 2)] for d, v in dep_pts[-72:]],
     }
     if spread is None:
         headline = f"Вклады {_n(dep, 1)}%, дивдоходность не посчитана"
     elif spread > 0:
+        # «Впервые» — утверждение ОБ ИСТОРИИ, и оно проверяется по ряду, а не
+        # предполагается. История спреда у нас с 2024 года, поэтому и говорим
+        # ровно про неё, а не «в истории» вообще.
+        first = " — впервые за всю доступную историю ряда" if not before_positive else (
+            f" — такое уже бывало ({before_positive} набл. в ряду)")
         headline = (f"Дивдоходность {_n(dy, 1)}% выше вкладов {_n(dep, 1)}% "
-                    f"на {_n(spread, 1)} п.п. — событие впервые в истории")
+                    f"на {_n(spread, 1)} п.п.{first}")
     else:
         headline = (f"Вклады {_n(dep, 1)}% против дивидендов {_n(dy, 1)}%: "
                     f"спред {_n(spread, 1)} п.п. не в пользу акций")
@@ -663,8 +738,11 @@ def _t_cpi_weekly(store, now):
     asof, last = pts[-1]
 
     def _saar(weekly_pct_list):
-        # Недельный прирост в годовые проценты: (1+w)^(365/7)−1. Грубо (без сезонности),
-        # поэтому в тайле подписано «оценка».
+        # Недельный прирост в годовые проценты: (1+w)^(365/7)−1. СЕЗОННОСТИ ЗДЕСЬ
+        # НЕТ — а буквы SA в аббревиатуре SAAR обещают именно её (seasonally
+        # adjusted). Летняя плодоовощная дефляция раскручивалась в «−0,8% годовых»
+        # и читалась как очищенная от сезона оценка инфляции. Поэтому наружу это
+        # называется «в годовом выражении», без сезонного обещания (аудит 20.08.2026).
         vals = [v for v in weekly_pct_list if v is not None]
         if not vals:
             return None
@@ -677,11 +755,14 @@ def _t_cpi_weekly(store, now):
     payload = {
         "prints": [[d, _r(v, 2)] for d, v in pts[-12:]],
         "last_pct": _r(last, 2),
-        "saar_last_pct": _r(_saar([last]), 1),
-        "saar_4w_pct": _r(_saar(last4), 1),
+        # annualized_*, а не saar_*: сезонной корректировки в расчёте нет.
+        "annualized_last_pct": _r(_saar([last]), 1),
+        "annualized_4w_pct": _r(_saar(last4), 1),
+        "annualized_note": "без сезонной корректировки",
     }
     headline = (f"Неделя {_ddmm(asof)}: {_n(last, 2, True)}% "
-                f"(SAAR-оценка по 4 неделям {_n(_saar(last4), 1)}%)")
+                f"(в годовом выражении по 4 неделям {_n(_saar(last4), 1)}%, "
+                f"без сезонной корректировки)")
     return _tile("cpi_weekly", status, asof, headline, payload,
                  "Пост-публикационный эффект для акций — ноль (знаменитый пре-дрейф оказался "
                  "артефактом остановки торгов в марте 2022); держим как вход в ожидания ставки.",
@@ -939,7 +1020,7 @@ def _t_rub_barrel(store, now):
         "tax_month": u_asof,
         "urals_usd": _r(urals, 2),
         "usd": _r(usd_for_month, 2),
-        "usd_basis": "среднемесячный",
+        "usd_basis": ("среднемесячный" if month_rates else "последняя точка курса"),
         "budget_barrel_rub": BUDGET_BARREL_RUB,
         "gap_pct": _r(gap, 1),
         "proxy_rub": _r(proxy, 0),
@@ -949,9 +1030,20 @@ def _t_rub_barrel(store, now):
         "discount_is_fallback": measured_k is None,
     }
     side = "ниже" if gap < 0 else "выше"
-    tail = f"; интрадей-прокси {_n(proxy, 0)} ₽" if proxy else ""
+    # Прокси помечается ОЦЕНКОЙ, а когда дисконт Urals не измерен — говорится и
+    # это: подставленный коэффициент 0,88 против измеренного 0,75 даёт +18% к
+    # печатаемой рублёвой цене, и молчать об этом нельзя.
+    if proxy:
+        tail = (f"; интрадей-оценка {_n(proxy, 0)} ₽"
+                + (" (дисконт Urals не измерен, взят типовой)"
+                   if measured_k is None else ""))
+    else:
+        tail = ""
+    # «Бюджетных 5 440 ₽» — ОРИЕНТИР из двух допущений ($59 × 92 ₽), а не строка
+    # закона: без слова «ориентир» читатель принимал его за измеренный параметр
+    # бюджета, хотя курс в этом же payload уже другой.
     headline = (f"Налоговая бочка {_n(barrel, 0)} ₽ — на {_n(abs(gap), 0)}% {side} "
-                f"бюджетных {_n(BUDGET_BARREL_RUB, 0)} ₽{tail}")
+                f"ориентира бюджета {_n(BUDGET_BARREL_RUB, 0)} ₽{tail}")
     # ПОЧЕМУ заметка разделяет два разных гэпа: крупное число на тайле — гэп к БЮДЖЕТНОЙ
     # цене, его в валидации никто не тестировал. Валидированный сигнал — другой гэп,
     # к собственному 24-месячному тренду, и REGIME §4 прямо пишет, что эта нога плату
@@ -961,8 +1053,12 @@ def _t_rub_barrel(store, now):
                  "Крупное число — разрыв с БЮДЖЕТНОЙ ценой: наблюдение, в валидации не "
                  "проверялось. Сигнал ядра — другой разрыв, к своему 24-месячному тренду, "
                  "знак КОНТРАРИАН (IC −0,19), и эта нога поправку на множественность не "
-                 "переживает (соло p=0,15, REGIME §4). Бочка считается по среднемесячному "
-                 "курсу USD, интрадей-прокси — по последнему и через дисконт Urals к Brent.",
+                 "переживает (соло p=0,15, REGIME §4). Ориентир бюджета 5 440 ₽ — это "
+                 "произведение двух допущений (Urals $59 × 92 ₽/$), а не строка закона о "
+                 "бюджете: курсовое допущение с 2026 года разошлось с жизнью, и разрыв "
+                 "стоит читать как порядок величины, а не как измеренный дефицит. Бочка "
+                 "считается по среднемесячному курсу USD, интрадей-оценка — по последнему "
+                 "и через дисконт Urals к Brent.",
                  u_meta.get("fetched_at"))
 
 
@@ -1076,27 +1172,35 @@ def _t_hy_spread(store, now):
         # Календари разъехались (КБД считается не каждый день) — берём последнюю базу.
         pairs = [(hy_pts[-1][0], hy_pts[-1][1] - base_pts[-1][1])]
     asof, spread = pairs[-1]
+    # ТРИ ЧИСЛА ТАЙЛА — ИЗ ОДНОГО ДНЯ. Спред считался по последней ОБЩЕЙ дате, а
+    # доходности брались хвостами своих рядов: на витрине 29,25 − 14,62 = 14,63 не
+    # сходилось с напечатанным спредом 14,72, потому что база была из другого дня
+    # (аудит 20.08.2026). Разошедшиеся календари — штатное дело: КБД считается не
+    # каждый день, а доходность индекса могла отстать из-за поломки источника.
+    hy_map = dict(hy_pts)
+    hy_yield = hy_map.get(asof, hy_pts[-1][1])
+    base_yield = base.get(asof, base_pts[-1][1])
     ig_spread = None
     if ig_pts:
         ig = dict(ig_pts)
+        # Спред IG считаем только когда обе ноги есть в ОДИН день; иначе честный
+        # None — «нет данных» лучше разности чисел из разных недель.
         if asof in ig and asof in base:
             ig_spread = ig[asof] - base[asof]
-        else:
-            ig_spread = ig_pts[-1][1] - base_pts[-1][1]
     status = _worst(_st("rucbhycp_yield", hy_pts, hy_meta, now),
                     _st("rucbcpns_yield", ig_pts, ig_meta, now) if ig_pts else "ok")
     vals = [v for _, v in pairs]
     payload = {
-        "hy_yield": _r(hy_pts[-1][1], 2),
+        "hy_yield": _r(hy_yield, 2),
         "base_label": base_label,
-        "base_yield": _r(base_pts[-1][1], 2),
+        "base_yield": _r(base_yield, 2),
         "spread_pp": _r(spread, 2),
         "ig_spread_pp": _r(ig_spread, 2),
         "pct_1y": _r(_pct_last(vals, 252), 0),
         "chg_21d_pp": _r((pairs[-1][1] - pairs[-22][1]) if len(pairs) > 21 else None, 2),
         "series": [[d, _r(v, 2)] for d, v in pairs[-120:]],
     }
-    headline = (f"ВДО {_n(hy_pts[-1][1], 1)}% — спред к {base_label} {_n(spread, 1)} п.п. "
+    headline = (f"ВДО {_n(hy_yield, 1)}% — спред к {base_label} {_n(spread, 1)} п.п. "
                 f"({_n(_pct_last(vals, 252), 0)}-й перцентиль за год)")
     # Панель не выдаёт свои оценки за чужие числа. Когда доходность посчитана из
     # состава индекса (биржа сломала собственный расчёт — fetch/iss.index_yield),

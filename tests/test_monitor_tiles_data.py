@@ -247,14 +247,21 @@ class TestТайлыНаЖивыхДанных(TileCase):
         self.assertEqual(t["asof"], "2026-08-15")
         p = t["payload"]
         self.assertEqual(p["aum"], 1234.4)
-        self.assertEqual(p["flow_1d"], 34.4)    # 1234.4 − 1200
-        self.assertEqual(p["flow_5d"], -65.6)   # 1234.4 − 1300
-        self.assertEqual(p["peak"], 1300.0)
-        self.assertEqual(p["dd_from_peak_pct"], -5.0)
+        self.assertEqual(p["chg_1d"], 34.4)     # 1234.4 − 1200: ИЗМЕНЕНИЕ СЧА,
+        # а не приток — СЧА растёт и сама, на доходность пая
+        self.assertEqual(p["chg_5d"], -65.6)   # 1234.4 − 1300
+        # Пик и просадка от него — вывод ОБ ИСТОРИИ, и на коротком ряде их нет:
+        # у живого lqdt_aum было семь точек, а тайл печатал «просадка 0,0%» и
+        # «большой ротации не случалось» — вердикт об истории из недели наблюдений.
+        self.assertIsNone(p["peak"], "пик посчитан по огрызку ряда")
+        self.assertIsNone(p["dd_from_peak_pct"])
         self.assertFalse(p["rotation_started"])
-        self.assertIn(f"СЧА 1{NBSP}234 млрд", t["headline"])
-        self.assertIn("+34.4 млрд", t["headline"])
-        self.assertIn("большой ротации ещё не случалось", t["headline"])
+        self.assertIn("истории мало", t["headline"])
+        # Заголовок называет ФОНД: ряд — СЧА одного LQDT, а не всего рынка
+        # денежных фондов (тот больше 1,8 трлн).
+        self.assertIn(f"СЧА LQDT 1{NBSP}234 млрд", t["headline"])
+        self.assertIn("изменение за день +34.4 млрд", t["headline"])
+        self.assertNotIn("поток", t["headline"].lower())
 
     def test_deposit_spread_дивдоходность_и_спред(self):
         """Дивдоходность из MCFTR/IMOEX и спред к вкладам, оба в процентах.
@@ -275,7 +282,10 @@ class TestТайлыНаЖивыхДанных(TileCase):
         self.assertEqual(p["deposit_pct"], 15.6)
         self.assertEqual(p["spread_pp"], -7.9)
         self.assertEqual(p["deposit_chg_pp"], -0.3)  # 15.6 − 15.9
-        self.assertFalse(p["ever_positive"])
+        self.assertFalse(p["positive_now"])
+        # «Впервые в истории» теперь проверяется ПО РЯДУ, а не предполагается:
+        # раньше поле обещало «когда-либо», а считало сегодняшний день.
+        self.assertEqual(p["positive_days_before"], 0)
         self.assertIn("Вклады 15.6%", t["headline"])
         self.assertIn("дивидендов 7.7%", t["headline"])
         self.assertIn("-7.9 п.п. не в пользу акций", t["headline"])
@@ -346,11 +356,11 @@ class TestТайлыНаЖивыхДанных(TileCase):
         self.vitals(t, "cpi_weekly")
         self.assertEqual(t["asof"], "2026-08-11")
         p = t["payload"]
-        exp_saar = round(((1.0 + 0.10 / 100.0) ** (365.0 / 7.0) - 1.0) * 100.0, 1)
-        self.assertEqual(exp_saar, 5.3)
+        exp_annual = round(((1.0 + 0.10 / 100.0) ** (365.0 / 7.0) - 1.0) * 100.0, 1)
+        self.assertEqual(exp_annual, 5.3)
         self.assertEqual(p["last_pct"], 0.1)
-        self.assertEqual(p["saar_last_pct"], exp_saar)
-        self.assertEqual(p["saar_4w_pct"], exp_saar)
+        self.assertEqual(p["annualized_last_pct"], exp_annual)
+        self.assertEqual(p["annualized_4w_pct"], exp_annual)
         self.assertIn("Неделя 11.08: +0.10%", t["headline"])
         self.assertIn("5.3%", t["headline"])
 
@@ -489,7 +499,10 @@ class TestТайлыНаЖивыхДанных(TileCase):
         self.assertIn(f"бочка 4{NBSP}800 ₽", t["headline"])
         self.assertIn("на 12% ниже", t["headline"])
         self.assertIn(f"5{NBSP}440 ₽", t["headline"])
-        self.assertIn(f"интрадей-прокси 4{NBSP}862 ₽", t["headline"])
+        self.assertIn(f"интрадей-оценка 4{NBSP}862 ₽", t["headline"])
+        # Ориентир бюджета назван ориентиром: это произведение двух
+        # допущений ($59 × 92 ₽), а не строка закона.
+        self.assertIn("ориентира бюджета", t["headline"])
 
     def test_sep_node_дни_до_окна(self):
         """Календарный тайл: 17.08 → до 10.09 ровно 24 дня (руками: 14 + 10)."""

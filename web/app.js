@@ -171,9 +171,15 @@
   }
 
   function statusDot(status) {
-    var label = { ok: 'свежие данные', stale: 'данные устарели', error: 'источник не ответил', missing: 'данных ещё нет' };
+    var label = { ok: 'свежие данные', stale: 'данные устарели', error: 'источник не ответил',
+                  missing: 'данных ещё нет',
+                  manual_needed: 'живой источник молчит — показан ручной резерв' };
+    // Неизвестный статус красим как stale, а не как «свежие»: молчаливое
+    // превращение чужого слова в зелёную точку — это ровно то, как ручной резерв
+    // дивидендов месяц выдавался за живые данные (аудит 20.08.2026).
+    var known = { ok: 1, stale: 1, error: 1, missing: 1 };
     return h('span', {
-      'class': 'dot-status dot-status--' + (status || 'missing'),
+      'class': 'dot-status dot-status--' + (known[status] ? status : (status ? 'stale' : 'missing')),
       title: label[status] || status, role: 'img', 'aria-label': label[status] || status
     });
   }
@@ -718,7 +724,8 @@
         break;
       case 'cpi_weekly':
         out.push(num(p.last_pct, 2, '%', true));
-        out.push(h('div', { 'class': 'tile__sub', text: 'недельный принт; SAAR по 4 неделям ' + fmtNum(p.saar_4w_pct, 1, false) + '%' }));
+        // Не «SAAR»: сезонной корректировки в расчёте нет, а буквы SA её обещают.
+        out.push(h('div', { 'class': 'tile__sub', text: 'недельный принт; в годовом выражении по 4 неделям ' + fmtNum(p.annualized_4w_pct, 1, false) + '% (без сезонной корректировки)' }));
         break;
       case 'ofz_auctions':
         // Провал аукциона — это не «разместили ноль»: крупное «0,0 млрд ₽» ничем
@@ -1001,7 +1008,10 @@
     var bad = [];
     Object.keys(d.sources || {}).forEach(function (k) {
       var s = d.sources[k];
-      if (s && (s.status === 'error' || s.status === 'stale')) bad.push(k);
+      // manual_needed — «живой источник молчит, взят ручной резерв»: для
+      // читателя это ровно то же, что stale, и молчать об этом нельзя.
+      if (s && (s.status === 'error' || s.status === 'stale' ||
+                s.status === 'manual_needed')) bad.push(k);
     });
     if (bad.length) {
       box.appendChild(h('div', { 'class': 'banner' }, [
