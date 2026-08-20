@@ -336,6 +336,11 @@ def _ddmm(dstr):
     return d.strftime("%d.%m") if d else "н/д"
 
 
+def _dmy(dstr):
+    d = _d(dstr)
+    return d.strftime("%d.%m.%Y") if d else "н/д"
+
+
 def _month_ru(dstr):
     d = _d(dstr)
     return f"{MONTHS_RU_NOM[d.month - 1]} {d.year}" if d else "н/д"
@@ -867,7 +872,10 @@ def _t_polymarket(store, now):
         "series": [[d, _r(v * scale, 1)] for d, v in pts[-120:]],
     }
     tail = f" ({_n(chg7, 1, True)} п.п. за неделю)" if chg7 is not None else ""
-    when = f" к {_month_ru(end_date)}" if end_date else ""
+    # Дата, а не месяц прописью: рынок разрешается КОНКРЕТНЫМ днём, а «к декабрю»
+    # ещё и требует дательного падежа, которого в MONTHS_RU_NOM нет — «к декабрь
+    # 2026» уехало в прод на один такт.
+    when = f" до {_dmy(end_date)}" if end_date else ""
     headline = f"Соглашение{when}: {_n(prob, 0)}%{tail}"
     note = ("История с 2022 года и мало разрешившихся событий — проверить предиктивность "
             "нечем; тайл нужен для чтения новостного фона.")
