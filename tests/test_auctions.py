@@ -20,6 +20,7 @@
 """
 
 import unittest
+from datetime import date
 from unittest import mock
 
 from tests import fixture_json, need
@@ -158,17 +159,38 @@ class TestAnnounceParsing(unittest.TestCase):
         self.a = need(self, "pipeline.fetch.auctions", "next_auction", "ANNOUNCE_RE",
                       "ANNOUNCE_DAY")
 
+    def announce(self, title, published, today):
+        """Разбор анонса при ЗАМОРОЖЕННОМ сегодня.
+
+        Часы обязательны: next_auction отбрасывает уже прошедшие аукционы, и без
+        заморозки тест зелен ровно до даты из фикстуры. Так и вышло — правка от
+        18.08.2026 («прошедший аукцион не бывает следующим») сделала этот тест
+        календарной бомбой, и 20.08 он покраснел на ровном месте.
+        """
+        with mock.patch("pipeline.fetch.moex_press.scan_news",
+                        return_value=[(101, title, published)]),              mock.patch.object(self.a.dates, "today_msk", return_value=today):
+            return self.a.next_auction()
+
     def test_заголовок_анонса_узнаётся_и_дата_разбирается(self):
         title = ("О проведении 19 августа 2026 года аукциона по размещению ОФЗ "
                  "выпусков № 26252RMFS")
         self.assertTrue(self.a.ANNOUNCE_RE.search(title))
         m = self.a.ANNOUNCE_DAY.search(title)
         self.assertEqual((m.group(1), m.group(3)), ("19", "2026"))
-        with mock.patch("pipeline.fetch.moex_press.scan_news",
-                        return_value=[(101, title, "2026-08-18")]):
-            day, got, url = self.a.next_auction()
+        day, _got, url = self.announce(title, "2026-08-18", date(2026, 8, 18))
         self.assertEqual(day, "2026-08-19")
         self.assertIn("moex.com/n101", url)
+
+    def test_прошедший_аукцион_не_объявляется_следующим(self):
+        # Анонс живёт в ленте и ПОСЛЕ аукциона: со среды-вечера до следующего
+        # вторника свежайший подходящий анонс — прошлый, и тайл 5 дней из 7 писал
+        # «Назначен следующий: 19.08» про уже прошедшее размещение.
+        title = ("О проведении 19 августа 2026 года аукциона по размещению ОФЗ "
+                 "выпусков № 26252RMFS")
+        self.assertEqual(self.announce(title, "2026-08-18", date(2026, 8, 21))[0], None)
+        # В САМ день аукциона он ещё «следующий»: размещение идёт днём.
+        self.assertEqual(self.announce(title, "2026-08-18", date(2026, 8, 19))[0],
+                         "2026-08-19")
 
     def test_чужая_новость_анонсом_не_считается(self):
         for foreign in ("Об итогах аукциона по размещению ОФЗ",

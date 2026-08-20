@@ -157,8 +157,19 @@ def _in_window(day, lo, hi):
 
 
 # ------------------------------------------------------------------- индексы
+# Разумный коридор доходности облигационного индекса, % годовых. Ниже 1% —
+# заглушка (у ВДО такого не бывает и в самые тихие годы), выше 100% — не
+# доходность: в дефолтном сценарии индекс просто перестают считать.
+# ОПЛАЧЕНО ПРОДОМ 20.08.2026: ISS с 14.08 отдаёт в поле YIELD у RUCBHYCP мусор
+# (207 -> 14 204 -> 2 850 -> 6 595 при неизменных CLOSE ~78 и DURATION ~465),
+# и витрина печатала читателю «ВДО 2 850,3% к ОФЗ 2Y» тайлом с тиром B. В
+# истории ряда таких взрывов 22 (максимум 130 002%) плюс 445 нулей — то есть
+# треть точек ряда никогда не была доходностью.
+YIELD_SANE = (1.0, 100.0)
+
+
 def _index_series(sec, field, series_id, unit, default_start, drop_zero=False,
-                  start=None, end=None, bootstrap=False):
+                  sane=None, start=None, end=None, bootstrap=False):
     sid = series_id
     frm = start or incremental_start(sid, RETRO_DAYS, default_start, bootstrap)
     till = end or dates.fmt_date(dates.today_msk())
@@ -168,7 +179,7 @@ def _index_series(sec, field, series_id, unit, default_start, drop_zero=False,
         columns=["TRADEDATE", "CLOSE", "VALUE", "YIELD"])
     idx = _colmap(cols)
     lo, hi = _window(frm, till)
-    points = {}
+    points, insane = {}, []
     for row in rows:
         day = row[idx["TRADEDATE"]] if "TRADEDATE" in idx else None
         value = _num(row, idx, field)
@@ -181,10 +192,31 @@ def _index_series(sec, field, series_id, unit, default_start, drop_zero=False,
         # индекса доходность 0 невозможна, значит это «нет данных», а не значение.
         if drop_zero and value == 0.0:
             continue
+        # Значение вне разумного коридора — тоже «нет данных», а не число. Молча
+        # записать его нельзя: оно доедет до читателя как факт.
+        if sane and not (sane[0] <= value <= sane[1]):
+            insane.append((str(day), value))
+            continue
         points[str(day)] = value
+    if insane:
+        http.LOG(f"{sid}: {len(insane)} значений вне коридора {sane[0]}..{sane[1]} "
+                 f"отброшено (первое {insane[0][0]}={insane[0][1]})")
     if not points and empty_is_fatal(sid):
-        raise FetchError(f"ISS: пусто по {sec}.{field} за {frm}..{till}", url=url)
-    meta = make_meta("iss", url, points, unit=unit, rows=len(rows), secid=sec, field=field)
+        why = (f"все {len(insane)} значений вне коридора {sane[0]}..{sane[1]} "
+               f"(последнее {insane[-1][0]}={insane[-1][1]})" if insane else "пусто")
+        raise FetchError(f"ISS: {why} по {sec}.{field} за {frm}..{till}", url=url)
+    # Отброшенное — ОТКАЗ ИСТОЧНИКА, а не тишина: без статуса ряд замирает на
+    # последнем валидном значении и выглядит свежим (fetched_at обновляется), а
+    # тайл рассказывает про позавчера как про сегодня.
+    status = "ok"
+    note = None
+    if insane:
+        status = "error" if not points else "stale"
+        note = (f"источник отдаёт {field} вне разумного коридора "
+                f"{sane[0]}..{sane[1]}: {len(insane)} знач. "
+                f"(последнее {insane[-1][0]}={insane[-1][1]}) — точки не записаны")
+    meta = make_meta("iss", url, points, unit=unit, rows=len(rows), secid=sec, field=field,
+                     status=status, note=note, dropped_insane=len(insane) or None)
     return sid, points, meta
 
 
@@ -203,8 +235,8 @@ def index_value(sec="IMOEX", series_id=None, start=None, end=None, bootstrap=Fal
 def index_yield(sec="RUCBHYCP", series_id=None, start=None, end=None, bootstrap=False):
     """Доходность облигационного индекса, % годовых (registry: *_yield)."""
     return _index_series(sec, "YIELD", series_id or f"{sec.lower()}_yield", "pct",
-                         "2003-01-01", drop_zero=True, start=start, end=end,
-                         bootstrap=bootstrap)
+                         "2003-01-01", drop_zero=True, sane=YIELD_SANE,
+                         start=start, end=end, bootstrap=bootstrap)
 
 
 def selt(sec="CNYRUB_TOM", series_id=None, start=None, end=None, bootstrap=False):

@@ -40,7 +40,8 @@ class IssCase(unittest.TestCase):
 
     def setUp(self):
         self.http = need(self, "pipeline.lib.http", "get_bytes")
-        self.iss = need(self, "pipeline.fetch.iss", "index", "selt", "breadth", "futoi")
+        self.iss = need(self, "pipeline.fetch.iss", "index", "selt", "breadth", "futoi",
+                        "index_yield", "YIELD_SANE")
         self.store = need(self, "pipeline.lib.store", "upsert_points")
         self.tmp = TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -123,6 +124,63 @@ class TestRequestWindow(IssCase):
         fetch = need(self, "pipeline.fetch", "incremental_start")
         self.store.upsert_points("imoex", {"2026-08-10": 2293.32, FUTURE: 9999.0})
         self.assertEqual(fetch.incremental_start("imoex", 5, "1997-01-01"), "1997-01-01")
+
+
+class TestYieldSanity(IssCase):
+    """Доходность облигационного индекса вне разумного коридора — не число.
+
+    ОПЛАЧЕНО ПРОДОМ 20.08.2026: ISS с 14.08 отдавал в поле YIELD у RUCBHYCP
+    мусор (207 -> 14 204 -> 2 850 -> 6 595 при неизменных CLOSE ~78 и DURATION
+    ~465), панель записывала его как факт, и витрина печатала читателю «ВДО
+    2 850,3% к ОФЗ 2Y» — тайлом с тиром B, то есть «направление подтверждено».
+    Отказ источника, выглядящий исправной работой: fetched_at свежий, статус ok.
+    """
+
+    def rows(self, yields):
+        days = ["2026-08-1%d" % i for i in range(1, 1 + len(yields))]
+        return _history([[d, 78.0, 1e9, y] for d, y in zip(days, yields)])
+
+    def test_взрыв_доходности_не_попадает_в_ряд(self):
+        self.serve(lambda _u: self.rows([26.5, 27.4, 14204.82]))
+        _sid, points, meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
+                                                  end="2026-08-19")
+        self.assertEqual(sorted(points.values()), [26.5, 27.4])
+        self.assertEqual(meta["status"], "stale", "мусор источника не назван отказом")
+        self.assertIn("коридор", meta["note"])
+        self.assertIn("14204.82", meta["note"], "в записке нет самого значения")
+
+    def test_все_значения_мусорные_это_громкий_отказ(self):
+        # Ряд не просто отстал — источник сломан целиком. Это FetchError: run.py
+        # ловит его, метит ряд error и пишет в журнал, а на панели загорается
+        # жёлтая точка. Тихо вернуть пустой ряд нельзя — он выглядел бы «свежим».
+        self.serve(lambda _u: self.rows([207.47, 14204.82, 2850.29]))
+        with self.assertRaises(self.iss.FetchError) as ctx:
+            self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11", end="2026-08-19")
+        self.assertIn("коридор", str(ctx.exception))
+        self.assertIn("2850.29", str(ctx.exception), "не названо последнее значение")
+
+    def test_нормальные_значения_проходят_без_помех(self):
+        self.serve(lambda _u: self.rows([15.7, 15.9, 26.09, 99.9, 1.0]))
+        _sid, points, meta = self.iss.index_yield(sec="RUCBCPNS", start="2026-08-11",
+                                                  end="2026-08-19")
+        self.assertEqual(len(points), 5, "коридор съел здоровые значения")
+        self.assertEqual(meta["status"], "ok")
+        self.assertIsNone(meta.get("dropped_insane"))
+
+    def test_ноль_по_прежнему_заглушка(self):
+        self.serve(lambda _u: self.rows([0.0, 26.5]))
+        _sid, points, _meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
+                                                   end="2026-08-19")
+        self.assertEqual(list(points.values()), [26.5])
+
+    def test_цена_индекса_коридором_не_режется(self):
+        # Коридор — только для доходности: CLOSE индекса живёт в пунктах и может
+        # быть любым (IMOEX ходил от 500 до 4 300).
+        self.serve(lambda _u: _history([["2026-08-11", 4300.0, 1e9, None]]))
+        _sid, points, meta = self.iss.index(sec="IMOEX", start="2026-08-11",
+                                            end="2026-08-19")
+        self.assertEqual(points, {"2026-08-11": 4300.0})
+        self.assertEqual(meta["status"], "ok")
 
 
 class TestFutoiReportsFailures(IssCase):
