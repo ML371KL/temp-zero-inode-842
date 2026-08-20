@@ -21,16 +21,37 @@
 # Дубликаты одного события несколькими строками не заводить: одна новость — одна
 # строка. Если событие растянуто (пакет санкций анонсирован и принят) — две строки
 # с разными датами и своими знаками.
+#
+# 20.08.2026: удалена строка-заглушка «ПРИМЕР-ЗАГЛУШКА… example.invalid» от
+# 01.08.2026 — выдуманное событие с положительным знаком жило в ряду наравне с
+# настоящими и делало семью источников «свежей» за свой счёт. Вместо неё внесены
+# четыре реальных события июля-августа из эталона исследования
+# (validation → seed/events_registry.csv), которые в ряд не попадали.
 
-updated: 2026-08-11
+updated: 2026-08-20
 items:
   - date: 2026-07-24
     type: other
     title: "Заседание ЦБ: решение по ключевой ставке"
     expected_sign: 0
     url: "https://www.cbr.ru/press/pr/"
-  - date: 2026-08-01
+  - date: 2026-07-16
+    type: sanction_us
+    title: "Внесён S.5025 (Sanctioning Russia Act), более 60 коспонсоров"
+    expected_sign: -1
+    url: "https://www.govtrack.us/congress/bills/119/s5025"
+  - date: 2026-07-23
+    type: sanction_eu
+    title: "21-й пакет санкций ЕС"
+    expected_sign: -1
+    url: "https://www.consilium.europa.eu/ru/press/press-releases/"
+  - date: 2026-07-28
     type: peace_pos
-    title: "ПРИМЕР-ЗАГЛУШКА: сообщение о раунде переговоров (заменить или удалить)"
+    title: "Встреча в Вашингтоне: договорились активизировать переговоры"
     expected_sign: 1
-    url: "https://example.invalid/replace-me"
+    url: "https://www.e1.ru/text/world/2026/07/28/76558056/"
+  - date: 2026-08-07
+    type: sanction_us
+    title: "Сенат принял Graham Act 86-11: тарифы покупателям нефти РФ"
+    expected_sign: -1
+    url: "https://www.cnbc.com/2026/08/07/russia-sanctions-bill-lindsey-graham-senate.html"

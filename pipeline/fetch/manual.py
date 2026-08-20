@@ -263,8 +263,11 @@ def events():
         points[date] = points.get(date, 0.0) + sign
         clean.append(rec)
     note = None if not bad else "неизвестный type у: %s" % "; ".join(str(b) for b in bad[:5])
+    # authoritative: файл описывает реестр ЦЕЛИКОМ. Строку из него удалили —
+    # значит события не было, и точка обязана уйти из ряда (store.upsert_points
+    # прополет). Без этого выдуманное событие остаётся в проде и после правки файла.
     return "events_registry", points, _meta(path, "ok" if clean else "missing", note,
-                                            {"records": clean})
+                                            {"records": clean, "authoritative": True})
 
 
 def dividends():

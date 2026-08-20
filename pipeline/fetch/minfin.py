@@ -428,6 +428,22 @@ def _stored_urals(series_id="urals_tax"):
         return None
 
 
+def _stored_meta(series_id="urals_tax"):
+    """meta ряда из стора или {}. Нужна одна вещь: когда живой источник в
+    последний раз подтверждал ряд СВОИМ ответом, а не молчанием ранней ветки."""
+    try:
+        from lib.store import load_series
+    except ImportError:
+        try:
+            from pipeline.lib.store import load_series
+        except ImportError:
+            return {}
+    try:
+        return (load_series(series_id) or {}).get("meta") or {}
+    except (OSError, ValueError):
+        return {}
+
+
 def _urals_manual():
     """Ручной ввод из inputs/urals.yml. Импорт ленивый — как в orfr._manual_fallback:
     имя пакета зависит от того, как run.py кладёт pipeline в sys.path."""
@@ -460,10 +476,18 @@ def urals():
     want = _prev_month_end()
     have = _stored_urals()
     if have and have >= want:
+        # Ранний выход НЕ должен выдавать себя за успешный опрос источника.
+        # Весь ряд пришёл из затравки исследования (seed/urals_derived.csv), и до
+        # 20.08.2026 meta подписывала его «consultant_ndpi», хотя живой парсер не
+        # написал сюда ни одной точки: тайл и баннер источников показывали
+        # подтверждение, которого не было. Теперь в meta лежит дата последнего
+        # ЖИВОГО ответа, а её отсутствие названо вслух.
+        live = _stored_meta().get("last_live")
         return "urals_tax", {}, _meta(
             "consultant_ndpi", consultant.CARD, "ok",
-            "месяц %s уже в ряду — источник не тревожим" % want[:7],
-            {"asof": have, "skipped": True})
+            "месяц %s уже в ряду — источник не тревожим (живой справочник "
+            "последний раз отвечал %s)" % (want[:7], live or "— ни разу, ряд из затравки"),
+            {"asof": have, "skipped": True, "last_live": live})
     try:
         points, info = consultant.ndpi_prices()
         extra.update({"sections": info.get("sections"), "rows": info.get("rows")})
@@ -499,6 +523,9 @@ def urals():
                                       "; ".join(notes) + "; inputs/urals.yml пуст", extra)
 
     extra["selfcheck"] = _urals_selfcheck(points)
+    # Живой ответ получен: помечаем день, чтобы ранняя ветка следующих прогонов
+    # могла честно сказать, когда источник подтверждал ряд в последний раз.
+    extra["last_live"] = (datetime.now(timezone.utc) + timedelta(hours=3)).date().isoformat()
     return "urals_tax", points, _meta(source, url, status, "; ".join(notes), extra)
 
 

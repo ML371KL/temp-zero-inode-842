@@ -138,6 +138,42 @@ class TestFetchReportTellsTheTruth(RunCase):
         self.assertEqual(self.journal.warns, [])
 
 
+class TestAuthoritativeSource(RunCase):
+    """Ряд, целиком описанный файлом человека, теряет удалённые из файла точки.
+
+    До 20.08.2026 долив был безусловным: выдуманное событие «ПРИМЕР-ЗАГЛУШКА»
+    01.08.2026 осталось в ряду и на графике даже после того, как строку убрали из
+    inputs/events.yml, и продолжало держать семью «ручные вводы» свежей.
+    """
+
+    def test_флаг_прополки_доходит_до_стора(self):
+        self.store.upsert_points("events_registry", {"2026-07-24": 0.0, "2026-08-01": 1.0})
+        self.with_fetcher(lambda **kw: [("events_registry", {"2026-07-24": 0.0},
+                                         {"source": "manual", "status": "ok",
+                                          "authoritative": True, "fetched_at": FETCHED})])
+        self.run.fetch_all([("events_registry", {"fetcher": "manual.events", "args": {}},
+                             None)], self.journal)
+        self.assertEqual(self.store.load_series("events_registry")["points"],
+                         {"2026-07-24": 0.0})
+
+    def test_служебный_флаг_не_уезжает_в_витрину(self):
+        self.with_fetcher(lambda **kw: [("events_registry", {"2026-07-24": 0.0},
+                                         {"source": "manual", "status": "ok",
+                                          "authoritative": True, "fetched_at": FETCHED})])
+        self.run.fetch_all([("events_registry", {"fetcher": "manual.events", "args": {}},
+                             None)], self.journal)
+        self.assertNotIn("authoritative",
+                         self.store.load_series("events_registry")["meta"])
+
+    def test_обычный_ряд_не_пропалывается(self):
+        self.store.upsert_points("imoex", {"2026-08-07": 2280.0, "2026-08-10": 2293.0})
+        self.with_fetcher(lambda **kw: [("imoex", {"2026-08-11": 2301.0},
+                                         {"source": "iss", "status": "ok", "fetched_at": FETCHED})])
+        self.run.fetch_all([("imoex", {"fetcher": "iss.index", "args": {}}, None)],
+                           self.journal)
+        self.assertEqual(len(self.store.load_series("imoex")["points"]), 3)
+
+
 class TestIntradayQuotes(RunCase):
     def daily_close(self):
         self.store.upsert_points("imoex", {"2026-08-07": 2280.0, "2026-08-10": 2293.32},

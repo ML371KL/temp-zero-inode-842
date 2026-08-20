@@ -216,7 +216,13 @@ def fetch_all(items, journal, bootstrap=False):
             added = 0
             for out_id, points, meta in results:
                 points = points or {}
-                store.upsert_points(out_id, points, meta or {})
+                meta = dict(meta or {})
+                # Ряд, который целиком описан файлом человека (реестр событий),
+                # объявляет себя authoritative: удалённую из файла строку надо
+                # УБРАТЬ из ряда, а не хранить вечно. Долив без прополки держал в
+                # проде выдуманное событие 01.08.2026 даже после правки файла.
+                prune = bool(meta.pop("authoritative", False))
+                store.upsert_points(out_id, points, meta, prune=prune)
                 added += len(points)
             ms = int((time.time() - t0) * 1000)
             asof = (results[0][2] or {}).get("asof")

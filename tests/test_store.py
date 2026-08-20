@@ -237,5 +237,38 @@ class TestCorruptedDisk(StoreCase):
         self.assertIsNone(self.store.load_series("rvi"))
 
 
+class TestPrune(StoreCase):
+    """Прополка: источник, который описывает ряд целиком, вправе убирать точки.
+
+    Долив без прополки держал в проде выдуманное событие 01.08.2026 и после того,
+    как строку убрали из inputs/events.yml: реестр «на экране» уже не содержал его,
+    а ряд и график — содержали.
+    """
+
+    def test_убранное_из_файла_уходит_из_ряда(self):
+        self.store.upsert_points("events_registry", {"2026-07-24": 0.0, "2026-08-01": 1.0})
+        self.store.upsert_points("events_registry", {"2026-07-24": 0.0}, prune=True)
+        self.assertEqual(self.store.load_series("events_registry")["points"],
+                         {"2026-07-24": 0.0})
+
+    def test_без_прополки_поведение_прежнее(self):
+        self.store.upsert_points("events_registry", {"2026-07-24": 0.0, "2026-08-01": 1.0})
+        self.store.upsert_points("events_registry", {"2026-07-24": 0.0})
+        self.assertIn("2026-08-01", self.store.load_series("events_registry")["points"])
+
+    def test_пустой_ответ_не_стирает_историю(self):
+        # Файл не прочитался / фетчер вернул пусто — это не «событий больше нет».
+        self.store.upsert_points("events_registry", {"2026-07-24": 0.0, "2026-08-01": 1.0})
+        self.store.upsert_points("events_registry", {}, prune=True)
+        self.assertEqual(len(self.store.load_series("events_registry")["points"]), 2)
+
+    def test_прополка_ставит_ряд_на_выгрузку(self):
+        self.store.upsert_points("events_registry", {"2026-07-24": 0.0, "2026-08-01": 1.0})
+        self.store.mark_clean(["events_registry"])
+        self.store.upsert_points("events_registry", {"2026-07-24": 0.0}, prune=True)
+        self.assertIn("events_registry", self.store.list_dirty(),
+                      "прополка не доехала бы до R2: зеркало осталось бы с заглушкой")
+
+
 if __name__ == "__main__":
     unittest.main()

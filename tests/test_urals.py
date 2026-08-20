@@ -192,6 +192,39 @@ class TestUralsFetcher(unittest.TestCase):
         self.assertEqual(meta["status"], "ok")
         self.assertTrue(meta["skipped"])
 
+    def test_ранний_выход_не_выдаёт_себя_за_живой_ответ(self):
+        # Весь ряд urals_tax до 20.08.2026 пришёл из затравки исследования, а meta
+        # подписывала его «consultant_ndpi» со status=ok — тайл и баннер источников
+        # показывали подтверждение, которого не было ни разу. Ранняя ветка обязана
+        # называть дату последнего ЖИВОГО ответа, а её отсутствие — вслух.
+        with mock.patch.object(self.minfin, "_stored_urals", return_value="2026-07-31"), \
+             mock.patch.object(self.minfin, "_prev_month_end", return_value="2026-07-31"), \
+             mock.patch.object(self.minfin, "_stored_meta", return_value={}), \
+             mock.patch.object(self.minfin.consultant, "ndpi_prices"), \
+             mock.patch.object(self.minfin, "market_prices"):
+            _sid, _points, meta = self.minfin.urals()
+        self.assertIsNone(meta["last_live"])
+        self.assertIn("ни разу", meta["note"])
+
+    def test_дата_живого_ответа_переживает_ранний_выход(self):
+        with mock.patch.object(self.minfin, "_stored_urals", return_value="2026-07-31"), \
+             mock.patch.object(self.minfin, "_prev_month_end", return_value="2026-07-31"), \
+             mock.patch.object(self.minfin, "_stored_meta",
+                               return_value={"last_live": "2026-08-20"}), \
+             mock.patch.object(self.minfin.consultant, "ndpi_prices"), \
+             mock.patch.object(self.minfin, "market_prices"):
+            _sid, _points, meta = self.minfin.urals()
+        self.assertEqual(meta["last_live"], "2026-08-20")
+        self.assertIn("2026-08-20", meta["note"])
+        self.assertNotIn("ни разу", meta["note"])
+
+    def test_живой_ответ_проставляет_дату(self):
+        with mock.patch.object(self.minfin.consultant, "ndpi_prices",
+                               return_value=({"2026-01-31": 40.95}, {"url": "u"})), \
+             mock.patch.object(self.minfin, "market_prices", return_value=({}, [])):
+            _sid, _points, meta = self.minfin.urals()
+        self.assertRegex(str(meta.get("last_live")), r"^\d{4}-\d{2}-\d{2}$")
+
     def test_недостающий_месяц_опрашивается(self):
         with mock.patch.object(self.minfin, "_stored_urals", return_value="2026-06-30"), \
              mock.patch.object(self.minfin, "_prev_month_end", return_value="2026-07-31"), \

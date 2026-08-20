@@ -132,13 +132,20 @@ def save_series(series_id, series, force_dirty=True):
         mark_dirty(series_id)
 
 
-def upsert_points(series_id, points, meta_patch=None, unit=None, cadence=None):
+def upsert_points(series_id, points, meta_patch=None, unit=None, cadence=None,
+                  prune=False):
     """Долить точки в ряд. Возвращает записанный ряд (контракт §1).
 
     Ретро-правки источника разрешены: значение по существующей дате перезаписывается
     (ISS пересчитывает обороты, ЦБ уточняет декады). Но dirty ставим только если
     что-то реально изменилось — иначе каждый прогон гонит в R2 45 одинаковых
     объектов и превращает лог выгрузки в белый шум.
+
+    prune=True — «источник описывает ряд ЦЕЛИКОМ»: чего в нём нет, того нет и в
+    ряду. Так живут ручные реестры: строку из файла удалили, а точка оставалась
+    навсегда (выдуманное событие 01.08.2026 пережило правку файла). Пустой набор
+    точек прополку НЕ запускает: не прочитавшийся файл не имеет права стереть
+    историю — это ровно тот сценарий, от которого выше защищает _unreadable().
     """
     _check_id(series_id)
     new_points = _clean_points(points or {}, series_id)
@@ -163,8 +170,13 @@ def upsert_points(series_id, points, meta_patch=None, unit=None, cadence=None):
 
     old = series.get("points") or {}
     changed = any(k not in old or old[k] != v for k, v in new_points.items())
-    merged = dict(old)
-    merged.update(new_points)
+    if prune and new_points:
+        dropped = [k for k in old if k not in new_points]
+        changed = changed or bool(dropped)
+        merged = dict(new_points)
+    else:
+        merged = dict(old)
+        merged.update(new_points)
     series["points"] = {k: merged[k] for k in sorted(merged)}
 
     meta = dict(series.get("meta") or {})
