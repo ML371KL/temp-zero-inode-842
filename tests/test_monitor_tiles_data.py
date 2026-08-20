@@ -627,5 +627,37 @@ class TestВсеТайлыРазом(TileCase):
                                  f"тайл потерял собственное число")
 
 
+
+class TestHyEstimateIsLabelled(TileCase):
+    """Оценка панели не выдаётся за число биржи.
+
+    Когда доходность ВДО посчитана из состава индекса (биржа сломала свой расчёт
+    14.08.2026), тайл обязан это сказать: метод расходится с биржевым до 0,4 п.п.,
+    и читатель, сверяющий панель с сайтом MOEX, должен понимать, почему числа
+    разные. Панель уже держит это правило для реинвеста дивидендов.
+    """
+
+    def build(self, meta_extra):
+        self.put("rucbhycp_yield", {"2026-08-17": 27.0, "2026-08-18": 29.2},
+                 meta=dict({"unit": "pct"}, **meta_extra))
+        self.put("rucbcpns_yield", {"2026-08-17": 15.8, "2026-08-18": 15.9},
+                 meta={"unit": "pct"})
+        self.put("zcyc_y1", {"2026-08-17": 14.1, "2026-08-18": 14.2})
+        self.put("zcyc_y2", {"2026-08-17": 14.7, "2026-08-18": 14.8})
+        return self.tile("hy_spread")
+
+    def test_оценка_помечена_в_подписи(self):
+        tile = self.build({"method": "constituents", "estimate_cover_pct": 99.9})
+        self.assertIn("оценка, а не число биржи", tile["note"])
+        # Конвейер печатает числа «по-английски» (точка), запятую ставит фронт
+        # через ruText — так во всей панели.
+        self.assertIn("99.9% веса", tile["note"])
+        self.assertEqual(tile["payload"]["method"], "constituents")
+
+    def test_биржевое_число_ничем_не_помечается(self):
+        tile = self.build({})
+        self.assertNotIn("оценка", tile["note"])
+        self.assertNotIn("method", tile["payload"])
+
 if __name__ == "__main__":
     unittest.main()

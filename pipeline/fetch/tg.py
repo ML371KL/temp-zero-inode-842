@@ -38,6 +38,7 @@ Hetzner — 503; TLS при этом в порядке, сертификат Glo
 
 import html as html_mod
 import re
+from urllib.parse import quote
 from datetime import datetime, timedelta, timezone
 
 try:                                       # прод: общий HTTP-слой (CONTRACT.md §4)
@@ -168,15 +169,25 @@ def parse_page(page_html, channel=""):
     return out
 
 
-def messages(channel, pages=1, timeout=25):
+def messages(channel, pages=1, timeout=25, query=None):
     """Сообщения канала, свежие ПЕРВЫМИ. Отказ сети -> FetchError, как у всех фетчеров.
 
     `pages` листает вглубь параметром `?before=`; потолок MAX_PAGES защищает от
     бесконечного обхода, если разметка t.me однажды перестанет отдавать id постов.
+
+    `query` включает ПОИСК по каналу (`?q=`). Без него лента отдаёт только два-три
+    десятка последних сообщений, и всё, что старше недели, недостижимо: у канала с
+    десятком постов в день месячная новость уходит за горизонт за считанные дни.
+    Поиск же индексирует историю на годы назад и листается тем же `before`.
     """
     collected, seen, before = [], set(), None
     for _ in range(max(1, min(int(pages), MAX_PAGES))):
-        url = PREVIEW % channel + ("?before=%d" % before if before else "")
+        params = []
+        if query:
+            params.append("q=" + quote(str(query)))
+        if before:
+            params.append("before=%d" % before)
+        url = PREVIEW % channel + ("?" + "&".join(params) if params else "")
         batch = parse_page(get_text(url, headers=_UA, timeout=timeout), channel)
         fresh = [m for m in batch if m["id"] is None or m["id"] not in seen]
         if not fresh:
