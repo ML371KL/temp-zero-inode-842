@@ -146,7 +146,7 @@ SERIES = {
     # ------------------------------------------------------------- предсказания
     "polymarket_ceasefire": dict(fetcher="polymarket.ceasefire", args={}, cadence="daily",
                                  pub_lag_days=0, sla="polymarket", required=False,
-                                 role="monitor", label="Вероятность перемирия (Polymarket)"),
+                                 role="monitor", label="Вероятность соглашения о перемирии (Polymarket)"),
 
     # -------------------------------------------------- ручные вводы (inputs/)
     "cb_consensus": dict(fetcher="consensus.rate", args={}, cadence="event", pub_lag_days=0,
