@@ -496,5 +496,75 @@ class TestRosstatCpi(unittest.TestCase):
         self.assertTrue(got, "парсер недельного ИПЦ вернул пусто на фикстуре")
 
 
+class TestPolymarketHorizon(unittest.TestCase):
+    """Какой контракт серии показывать. В сеть не ходим: список рынков — данные.
+
+    Живой замер 20.08.2026, ставший поводом: августовский контракт (11 суток до
+    экспирации, оборот $0,4 млн) стоил 1,7%, декабрьский (133 суток, $2,2 млн) —
+    23,5%, мартовский (223 суток, $3,3 тыс.) — 42,5%. Выбор «ближайший по сроку»
+    показывал читателю 1,7% и «мира не будет» — уровень, определяемый календарём,
+    а не переговорами.
+    """
+
+    def setUp(self):
+        self.pm = need(self, "pipeline.fetch.polymarket", "_pick_primary",
+                       "MIN_HORIZON_DAYS", "_horizon_days")
+        self.now = __import__("datetime").datetime(2026, 8, 20,
+                              tzinfo=__import__("datetime").timezone.utc)
+
+    def market(self, slug, end, price, volume, question=None):
+        return {"slug": slug, "endDate": end + "T00:00:00Z",
+                "question": question or ("Russia x Ukraine ceasefire agreement by %s?" % end),
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["%s", "%s"]' % (price, round(1 - price, 4)),
+                "clobTokenIds": '["tok-%s-yes", "tok-%s-no"]' % (slug, slug),
+                "volume": volume, "closed": False}
+
+    def board(self):
+        return [(self.market("aug", "2026-08-31", 0.0165, 397095), False, "ev"),
+                (self.market("oct", "2026-10-31", 0.0750, 855017), False, "ev"),
+                (self.market("dec", "2026-12-31", 0.2350, 2150868), False, "ev"),
+                (self.market("mar", "2027-03-31", 0.4250, 3278), False, "ev")]
+
+    def test_берётся_самый_торгуемый_а_не_ближайший(self):
+        got = self.pm._pick_primary(self.board(), now=self.now)
+        self.assertEqual(got[0]["slug"], "dec")
+
+    def test_истекающий_контракт_не_берётся_никогда(self):
+        # мутация: убрать порог горизонта -> вернётся «aug» с 11 сутками жизни,
+        # и плитка снова покажет календарь вместо новостей.
+        got = self.pm._pick_primary(self.board(), now=self.now)
+        self.assertGreaterEqual(self.pm._horizon_days(got[0], self.now),
+                                self.pm.MIN_HORIZON_DAYS)
+
+    def test_пустой_дальний_край_не_перетягивает_на_себя(self):
+        # У мартовского оборот в 650 раз меньше: «горизонт длиннее» не довод.
+        got = self.pm._pick_primary(self.board(), now=self.now)
+        self.assertNotEqual(got[0]["slug"], "mar")
+
+    def test_когда_всё_истекает_берётся_самый_дальний(self):
+        soon = [(self.market("a", "2026-08-25", 0.02, 500000), False, "ev"),
+                (self.market("b", "2026-09-05", 0.05, 100000), False, "ev")]
+        got = self.pm._pick_primary(soon, now=self.now)
+        self.assertEqual(got[0]["slug"], "b", "на исходе серии важна сопоставимость, "
+                                              "а не оборот")
+
+    def test_старый_критерий_проигрывает_чистому_при_любом_обороте(self):
+        mixed = [(self.market("dirty", "2026-12-31", 0.1750, 9999999,
+                              "Russia x Ukraine ceasefire by December 31, 2026?"), True, "ev"),
+                 (self.market("clean", "2026-12-31", 0.2350, 2150868), False, "ev")]
+        got = self.pm._pick_primary(mixed, now=self.now)
+        self.assertEqual(got[0]["slug"], "clean",
+                         "серия «любое перемирие» разрешалась YES по трёхдневному")
+
+    def test_перекат_происходит_сам(self):
+        # Через месяц после экспирации декабрьского выбор обязан уехать дальше,
+        # а не встать на закрытом рынке.
+        later = __import__("datetime").datetime(2026, 12, 20,
+                           tzinfo=__import__("datetime").timezone.utc)
+        got = self.pm._pick_primary(self.board(), now=later)
+        self.assertEqual(got[0]["slug"], "mar")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -686,7 +686,12 @@
         break;
       case 'polymarket':
         out.push(num(p.prob_pct, 0, '%'));
-        out.push(h('div', { 'class': 'tile__sub', text: (isNum(p.chg_7d_pp) ? fmtNum(p.chg_7d_pp, 1, true) + ' п.п. за неделю. ' : '') + (p.question || '') }));
+        /* Горизонт печатается рядом с числом, а не только в примечании:
+           вероятность «до даты» тем ниже, чем ближе дата, и без срока 2% по
+           августовскому контракту и 24% по декабрьскому читаются как
+           противоречие, хотя это один рынок в один день. */
+        out.push(h('div', { 'class': 'tile__sub', text: (isNum(p.chg_7d_pp) ? fmtNum(p.chg_7d_pp, 1, true) + ' п.п. за неделю. ' : '') +
+          (isNum(p.horizon_days) ? 'горизонт ' + p.horizon_days + ' дн. · ' : '') + (p.question || '') }));
         if (p.series) out.push(C.miniSeries(p.series, { digits: 0, unit: '%', label: 'вероятность', color: tok('--s2') }));
         break;
       case 'futoi':

@@ -848,18 +848,34 @@ def _t_polymarket(store, now):
     prob = p * scale
     chg7 = (_chg(pts, 7) or 0.0) * scale if len(pts) > 7 else None
     chg30 = (_chg(pts, 30) or 0.0) * scale if len(pts) > 30 else None
+    # Горизонт — часть самого числа, а не подробность: вероятность «до даты»
+    # зависит от того, сколько до неё осталось. Без срока «перемирие 2%» и
+    # «перемирие 24%» выглядят противоречием, хотя это один рынок в один день.
+    end_date = str(meta.get("end_date") or "")[:10]
+    horizon = meta.get("horizon_days")
+    if not isinstance(horizon, int) and end_date:
+        a, b = _d(end_date), _d(asof)
+        horizon = (a - b).days if (a and b) else None
     payload = {
         "prob_pct": _r(prob, 1),
         "chg_7d_pp": _r(chg7, 1),
         "chg_30d_pp": _r(chg30, 1),
         "question": meta.get("question") or meta.get("note"),
+        "end_date": end_date or None,
+        "horizon_days": horizon if isinstance(horizon, int) else None,
+        "market_volume_usd": _r(meta.get("volume"), 0),
         "series": [[d, _r(v * scale, 1)] for d, v in pts[-120:]],
     }
     tail = f" ({_n(chg7, 1, True)} п.п. за неделю)" if chg7 is not None else ""
-    headline = f"Перемирие: {_n(prob, 0)}%{tail}"
-    return _tile("polymarket", status, asof, headline, payload,
-                 "История с 2022 года и мало разрешившихся событий — проверить предиктивность "
-                 "нечем; тайл нужен для чтения новостного фона.",
+    when = f" к {_month_ru(end_date)}" if end_date else ""
+    headline = f"Соглашение{when}: {_n(prob, 0)}%{tail}"
+    note = ("История с 2022 года и мало разрешившихся событий — проверить предиктивность "
+            "нечем; тайл нужен для чтения новостного фона.")
+    if isinstance(horizon, int):
+        note += (f" Показан самый торгуемый контракт серии, до его даты {horizon} дн.: "
+                 f"у контрактов на исходе срока уровень определяется календарём, "
+                 f"а не переговорами.")
+    return _tile("polymarket", status, asof, headline, payload, note,
                  meta.get("fetched_at"))
 
 
