@@ -86,11 +86,20 @@ class TestNames(WordingCase):
 
     def test_статистика_режима_без_обозначений_таблицы(self):
         got = self.w.cell_plain({"median_fwd1m_pct": 0.64, "worst_pct": -30.0,
-                                 "hit": 0.56, "n": 25})
+                                 "hit": 0.54, "n": 25, "n_closed": 24})
         for token in ("n=", "hit", "mean", "%/мес"):
             self.assertNotIn(token, got, f"обозначение таблицы «{token}» уехало наружу")
         self.assertIn("типичный месяц +0,6%", got)
-        self.assertIn("25 месяцев истории", got)
+        # 24, а не 25: медиана, доля плюсовых и худший месяц посчитаны по закрытым
+        # месяцам, и называть рядом с ними другую выборку — та же подмена, из-за
+        # которой долю плюсовых однажды переписали по незакрытому месяцу.
+        self.assertIn("24 месяца истории", got)
+        self.assertIn("закрывались 54%", got)
+
+    def test_без_n_closed_выборка_прежняя(self):
+        got = self.w.cell_plain({"median_fwd1m_pct": 1.22, "worst_pct": -16.7,
+                                 "hit": 0.59, "n": 110})
+        self.assertIn("110 месяцев истории", got)
 
     def test_строка_становится_предложением(self):
         self.assertEqual(self.w.sentence("просадка RGBI −1,2% от максимума"),

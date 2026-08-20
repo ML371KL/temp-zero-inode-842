@@ -71,7 +71,7 @@ list_dirty() -> [series_id]                        # для выгрузки в 
   "verdict": {
     "cell_code": "bear|stress|stress",
     "cell_label": "токсичная ячейка",
-    "cell_stats": {"mean_fwd1m_pct": -2.94, "hit": 0.56, "n": 25,
+    "cell_stats": {"mean_fwd1m_pct": -2.94, "hit": 0.54, "n": 25, "n_closed": 24,
                    "median_fwd1m_pct": 0.64, "worst_pct": -30.0, "best_pct": 18.0},
     "rule": "…текст правила дня…",
     "core_value": 0.50,

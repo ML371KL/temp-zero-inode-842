@@ -248,7 +248,12 @@ def cell_plain(stats):
     median = stats.get("median_fwd1m_pct")
     worst = stats.get("worst_pct")
     hit = stats.get("hit")
-    count = stats.get("n")
+    # Выборка называется та, на которой посчитаны сами числа. Медиана, доля
+    # плюсовых и худший месяц берутся по ЗАКРЫТЫМ месяцам (n_closed), а `n` —
+    # число пар исследования: у токсичной ячейки это 24 против 25, и «25 месяцев
+    # истории» рядом с долей, посчитанной по 24, — ровно та подмена выборки,
+    # из-за которой долю однажды уже переписали неверно (constants.CELL_STATS).
+    count = stats.get("n_closed", stats.get("n"))
     bits = []
     if isinstance(median, (int, float)):
         bits.append(f"типичный месяц {pct(median, 1, plus=True)}")

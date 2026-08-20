@@ -12,6 +12,7 @@
   фаза ставки — на 200 (ключевая 18 → 17, то есть смягчение).
 """
 
+import re
 import unittest
 
 from tests import need, panel_small
@@ -135,6 +136,103 @@ class TestCell(StatesCase):
         rule = self.constants.CELL_RULES[(0, 1, 1)]
         self.assertIn("медиана", rule.lower())
         self.assertIn("2008", rule, "правило обязано называть отказ ядра, а не только ячейку")
+
+    def test_числа_в_правилах_взяты_из_статистики_той_же_ячейки(self):
+        """Правило дня цитирует CELL_STATS от руки — и ничто это не держало.
+
+        Тексты писались копированием: «+3.8%/мес, hit 0.75», «hit 0.61 при n=54»,
+        «4 месяца из 25». Реколибровка меняет CELL_STATS, а строки рядом остаются
+        прежними — и панель начинает уверенно называть числа, которых в модели уже
+        нет. Здесь каждое число из текста сверяется со статистикой СВОЕЙ ячейки.
+
+        мутация: поменять hit у (1,1,0) на 0.70 -> тест красный, а без него панель
+        печатала бы «hit 0.75» рядом с карточкой, где стоит 0.70.
+        """
+        # В текстах стоит юникодный минус — приводим к обычному, иначе float() падает.
+        norm = lambda s: s.replace("−", "-").replace("–", "-")
+        pct = re.compile(r"([+-]?\d+[.,]\d+)\s*%\s*/\s*мес")
+        hit = re.compile(r"hit\s+(\d+[.,]\d+)")
+        enn = re.compile(r"n\s*=\s*(\d+)")
+        sample = re.compile(r"из\s+(\d+)\b")
+        median = re.compile(r"медиана\s+([+-]?\d+[.,]\d+)\s*%")
+        num = lambda m: float(m.replace(",", "."))
+
+        checked = 0
+        for key, rule in self.constants.CELL_RULES.items():
+            stats = self.constants.CELL_STATS[key]
+            text = norm(rule)
+            with self.subTest(cell=stats["label"]):
+                for m in pct.findall(text):
+                    self.assertAlmostEqual(
+                        num(m), stats["mean_fwd1m_pct"], delta=0.05,
+                        msg=f"{stats['label']}: в тексте {m}%/мес, в статистике "
+                            f"{stats['mean_fwd1m_pct']}")
+                    checked += 1
+                for m in hit.findall(text):
+                    self.assertAlmostEqual(num(m), stats["hit"], delta=0.005,
+                                           msg=f"{stats['label']}: hit в тексте {m}")
+                    checked += 1
+                for m in enn.findall(text):
+                    self.assertEqual(int(m), stats["n"],
+                                     msg=f"{stats['label']}: n в тексте {m}")
+                    checked += 1
+                for m in sample.findall(text):
+                    # «4 месяца из N» считается по ЗАКРЫТЫМ месяцам — той же
+                    # выборке, что медиана и hit рядом.
+                    closed = stats.get("n_closed", stats["n"])
+                    self.assertEqual(int(m), closed,
+                                     msg=f"{stats['label']}: выборка в тексте {m}, "
+                                         f"закрытых месяцев {closed}")
+                    checked += 1
+                for m in median.findall(text):
+                    self.assertAlmostEqual(
+                        num(m), stats["median_fwd1m_pct"], delta=0.05,
+                        msg=f"{stats['label']}: медиана в тексте {m}")
+                    checked += 1
+        self.assertGreaterEqual(checked, 8, "разбор перестал находить числа в текстах — "
+                                            "проверка выродилась в пустую")
+
+    def test_доля_плюсовых_кратна_своей_выборке(self):
+        """hit — это m/n_closed, значит hit·n_closed обязано быть целым.
+
+        Проверка дешёвая и вскрывает то, что глазами не видно. 12.08.2026 она уже
+        сработала: в таблице стояло «hit 0,54 при n=25», доля, не кратная 1/25.
+        Тогдашнее исправление на 0,56 пересчитывало долю ПО 25 ПАРАМ, включая
+        незакрытый месяц, который в тот день стоял в плюсе, — и 0,56 перестала
+        воспроизводиться, как только рынок сдал назад (20.08.2026: 13 плюсовых из
+        25 = 0,52, а на 24 закрытых 13/24 = 0,54). Число вернули к 0,54 и назвали
+        его выборку полем n_closed.
+
+        мутация: hit токсичной ячейки 0.54 -> 0.56 при n_closed=24 -> красный.
+        """
+        for key, stats in self.constants.CELL_STATS.items():
+            closed = stats.get("n_closed", stats["n"])
+            with self.subTest(cell=stats["label"]):
+                hits = stats["hit"] * closed
+                # hit округлён до двух знаков, поэтому допуск — цена этого округления
+                # на своей выборке, не больше.
+                self.assertLessEqual(
+                    abs(hits - round(hits)), 0.005 * closed + 1e-9,
+                    f"{stats['label']}: hit={stats['hit']} не кратен 1/{closed} "
+                    f"({hits:.2f} плюсовых) — доля и выборка из разных подсчётов")
+
+    def test_у_каждой_ячейки_выборка_не_больше_исследовательской(self):
+        for key, stats in self.constants.CELL_STATS.items():
+            closed = stats.get("n_closed", stats["n"])
+            with self.subTest(cell=stats["label"]):
+                self.assertLessEqual(closed, stats["n"])
+                self.assertGreaterEqual(closed, stats["n"] - 1,
+                                        "закрытых месяцев не может быть меньше n−1: "
+                                        "незакрытым бывает только последний")
+
+    def test_худший_месяц_в_тексте_не_мягче_статистики(self):
+        # «от −16% до −30%»: правая граница обязана совпасть с worst_pct ячейки,
+        # иначе текст обещает читателю хвост мягче настоящего.
+        toxic = self.constants.CELL_STATS[(0, 1, 1)]
+        text = self.constants.CELL_RULES[(0, 1, 1)].replace("−", "-")
+        worst = min(float(x) for x in re.findall(r"(-\d+(?:[.,]\d+)?)\s*%", text))
+        self.assertLessEqual(worst, toxic["worst_pct"] + 0.05,
+                             f"в тексте худший {worst}%, в статистике {toxic['worst_pct']}%")
 
     def test_all_eight_cells_listed_once(self):
         cells = self.out["cells"]
