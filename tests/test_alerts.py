@@ -794,6 +794,41 @@ class TestRequeueKeepsStructure(AlertsCase):
                         "повтор завернул весь текст события в одну жирную строку")
 
 
+class TestSourceStaleNamesSeries(AlertsCase):
+    """Сообщение об отставшем источнике называет КОНКРЕТНЫЙ ряд.
+
+    Статус семьи — статус худшего ряда в ней, и его имя семья знает (run.py
+    кладёт meta.series). Без него владелец получал «источник iss отдаёт
+    устаревшие данные» при двадцати живых рядах ISS и одном сломанном — адрес,
+    по которому нечего чинить. Оплачено 20.08.2026: биржа сломала расчёт
+    доходности ВДО, панель сказала «данные от 13.08», а индекс был свежий.
+    """
+
+    def fire(self, **extra):
+        self.seed(payload())
+        src = {"iss": dict({"status": "stale", "lag_min": 90, "asof": "2026-08-13"},
+                           **extra)}
+        evs = self.alerts.run(payload(sources=src), dry_run=False, now=NOW)
+        return next(e for e in evs if e["kind"] == "source_stale")
+
+    def test_имя_ряда_в_заголовке_и_факте(self):
+        ev = self.fire(series="rucbhycp_yield")
+        self.assertIn("rucbhycp_yield", ev["title"])
+        self.assertIn("rucbhycp_yield", ev["fact"])
+        self.assertIn("13.08.2026", ev["fact"])
+
+    def test_без_имени_ряда_текст_прежний(self):
+        # Семья может не знать ряда (старое состояние, чужой писатель) — тогда
+        # сообщение остаётся про источник целиком, а не про «None».
+        ev = self.fire()
+        self.assertNotIn("None", ev["title"] + ev["fact"])
+        self.assertIn("iss", ev["title"])
+
+    def test_ряд_совпал_с_именем_семьи_не_дублируется(self):
+        ev = self.fire(series="iss")
+        self.assertNotIn("iss (iss)", ev["title"])
+
+
 class TestOpsLatchAllKinds(AlertsCase):
     """Защёлка недоставленных санитарных — для ВСЕХ видов, не только health.
 

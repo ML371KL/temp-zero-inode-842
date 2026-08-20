@@ -462,10 +462,20 @@ def _sources(payload, prev, now):
         age_txt = (f" Последний удачный опрос {wording.hours_minutes(age)} назад."
                    if isinstance(age, (int, float)) else "")
         word = "не отвечает" if st == "error" else "отдаёт устаревшие данные"
+        # Статус семьи — это статус ХУДШЕГО ряда в ней (run.py), и его имя семья
+        # знает (meta.series). Без него сообщение зовёт проверять весь источник:
+        # «источник iss отдаёт устаревшие данные» при двадцати живых рядах ISS и
+        # одном сломанном — это адрес, по которому нечего чинить. Дата в факте по
+        # той же причине принадлежит РЯДУ, а не источнику (оплачено 20.08.2026:
+        # ISS сломал расчёт доходности ВДО, панель сказала «данные от 13.08», а
+        # индекс был свежий).
+        series = meta.get("series")
+        who = f"{name} ({series})" if series and series != name else name
         out.append(_ev(f"source_stale:{name}:{payload.get('asof_trading_day')}",
-                       "source_stale", f"источник {name} {word}", "warn", now,
-                       fact=f"Данные в панели от "
-                            f"{wording.ru_day(meta.get('asof') or payload.get('asof_trading_day'))}."
+                       "source_stale", f"источник {who} {word}", "warn", now,
+                       fact=(f"Ряд {series}: данные от " if series and series != name
+                             else "Данные в панели от ")
+                            + f"{wording.ru_day(meta.get('asof') or payload.get('asof_trading_day'))}."
                             + age_txt,
                        meaning="Панель считает по последним удачным числам и выглядит "
                                "рабочей — тайлы этого источника помечены жёлтой точкой.",
