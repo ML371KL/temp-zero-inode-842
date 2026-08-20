@@ -17,6 +17,7 @@
 
 import json
 import os
+import re
 import unittest
 from datetime import date, timedelta
 from tempfile import TemporaryDirectory
@@ -41,13 +42,20 @@ class IssCase(unittest.TestCase):
     def setUp(self):
         self.http = need(self, "pipeline.lib.http", "get_bytes")
         self.iss = need(self, "pipeline.fetch.iss", "index", "selt", "breadth", "futoi",
-                        "index_yield", "YIELD_SANE")
+                        "index_yield", "YIELD_SANE",
+                        "index_yield_estimate", "_bond_yield_cache")
         self.store = need(self, "pipeline.lib.store", "upsert_points")
         self.tmp = TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.prev = os.environ.get("STATE_DIR")
         os.environ["STATE_DIR"] = self.tmp.name
         self.addCleanup(self._restore)
+        # Кэш котировок облигаций живёт в модуле (один запрос на прогон, оба
+        # индекса). Между тестами он обязан быть пуст: иначе выборка соседнего
+        # теста подменяет транспорт и проверка «оценка не строится по огрызку»
+        # проходит на чужих данных.
+        self.iss._bond_yield_cache.clear()
+        self.addCleanup(self.iss._bond_yield_cache.clear)
 
     def _restore(self):
         if self.prev is None:
@@ -181,6 +189,86 @@ class TestYieldSanity(IssCase):
                                             end="2026-08-19")
         self.assertEqual(points, {"2026-08-11": 4300.0})
         self.assertEqual(meta["status"], "ok")
+
+
+class TestYieldFromConstituents(IssCase):
+    """Резерв доходности индекса: считаем из состава, когда биржа отдаёт мусор.
+
+    Без резерва ряд замирает на последнем здоровом дне, и тайл мертвеет на всё
+    время поломки источника — а она уже длится неделю. Метод сверен с биржей на
+    здоровых днях (31.07, 05.08, 11.08, 13.08 × два индекса): расхождение
+    −0,41…+0,02 п.п. у ВДО и −0,07…−0,01 п.п. у корпоблигаций.
+    """
+
+    def serve_all(self, index_yields, weights, bond_yields):
+        """История индекса + состав + витрина облигаций на одном транспорте."""
+        def responder(url):
+            if "analytics" in url:
+                start = int(re.search(r"start=(\d+)", url).group(1)) if "start=" in url else 0
+                rows = [["RUCBHYCP", "2026-08-19", s, s, s, w, 3, "2026-08-19"]
+                        for s, w in list(weights.items())[start:start + 20]]
+                return _payload({"analytics": {
+                    "columns": ["indexid", "tradedate", "ticker", "shortnames",
+                                "secids", "weight", "tradingsession",
+                                "trade_session_date"], "data": rows}})
+            if "markets/bonds" in url:
+                return _payload({"marketdata": {
+                    "columns": ["SECID", "YIELD"],
+                    "data": [[s, y] for s, y in bond_yields.items()]}})
+            days = ["2026-08-1%d" % i for i in range(1, 1 + len(index_yields))]
+            return _history([[d, 78.0, 1e9, y] for d, y in zip(days, index_yields)])
+        self.serve(responder)
+
+    def test_мусор_биржи_заменяется_оценкой_по_составу(self):
+        self.serve_all([26.5, 14204.82],
+                       {"BOND-A": 60.0, "BOND-B": 40.0},
+                       {"BOND-A": 30.0, "BOND-B": 20.0})
+        _sid, points, meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
+                                                  end="2026-08-19")
+        # 0,6*30 + 0,4*20 = 26,0 — считаем руками, а не тем же кодом.
+        self.assertEqual(points["2026-08-19"], 26.0)
+        self.assertEqual(meta["method"], "constituents")
+        self.assertEqual(meta["estimate_cover_pct"], 100.0)
+        self.assertIn("оценка", meta["note"])
+        self.assertEqual(points["2026-08-11"], 26.5, "здоровая точка потеряна")
+
+    def test_здоровый_источник_резерв_не_трогает(self):
+        # мутация «считать всегда» -> лишние 10 запросов на каждый прогон и
+        # подмена биржевого числа собственной оценкой без повода.
+        asked = []
+        def responder(url):
+            asked.append(url)
+            return _history([["2026-08-11", 78.0, 1e9, 26.5],
+                             ["2026-08-12", 78.0, 1e9, 26.9]])
+        self.serve(responder)
+        _sid, points, meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
+                                                  end="2026-08-19")
+        self.assertEqual(sorted(points.values()), [26.5, 26.9])
+        self.assertNotIn("method", meta)
+        self.assertFalse([u for u in asked if "analytics" in u or "bonds" in u],
+                         "за составом ходили при исправном источнике")
+
+    def test_огрызок_корзины_не_превращается_в_число(self):
+        # Выпавшие бумаги — обычно самые неликвидные, то есть самые доходные:
+        # оценка по половине веса похожа на правду и потому опасна. Лучше пустой
+        # ряд с отказом, чем правдоподобное число.
+        self.serve_all([14204.82],
+                       {"BOND-A": 60.0, "BOND-B": 40.0},
+                       {"BOND-A": 30.0})
+        with self.assertRaises(self.iss.FetchError) as ctx:
+            self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11", end="2026-08-19")
+        # Наружу идёт ИСХОДНАЯ причина — мусор биржи, а не «покрытие мало»:
+        # чинить надо источник, а не корзину.
+        self.assertIn("коридор", str(ctx.exception))
+
+    def test_оценка_считается_взвешенно_а_не_средним(self):
+        # мутация: простое среднее вместо взвешенного -> (30+20)/2 = 25 вместо 29.
+        self.serve_all([14204.82],
+                       {"BOND-A": 90.0, "BOND-B": 10.0},
+                       {"BOND-A": 30.0, "BOND-B": 20.0})
+        _sid, points, _meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
+                                                   end="2026-08-19")
+        self.assertEqual(points["2026-08-19"], 29.0)
 
 
 class TestFutoiReportsFailures(IssCase):

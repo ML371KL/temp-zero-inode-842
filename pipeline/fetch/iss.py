@@ -17,6 +17,7 @@
 RETRO_DAYS, а не всю историю.
 """
 
+import time
 from urllib.parse import urlencode
 
 from ..lib import runbudget
@@ -232,11 +233,138 @@ def index_value(sec="IMOEX", series_id=None, start=None, end=None, bootstrap=Fal
                          "1997-01-01", start=start, end=end, bootstrap=bootstrap)
 
 
+# --------------------------------- доходность индекса из его состава (резерв)
+#
+# ЗАЧЕМ. Поле YIELD в истории индекса — единственное место, где биржа публикует
+# доходность облигационного индекса, и оно ломается: с 14.08.2026 у RUCBHYCP
+# приходит 207 -> 14 204 -> 2 850 -> 6 595 при неизменных цене и дюрации (парный
+# RUCBHYTR отдаёт ТЕ ЖЕ числа — сломан сам расчёт, а не эндпоинт).
+#
+# Но исходники доходности биржа публикует по отдельности: состав индекса с весами
+# (statistics/.../analytics/{sec}) и доходность каждой облигации (витрина рынка
+# bonds). Взвешенная сумма воспроизводит официальное число: сверка на здоровых днях
+# 31.07, 05.08, 11.08, 13.08 по обоим индексам дала расхождение −0,41…+0,02 п.п.
+# у ВДО и −0,07…−0,01 п.п. у корпоблигаций при покрытии 99,8–100% веса.
+#
+# Это ОЦЕНКА, а не биржевое число: точное совпадение методики не гарантировано
+# (расхождение до 0,4 п.п. на уровне 27% — скорее всего разная трактовка доходности
+# к оферте). Поэтому она помечается в meta (`method="constituents"`), включается
+# ТОЛЬКО когда основной путь дал мусор, и не переписывает здоровые точки.
+WEIGHTS_PATH = "statistics/engines/stock/markets/index/analytics/%s"
+BONDS_MARKET = "engines/stock/markets/bonds/securities"
+_BOND_YIELD_TTL = 300          # секунд: один запрос на прогон, оба индекса
+_bond_yield_cache = {}
+
+
+def index_weights(sec):
+    """Состав индекса -> ({ISIN: вес в %}, дата состава). Листается по 20 строк."""
+    out, start, day = {}, 0, None
+    while start < 2000:
+        payload = http.get_json(_url(WEIGHTS_PATH % sec.upper(),
+                                     {"start": start, "iss.only": "analytics"}))
+        block = payload.get("analytics") or {}
+        rows = block.get("data") or []
+        if not rows:
+            break
+        idx = {name: n for n, name in enumerate(block.get("columns") or [])}
+        i_sec = idx.get("secids", idx.get("ticker"))
+        i_w, i_d = idx.get("weight"), idx.get("tradedate")
+        for row in rows:
+            if i_sec is None or i_w is None or row[i_w] is None:
+                continue
+            out[str(row[i_sec])] = float(row[i_w])
+            if i_d is not None and day is None:
+                day = str(row[i_d])[:10]
+        start += len(rows)
+        if len(rows) < 20:
+            break
+    return out, day
+
+
+def live_bond_yields():
+    """{SECID: доходность, %} по всем облигациям — ОДИН запрос на весь рынок.
+
+    Кэш на время прогона: оба индекса считаются из одной и той же выборки, а
+    запрос отдаёт ~3,5 тыс. строк.
+    """
+    now = time.time()
+    hit = _bond_yield_cache.get("rows")
+    if hit and now - hit[0] < _BOND_YIELD_TTL:
+        return hit[1]
+    payload = http.get_json(_url(BONDS_MARKET, {
+        "iss.only": "marketdata", "marketdata.columns": "SECID,YIELD"}))
+    block = payload.get("marketdata") or {}
+    idx = {name: n for n, name in enumerate(block.get("columns") or [])}
+    out = {}
+    for row in block.get("data") or []:
+        value = row[idx["YIELD"]] if "YIELD" in idx else None
+        # Ноль здесь — «сделок не было», а не нулевая доходность.
+        if value in (None, 0):
+            continue
+        out.setdefault(str(row[idx["SECID"]]), float(value))
+    _bond_yield_cache["rows"] = (now, out)
+    return out
+
+
+def index_yield_estimate(sec, min_weight=90.0):
+    """(день, доходность, покрытие веса) по составу индекса. FetchError, если нечем.
+
+    min_weight: считать только при покрытии состава живыми котировками не ниже
+    этой доли. Огрызок корзины даёт число, похожее на правду, и потому опасное:
+    выпавшие бумаги — обычно самые неликвидные, то есть самые доходные.
+    """
+    weights, day = index_weights(sec)
+    if not weights:
+        raise FetchError(f"ISS: состав индекса {sec} не отдан — оценка невозможна")
+    yields = live_bond_yields()
+    hit = {s: (w, yields[s]) for s, w in weights.items() if s in yields}
+    covered = sum(w for w, _ in hit.values())
+    if covered < min_weight:
+        raise FetchError(f"ISS: живые котировки покрывают лишь {covered:.1f}% веса "
+                         f"{sec} (нужно {min_weight}%) — оценка была бы кривой")
+    value = sum(w * y for w, y in hit.values()) / covered
+    return (day or dates.fmt_date(dates.today_msk())), round(value, 2), round(covered, 1)
+
+
 def index_yield(sec="RUCBHYCP", series_id=None, start=None, end=None, bootstrap=False):
-    """Доходность облигационного индекса, % годовых (registry: *_yield)."""
-    return _index_series(sec, "YIELD", series_id or f"{sec.lower()}_yield", "pct",
-                         "2003-01-01", drop_zero=True, sane=YIELD_SANE,
-                         start=start, end=end, bootstrap=bootstrap)
+    """Доходность облигационного индекса, % годовых (registry: *_yield).
+
+    Основной путь — поле YIELD из истории индекса. Когда биржа отдаёт по нему
+    мусор (см. YIELD_SANE), последнее значение досчитывается из состава индекса:
+    иначе ряд замирает на последнем здоровом дне и тайл мертвеет на всё время
+    поломки источника — а поломка эта уже длится неделю.
+    """
+    sid = series_id or f"{sec.lower()}_yield"
+    broken = None
+    try:
+        sid, points, meta = _index_series(sec, "YIELD", sid, "pct", "2003-01-01",
+                                          drop_zero=True, sane=YIELD_SANE,
+                                          start=start, end=end, bootstrap=bootstrap)
+    except FetchError as exc:
+        if "коридор" not in str(exc):
+            raise                       # обычный отказ HTTP — не наш случай
+        broken, points, meta = exc, {}, {}
+    if broken is None and not meta.get("dropped_insane"):
+        return sid, points, meta        # источник здоров — резерв не трогаем
+
+    try:
+        day, value, covered = index_yield_estimate(sec)
+    except (FetchError, ValueError, KeyError, TypeError) as exc:
+        http.LOG(f"{sid}: оценка по составу не вышла — {exc}")
+        if broken is not None:
+            raise broken                # нечем заменить: отказ остаётся отказом
+        return sid, points, meta
+    points = dict(points)
+    points[day] = value
+    note = (f"доходность биржи вне коридора — значение за {day} посчитано ИЗ СОСТАВА "
+            f"индекса (покрытие {covered}% веса); это оценка, не число биржи")
+    meta = dict(meta or {}, status="ok", method="constituents", estimate_asof=day,
+                estimate_cover_pct=covered, unit="pct", asof=max(points))
+    meta["note"] = note if not meta.get("note") else f"{meta['note']}; {note}"
+    meta.setdefault("source", "iss")
+    meta["fetched_at"] = dates.iso_utc()
+    http.LOG(f"{sid}: {day} = {value}% посчитано из состава ({covered}% веса)")
+    return sid, points, meta
 
 
 def selt(sec="CNYRUB_TOM", series_id=None, start=None, end=None, bootstrap=False):
