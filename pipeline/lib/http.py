@@ -69,6 +69,13 @@ HOST_CA_BUNDLE = {
     "invest-public-api.tinkoff.ru": "russian_trusted.pem",
     "invest-public-api.tbank.ru": "russian_trusted.pem",
     "sandbox-invest-public-api.tinkoff.ru": "russian_trusted.pem",
+    # ALGOPACK переехал на тот же УЦ Минцифры (замер 26.08.2026: цепочка
+    # *.moex.com -> Russian Trusted Sub CA -> Russian Trusted Root CA, проверка
+    # падала с кодом 19). Пока хост не был закреплён, платный шлюз молча отдавал
+    # SSL-ошибку, ряд futoi откатывался на бесплатный ISS с задержкой в две недели,
+    # а meta винила подписку («ключ есть, но окна отданы бесплатным ISS») — то есть
+    # выглядело как проблема оплаты, а было проблемой доверия к сертификату.
+    "apim.moex.com": "russian_trusted.pem",
 }
 CA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ca")
 

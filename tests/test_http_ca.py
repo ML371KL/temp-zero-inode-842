@@ -81,6 +81,23 @@ class CaBundleCase(unittest.TestCase):
             self.assertIsNone(self.http.ssl_context(host),
                               f"чужой корень утёк на {host}")
 
+    def test_платный_шлюз_биржи_закреплён(self):
+        """apim.moex.com — тот же УЦ Минцифры, и без якоря подписка мертва.
+
+        Замер 26.08.2026: цепочка *.moex.com -> Russian Trusted Sub CA -> Russian
+        Trusted Root CA, проверка падала с кодом 19. Ряд futoi при этом НЕ краснел:
+        он честно откатывался на бесплатный ISS с задержкой в две недели, а meta
+        писала «ключ ALGOPACK есть, но окна отданы бесплатным ISS — проверьте
+        подписку». То есть проблема доверия к сертификату выглядела как проблема
+        оплаты, и заметить её можно было только по дате последней точки.
+
+        мутация: убрать хост из HOST_CA_BUNDLE -> платный поток снова молча
+        деградирует до бесплатного.
+        """
+        self.assertIsNotNone(self.http.ssl_context("apim.moex.com"))
+        self.assertIsNone(self.http.ssl_context("iss.moex.com"),
+                          "бесплатный ISS в чужом якоре не нуждается")
+
     def test_системные_корни_не_потеряны(self):
         ctx = self.http.ssl_context("rosstat.gov.ru")
         subjects = " ".join(str(c.get("subject")) for c in ctx.get_ca_certs())
