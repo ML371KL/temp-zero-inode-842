@@ -706,6 +706,27 @@ class TestHyEstimateIsLabelled(TileCase):
         self.assertIn("99.9% веса", tile["note"])
         self.assertEqual(tile["payload"]["method"], "constituents")
 
+    def test_отброшенные_бумаги_названы_вслух(self):
+        """«Покрытие 92,8%» читается как «столько нашлось», а столько ОСТАЛОСЬ.
+
+        Разница важна для направления ошибки: режутся самые доходные строки, то
+        есть оценка смещена вниз. 26.08.2026 без отсева тайл показывал 45,9%
+        вместо 29,7% — молчать о том, что часть корзины выкинута, нельзя.
+        """
+        tile = self.build({"method": "constituents", "estimate_cover_pct": 92.8,
+                           "estimate_dropped": {"count": 21, "weight_pct": 7.04,
+                                                "fence_pct": 56.05}})
+        self.assertIn("отброшено 21", tile["note"])
+        self.assertIn("7.0%", tile["note"])
+        self.assertIn("смещена скорее вниз", tile["note"])
+        self.assertEqual(tile["payload"]["estimate_dropped_n"], 21)
+        self.assertEqual(tile["payload"]["estimate_dropped_weight_pct"], 7.04)
+
+    def test_ничего_не_отброшено_лишней_фразы_нет(self):
+        tile = self.build({"method": "constituents", "estimate_cover_pct": 99.9,
+                           "estimate_dropped": {"count": 0, "weight_pct": 0.0}})
+        self.assertNotIn("отброшено", tile["note"])
+
     def test_биржевое_число_ничем_не_помечается(self):
         tile = self.build({})
         self.assertNotIn("оценка", tile["note"])

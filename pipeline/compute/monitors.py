@@ -1242,11 +1242,22 @@ def _t_hy_spread(store, now):
     if hy_meta.get("method") == "constituents":
         payload["method"] = "constituents"
         payload["estimate_cover_pct"] = hy_meta.get("estimate_cover_pct")
+        dropped = hy_meta.get("estimate_dropped") or {}
+        payload["estimate_dropped_n"] = dropped.get("count")
+        payload["estimate_dropped_weight_pct"] = dropped.get("weight_pct")
         note += (" ⚠️ Доходность ВДО биржа сейчас считает неверно (в её поле приходят "
                  "сотни и тысячи процентов), поэтому значение посчитано ПАНЕЛЬЮ из "
                  f"состава индекса: покрытие {_n(hy_meta.get('estimate_cover_pct'), 1)}% "
                  "веса, сверка с биржей на здоровых днях расходится не больше чем "
                  "на 0,4 п.п. Это оценка, а не число биржи.")
+        # «Покрытие 92,8%» читается как «столько нашлось», хотя на деле столько
+        # ОСТАЛОСЬ после отсева битых бумаг. Разница важна для направления ошибки:
+        # режутся самые доходные строки, значит оценка смещена ВНИЗ, и молчать об
+        # этом нельзя — 26.08.2026 без отсева она показывала 45,9% вместо 29,7%.
+        if dropped.get("count"):
+            note += (f" Из корзины отброшено {dropped['count']} бумаг с битой "
+                     f"доходностью (вес {_n(dropped.get('weight_pct'), 1)}%): режутся "
+                     f"самые доходные строки, поэтому оценка смещена скорее вниз.")
     return _tile("hy_spread", status, asof, headline, payload, note,
                  hy_meta.get("fetched_at"))
 
