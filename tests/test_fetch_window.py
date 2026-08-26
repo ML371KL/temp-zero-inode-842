@@ -232,6 +232,76 @@ class TestYieldFromConstituents(IssCase):
         self.assertIn("оценка", meta["note"])
         self.assertEqual(points["2026-08-11"], 26.5, "здоровая точка потеряна")
 
+    def test_битая_доходность_бумаги_не_втекает_в_среднее(self):
+        """Поле YIELD сломано и у ОТДЕЛЬНЫХ бумаг, не только у индекса.
+
+        Живой замер 26.08.2026: в корзине RUCBHYCP висели 3904%, 732%, 640%, 502%
+        при медиане 28,6%, и оценка уехала с 26,6% (13.08) до 45,9% (24.08), пока
+        инвестгрейд рядом сдвинулся на 0,4 п.п. Коридор стоял только на индексном
+        значении, поэтому мусор втекал через состав.
+
+        мутация: снять BOND_YIELD_SANE -> 0,90·28 + 0,05·30 + 0,05·3904 = 221,4.
+        """
+        weights = {("BOND-%02d" % i): 3.0 for i in range(30)}
+        weights["BOND-BAD"] = 5.0
+        weights["BOND-OK"] = 5.0
+        ys = {s: 28.0 for s in weights}
+        ys["BOND-BAD"] = 3904.38
+        ys["BOND-OK"] = 30.0
+        self.serve_all([26.5, 14204.82], weights, ys)
+        _sid, points, meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
+                                                  end="2026-08-19")
+        got = points["2026-08-19"]
+        self.assertLess(got, 40.0, f"битая бумага втекла в среднее: {got}")
+        # 90 весов по 28 + 5 по 30 = (2520 + 150)/95 = 28,105
+        self.assertAlmostEqual(got, 28.11, places=2)
+        self.assertEqual(meta["estimate_dropped"]["count"], 1)
+        self.assertIn("отброшено 1", meta["note"])
+
+    def test_выброс_внутри_коридора_тоже_режется(self):
+        """99% годовых формально «в коридоре», но выпадает из живой корзины.
+
+        Разброс взят как у настоящего ВДО-индекса (18…45%, Q1 24, Q3 35): дальняя
+        граница Тьюки встаёт около 66%, и 99% за ней. Порог берётся из самой
+        корзины дня, а не из мнения о том, какая доходность «бывает».
+        """
+        vals = [18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0, 34.0, 36.0,
+                38.0, 40.0, 42.0, 44.0, 45.0, 25.0, 27.0, 29.0, 31.0, 33.0]
+        weights = {("BOND-%02d" % i): 5.0 for i in range(len(vals))}
+        ys = {("BOND-%02d" % i): v for i, v in enumerate(vals)}
+        weights["BOND-HI"] = 5.0
+        ys["BOND-HI"] = 99.0
+        self.serve_all([26.5, 14204.82], weights, ys)
+        _sid, points, meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
+                                                  end="2026-08-19")
+        self.assertEqual(meta["estimate_dropped"]["count"], 1)
+        self.assertAlmostEqual(points["2026-08-19"], sum(vals) / len(vals), places=2)
+
+    def test_здоровый_разброс_корзины_не_режется(self):
+        # Настоящая корзина ВДО разбросана: 18…45% — это рынок, а не поломка.
+        vals = [18.0, 20.0, 22.0, 24.0, 26.0, 28.0, 30.0, 32.0, 34.0, 36.0,
+                38.0, 40.0, 42.0, 44.0, 45.0, 25.0, 27.0, 29.0, 31.0, 33.0]
+        weights = {("BOND-%02d" % i): 5.0 for i in range(len(vals))}
+        ys = {("BOND-%02d" % i): v for i, v in enumerate(vals)}
+        self.serve_all([26.5, 14204.82], weights, ys)
+        _sid, points, meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
+                                                  end="2026-08-19")
+        self.assertEqual(meta["estimate_dropped"]["count"], 0,
+                         "рабочий разброс корзины принят за поломку")
+        self.assertAlmostEqual(points["2026-08-19"], sum(vals) / len(vals), places=2)
+
+    def test_отброшенное_считается_в_покрытии(self):
+        # Выкинули бумагу — покрытие обязано упасть, иначе «100% веса» врёт.
+        weights = {("BOND-%02d" % i): 3.0 for i in range(30)}
+        weights["BOND-BAD"] = 10.0
+        ys = {s: 28.0 for s in weights}
+        ys["BOND-BAD"] = 5000.0
+        self.serve_all([26.5, 14204.82], weights, ys)
+        _sid, _points, meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
+                                                  end="2026-08-19")
+        self.assertEqual(meta["estimate_cover_pct"], 90.0)
+        self.assertEqual(meta["estimate_dropped"]["weight_pct"], 10.0)
+
     def test_здоровый_источник_резерв_не_трогает(self):
         # мутация «считать всегда» -> лишние 10 запросов на каждый прогон и
         # подмена биржевого числа собственной оценкой без повода.

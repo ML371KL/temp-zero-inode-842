@@ -34,7 +34,7 @@ Ceasefire before GTA VI?») — они отфильтрованы по нали�
 
 import json
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 try:                                       # прод: общий HTTP-слой (CONTRACT.md §4)
     from lib.http import get_json, FetchError
@@ -150,6 +150,32 @@ def _horizon_days(market, now=None):
     return (end - today).days
 
 
+_MONTHS_EN = {"january": 1, "february": 2, "march": 3, "april": 4, "may": 5,
+              "june": 6, "july": 7, "august": 8, "september": 9, "october": 10,
+              "november": 11, "december": 12}
+_QDATE = re.compile(r"(?:^|\s)by\s+([A-Za-z]+)\s+(\d{1,2}),?\s+(20\d\d)", re.I)
+
+
+def _question_date(question):
+    """Дата разрешения ИЗ ТЕКСТА вопроса (ISO) или None.
+
+    endDate у Polymarket — момент расчёта, а не дата из вопроса: у «by December 31,
+    2026» там стоит 2027-01-01T04:59Z (полночь по Нью-Йорку плюс буфер). Показывать
+    читателю 01.01.2027 рядом с вопросом «by December 31, 2026» — значит спорить с
+    самим собой на одной плитке, что и уехало в прод 20.08.2026.
+    """
+    m = _QDATE.search(str(question or ""))
+    if not m:
+        return None
+    month = _MONTHS_EN.get(m.group(1).lower())
+    if not month:
+        return None
+    try:
+        return date(int(m.group(3)), month, int(m.group(2))).isoformat()
+    except ValueError:
+        return None
+
+
 def _volume(market):
     try:
         return float(market.get("volume") or 0.0)
@@ -249,6 +275,7 @@ def ceasefire():
         {"slug": market.get("slug"), "event_slug": event_slug,
          "question": market.get("question"), "end_date": market.get("endDate"),
          "horizon_days": _horizon_days(market), "volume": _volume(market) or None,
+         "resolves_on": _question_date(market.get("question")),
          "contaminated": contaminated, "markets": board, "errors": errors,
          "criteria_note": "серии без слова agreement разрешались YES по краткому "
                           "перемирию — сравнивать их с «соглашением» нельзя",

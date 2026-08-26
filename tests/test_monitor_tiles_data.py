@@ -157,8 +157,11 @@ class TileCase(unittest.TestCase):
 
     def seed_polymarket(self, meta=None):
         base = {"question": "Russia x Ukraine ceasefire agreement by December 31, 2026?",
-                "end_date": "2026-12-31T00:00:00Z", "horizon_days": 133,
-                "volume": 2150868.76}
+                # endDate у биржи — момент РАСЧЁТА (полночь по Нью-Йорку плюс
+                # буфер), поэтому он на сутки позже даты из вопроса. Заголовок
+                # обязан называть дату вопроса, горизонт — считаться по расчёту.
+                "end_date": "2027-01-01T04:59:00Z", "resolves_on": "2026-12-31",
+                "horizon_days": 133, "volume": 2150868.76}
         base.update(meta or {})
         self.put("polymarket_ceasefire", dict(zip(
             days("2026-08-16", 10),
@@ -426,18 +429,28 @@ class TestТайлыНаЖивыхДанных(TileCase):
         self.assertIn("133 дн.", t["note"])
 
     def test_polymarket_без_срока_не_выдумывает_горизонт(self):
-        self.seed_polymarket({"end_date": None, "horizon_days": None})
+        # Ни даты расчёта, ни даты из вопроса: горизонт неизвестен, и выдумывать
+        # его неоткуда. Если известна хоть одна — считаем по ней, это лучше «н/д».
+        self.seed_polymarket({"end_date": None, "resolves_on": None, "horizon_days": None})
         t = self.tile("polymarket")
         self.assertIsNone(t["payload"]["horizon_days"])
         self.assertNotIn(" к ", t["headline"])
         self.assertNotIn("дн.:", t["note"])
 
     def test_polymarket_горизонт_считается_если_фетчер_его_не_положил(self):
-        # Старые ряды в сторе лежат без horizon_days: считаем из даты и asof, а
-        # не показываем «нет данных» там, где срок известен.
+        # Старые ряды в сторе лежат без horizon_days: считаем из даты РАСЧЁТА и
+        # asof, а не показываем «нет данных» там, где срок известен.
         self.seed_polymarket({"horizon_days": None})
         t = self.tile("polymarket")
-        self.assertEqual(t["payload"]["horizon_days"], 137)  # 16.08 -> 31.12
+        self.assertEqual(t["payload"]["horizon_days"], 138)  # 16.08 -> 01.01
+
+    def test_polymarket_заголовок_не_спорит_с_вопросом(self):
+        # мутация: брать end_date вместо resolves_on -> «до 01.01.2027» рядом с
+        # вопросом «by December 31, 2026» на одной плитке.
+        self.seed_polymarket()
+        t = self.tile("polymarket")
+        self.assertIn("31.12.2026", t["headline"])
+        self.assertNotIn("01.01.2027", t["headline"])
         self.assertIn("+6.0 п.п. за неделю", t["headline"])
 
     def test_futoi_нетто_z_и_держатели_не_путаются(self):

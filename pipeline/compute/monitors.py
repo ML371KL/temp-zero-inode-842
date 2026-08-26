@@ -859,10 +859,14 @@ def _t_polymarket(store, now):
     # Горизонт — часть самого числа, а не подробность: вероятность «до даты»
     # зависит от того, сколько до неё осталось. Без срока «перемирие 2%» и
     # «перемирие 24%» выглядят противоречием, хотя это один рынок в один день.
-    end_date = str(meta.get("end_date") or "")[:10]
+    # Дата из САМОГО вопроса, а не endDate: у «by December 31, 2026» биржа ставит
+    # расчёт на 2027-01-01T04:59Z, и заголовок «до 01.01.2027» спорил с вопросом,
+    # напечатанным строкой ниже. Горизонт при этом считается по endDate — это
+    # настоящий момент расчёта.
+    end_date = str(meta.get("resolves_on") or meta.get("end_date") or "")[:10]
     horizon = meta.get("horizon_days")
-    if not isinstance(horizon, int) and end_date:
-        a, b = _d(end_date), _d(asof)
+    if not isinstance(horizon, int):
+        a, b = _d(str(meta.get("end_date") or end_date)[:10]), _d(asof)
         horizon = (a - b).days if (a and b) else None
     payload = {
         "prob_pct": _r(prob, 1),

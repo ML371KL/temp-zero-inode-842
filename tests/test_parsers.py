@@ -557,6 +557,28 @@ class TestPolymarketHorizon(unittest.TestCase):
         self.assertEqual(got[0]["slug"], "clean",
                          "серия «любое перемирие» разрешалась YES по трёхдневному")
 
+    def test_дата_берётся_из_вопроса_а_не_из_endDate(self):
+        """endDate — момент РАСЧЁТА, а не дата из вопроса.
+
+        У «by December 31, 2026» биржа ставит 2027-01-01T04:59Z (полночь по
+        Нью-Йорку плюс буфер), и заголовок «Соглашение до 01.01.2027» спорил с
+        вопросом, напечатанным строкой ниже на той же плитке.
+        """
+        self.assertEqual(
+            self.pm._question_date("Russia x Ukraine ceasefire agreement by December 31, 2026?"),
+            "2026-12-31")
+        self.assertEqual(
+            self.pm._question_date("Russia x Ukraine ceasefire agreement by March 31, 2027?"),
+            "2027-03-31")
+
+    def test_дата_не_выдумывается_из_чужого_текста(self):
+        # мутация: убрать требование пробела перед «by» -> «Standby December 31»
+        # станет датой разрешения.
+        self.assertIsNone(self.pm._question_date("Ceasefire before GTA VI?"))
+        self.assertIsNone(self.pm._question_date("Standby December 31, 2026?"))
+        self.assertIsNone(self.pm._question_date("by Smarch 40, 2026"))
+        self.assertIsNone(self.pm._question_date(None))
+
     def test_перекат_происходит_сам(self):
         # Через месяц после экспирации декабрьского выбор обязан уехать дальше,
         # а не встать на закрытом рынке.

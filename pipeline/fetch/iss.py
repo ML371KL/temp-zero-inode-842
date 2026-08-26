@@ -167,6 +167,10 @@ def _in_window(day, lo, hi):
 # истории ряда таких взрывов 22 (максимум 130 002%) плюс 445 нулей — то есть
 # треть точек ряда никогда не была доходностью.
 YIELD_SANE = (1.0, 100.0)
+# Коридор для ОТДЕЛЬНОЙ бумаги в корзине. Ноль и минус — «сделок не было» или
+# сломанное поле; выше 100% годовых у рублёвой облигации в обращении не бывает
+# без дефолта, а поле биржи отдаёт там четырёхзначные числа.
+BOND_YIELD_SANE = (0.0, 100.0)
 
 
 def _index_series(sec, field, series_id, unit, default_start, drop_zero=False,
@@ -306,24 +310,67 @@ def live_bond_yields():
     return out
 
 
+def _tukey_upper(values, k=3.0):
+    """Дальняя граница Тьюки Q3 + k·(Q3−Q1) или None, если считать не на чем.
+
+    Правило выбрано именно потому, что оно НЕ содержит взгляда на рынок: порог
+    берётся из самой сегодняшней корзины, а не из мнения о том, какая доходность
+    «бывает». k=3 — «far out» у Тьюки, то есть режется только то, что выпадает из
+    распределения грубо.
+    """
+    vals = sorted(v for v in values if v is not None)
+    if len(vals) < 8:
+        return None
+    q1 = vals[len(vals) // 4]
+    q3 = vals[(3 * len(vals)) // 4]
+    iqr = q3 - q1
+    if iqr <= 0:
+        return None
+    return q3 + k * iqr
+
+
 def index_yield_estimate(sec, min_weight=90.0):
-    """(день, доходность, покрытие веса) по составу индекса. FetchError, если нечем.
+    """(день, доходность, покрытие, отброшено) по составу индекса.
 
     min_weight: считать только при покрытии состава живыми котировками не ниже
     этой доли. Огрызок корзины даёт число, похожее на правду, и потому опасное:
     выпавшие бумаги — обычно самые неликвидные, то есть самые доходные.
+
+    ПОЧЕМУ ЗДЕСЬ ФИЛЬТР ОТДЕЛЬНЫХ БУМАГ (найдено 26.08.2026). Поле YIELD у биржи
+    сломано не только у индекса, но и у КАЖДОЙ бумаги: в корзине RUCBHYCP того дня
+    висели 3904%, 732%, 640%, 502% — 19 бумаг с доходностью выше 60% при медиане
+    28,6%. Коридор YIELD_SANE стоял только на индексном значении, поэтому мусор
+    втекал в среднее через состав: оценка уехала с 26,6% (13.08) до 45,9% (24.08),
+    пока инвестгрейд рядом сдвинулся на 0,4 п.п. Четыре худшие бумаги весом 0,67%
+    давали +8,1 п.п. из этих 45,9%.
+    Отсюда две ступени: жёсткий коридор BOND_YIELD_SANE отсекает заведомую поломку
+    поля, дальняя граница Тьюки — то, что выбивается из СЕГОДНЯШНЕЙ корзины.
+    Отброшенные бумаги и их вес возвращаются наружу: оценка, из которой выкинули
+    десятую часть корзины, обязана называть это вслух.
     """
     weights, day = index_weights(sec)
     if not weights:
         raise FetchError(f"ISS: состав индекса {sec} не отдан — оценка невозможна")
     yields = live_bond_yields()
     hit = {s: (w, yields[s]) for s, w in weights.items() if s in yields}
-    covered = sum(w for w, _ in hit.values())
+    lo, hi = BOND_YIELD_SANE
+    sane = {s: (w, y) for s, (w, y) in hit.items() if lo < y <= hi}
+    fence = _tukey_upper([y for _, y in sane.values()])
+    if fence is not None:
+        sane = {s: (w, y) for s, (w, y) in sane.items() if y <= fence}
+    if not sane:
+        raise FetchError(f"ISS: в корзине {sec} не осталось ни одной здоровой "
+                         f"доходности — оценка невозможна")
+    covered = sum(w for w, _ in sane.values())
+    dropped_w = sum(w for w, _ in hit.values()) - covered
     if covered < min_weight:
         raise FetchError(f"ISS: живые котировки покрывают лишь {covered:.1f}% веса "
                          f"{sec} (нужно {min_weight}%) — оценка была бы кривой")
-    value = sum(w * y for w, y in hit.values()) / covered
-    return (day or dates.fmt_date(dates.today_msk())), round(value, 2), round(covered, 1)
+    value = sum(w * y for w, y in sane.values()) / covered
+    dropped = {"count": len(hit) - len(sane), "weight_pct": round(dropped_w, 2),
+               "fence_pct": round(fence, 2) if fence is not None else None}
+    return ((day or dates.fmt_date(dates.today_msk())), round(value, 2),
+            round(covered, 1), dropped)
 
 
 def index_yield(sec="RUCBHYCP", series_id=None, start=None, end=None, bootstrap=False):
@@ -348,7 +395,7 @@ def index_yield(sec="RUCBHYCP", series_id=None, start=None, end=None, bootstrap=
         return sid, points, meta        # источник здоров — резерв не трогаем
 
     try:
-        day, value, covered = index_yield_estimate(sec)
+        day, value, covered, dropped = index_yield_estimate(sec)
     except (FetchError, ValueError, KeyError, TypeError) as exc:
         http.LOG(f"{sid}: оценка по составу не вышла — {exc}")
         if broken is not None:
@@ -358,8 +405,12 @@ def index_yield(sec="RUCBHYCP", series_id=None, start=None, end=None, bootstrap=
     points[day] = value
     note = (f"доходность биржи вне коридора — значение за {day} посчитано ИЗ СОСТАВА "
             f"индекса (покрытие {covered}% веса); это оценка, не число биржи")
+    if dropped.get("count"):
+        note += (f"; отброшено {dropped['count']} бумаг с битой доходностью "
+                 f"(вес {dropped['weight_pct']}%, порог {dropped['fence_pct']}%)")
     meta = dict(meta or {}, status="ok", method="constituents", estimate_asof=day,
-                estimate_cover_pct=covered, unit="pct", asof=max(points))
+                estimate_cover_pct=covered, estimate_dropped=dropped,
+                unit="pct", asof=max(points))
     meta["note"] = note if not meta.get("note") else f"{meta['note']}; {note}"
     meta.setdefault("source", "iss")
     meta["fetched_at"] = dates.iso_utc()
