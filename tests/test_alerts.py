@@ -824,6 +824,22 @@ class TestSourceStaleNamesSeries(AlertsCase):
         self.assertNotIn("None", ev["title"] + ev["fact"])
         self.assertIn("iss", ev["title"])
 
+    def test_причина_протухания_названа(self):
+        """«Не опрашивался» и «отвечает, но отдаёт старое» чинятся в разных местах.
+
+        Первое — конвейер или расписание, второе — сам источник. Одним словом
+        «устарел» на обе владельца посылало искать не там: 26.08.2026 у ALGOPACK
+        опрос шёл каждый час, а данные отставали на неделю.
+        """
+        ev = self.fire(series="brent", stale_reason="data")
+        self.assertIn("отдаёт старые данные", ev["title"])
+        self.assertNotIn("не опрашивался", ev["title"])
+
+    def test_молчащий_источник_описан_иначе(self):
+        ev = self.fire(series="ofz_auctions", stale_reason="poll")
+        self.assertIn("не опрашивался", ev["title"])
+        self.assertNotIn("отдаёт старые", ev["title"])
+
     def test_ряд_совпал_с_именем_семьи_не_дублируется(self):
         ev = self.fire(series="iss")
         self.assertNotIn("iss (iss)", ev["title"])

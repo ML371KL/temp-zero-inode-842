@@ -256,5 +256,99 @@ class TestStalenessFollowsTheSchedule(unittest.TestCase):
                 "stale")
 
 
+class TestDataAgeStaleness(unittest.TestCase):
+    """Источник может отвечать исправно и отдавать при этом СТАРОЕ.
+
+    ОПЛАЧЕНО ДВАЖДЫ ЗА ОДИН ДЕНЬ (26.08.2026). Свежесть мерилась только от
+    `fetched_at` — времени последнего ОПРОСА. FRED каждый день бодро возвращает
+    Brent недельной давности; ALGOPACK неделю падал по сертификату, а ряд futoi
+    честно откатывался на бесплатный поток с задержкой в две недели. В обоих
+    случаях опрос свежий, статус ok, и заметить это можно было только глазами по
+    дате последней точки. Возраст ДАННЫХ во всей панели замечала одна лишь
+    протяжка в panel.FFILL_LIMITS — и молча: значение просто исчезало.
+
+    Норма живёт в реестре (`registry.data_age_norm`) и выведена из измеренных
+    тактов самих рядов, а не назначена.
+    """
+
+    def setUp(self):
+        self.monitors = need(self, "pipeline.compute.monitors", "series_status",
+                             "data_age_days")
+        self.registry = need(self, "pipeline.lib.registry", "data_age_norm")
+
+    def status(self, sid, asof, when, fetched=None):
+        now = datetime.fromisoformat(when).replace(tzinfo=timezone.utc)
+        meta = {"status": "ok", "asof": asof,
+                "fetched_at": fetched or when.replace(" ", "T") + "Z"}
+        return self.monitors.series_status(sid, {"2026-01-01": 1.0}, meta, now)
+
+    def test_свежий_опрос_старых_данных_это_протухание(self):
+        # мутация: убрать проверку возраста -> «ok» при данных двухнедельной
+        # давности, ровно как было у Brent и futoi.
+        self.assertEqual(self.status("brent", "2026-08-01", "2026-08-20 12:00"), "stale")
+
+    def test_внутри_нормы_молчим(self):
+        # Такт EIA недельный: восемь дней — это ещё один цикл, а не поломка.
+        self.assertEqual(self.status("brent", "2026-08-18", "2026-08-26 12:00"), "ok")
+
+    def test_предупреждение_приходит_ПОКА_число_ещё_на_экране(self):
+        """Норма обязана срабатывать раньше, чем истекает протяжка панели.
+
+        Иначе предупреждение приходит после того, как сигнал молча исчез, и
+        смысла в нём нет. Проверяются те ряды, которые панель СОЗНАТЕЛЬНО тянет
+        дольше их собственного такта публикации.
+        """
+        panel = need(self, "pipeline.compute.panel", "FFILL_LIMITS",
+                     "DEPOSIT_FFILL_LIMIT", "URALS_FFILL_LIMIT")
+        pairs = (("brent", panel.FFILL_LIMITS["brent"]),
+                 ("deposit_decade", panel.DEPOSIT_FFILL_LIMIT),
+                 ("urals_tax", panel.URALS_FFILL_LIMIT))
+        for sid, limit in pairs:
+            with self.subTest(series=sid):
+                norm = self.registry.data_age_norm(sid)
+                self.assertIsNotNone(norm, f"{sid}: норма возраста не задана")
+                trading = norm * 5.0 / 7.0     # календарные дни -> торговые
+                self.assertLess(trading, limit,
+                                f"{sid}: норма {norm} кал.дн. = {trading:.1f} торг.дн. "
+                                f"не успевает предупредить до протяжки {limit} торг.дн.")
+
+    def test_месячная_метка_читается_как_конец_месяца(self):
+        # «2026-07» — это период, а не 1-е июля: разница в 30 суток, на ней
+        # moex_retail выглядел бы вдвое старше, чем есть.
+        now = datetime(2026, 8, 26, tzinfo=timezone.utc)
+        self.assertEqual(self.monitors.data_age_days("moex_retail", {"asof": "2026-07"}, now), 26)
+        self.assertEqual(self.monitors.data_age_days("moex_retail", {"asof": "2026-07-31"}, now), 26)
+
+    def test_будущая_дата_не_протухание(self):
+        # У дивидендного календаря точки — ОТСЕЧКИ, они впереди по построению.
+        now = datetime(2026, 8, 26, tzinfo=timezone.utc)
+        self.assertIsNone(self.monitors.data_age_days("dividends", {"asof": "2026-10-12"}, now))
+        self.assertEqual(self.status("dividends", "2026-10-12", "2026-08-26 12:00"), "ok")
+
+    def test_отсутствие_аукционов_не_поломка_источника(self):
+        """«Аукциона не было» — информация, а не отказ доски.
+
+        Минфин держит паузу с 20.07.2026; ряду 42 дня, биржа исправна, тайл сам
+        пишет «Аукционов нет 5 нед.». Тревога звала бы чинить работающее — ровно
+        та ложная тревога, что уже приходила владельцу 14.08.
+        """
+        self.assertIsNone(self.registry.data_age_norm("ofz_auctions"))
+        self.assertEqual(self.status("ofz_auctions", "2026-07-15", "2026-08-26 12:00"), "ok")
+
+    def test_событийные_ряды_нормы_не_имеют(self):
+        for sid in ("cb_consensus", "events_registry", "key_rate"):
+            with self.subTest(series=sid):
+                self.assertIsNone(self.registry.data_age_norm(sid))
+
+    def test_незнакомый_ряд_нормы_не_выдумывает(self):
+        # px_* в реестре не описаны (их тянет фетчер ширины) — молчим, а не
+        # назначаем норму наугад.
+        self.assertIsNone(self.registry.data_age_norm("px_yndx"))
+
+    def test_подряды_берут_норму_базового(self):
+        self.assertEqual(self.registry.data_age_norm("futoi_mx_pos"),
+                         self.registry.data_age_norm("futoi_mx"))
+
+
 if __name__ == "__main__":
     unittest.main()

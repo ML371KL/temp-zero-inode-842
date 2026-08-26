@@ -204,11 +204,51 @@ def _poll_missed(sid, meta, now):
     return fetched is None or fetched < max(due)
 
 
+def _asof_date(value):
+    """meta.asof -> date. «2026-07» читается как КОНЕЦ июля, а не как 1-е.
+
+    Месячные ряды подписывают период, а не день: разница в 30 суток, и на ней
+    moex_retail выглядел бы протухшим вдвое старше, чем есть.
+    """
+    s = str(value or "")[:10]
+    if len(s) == 7 and s[4] == "-":
+        try:
+            y, m = int(s[:4]), int(s[5:7])
+        except ValueError:
+            return None
+        nxt = date(y + (m == 12), 1 if m == 12 else m + 1, 1)
+        return nxt - timedelta(days=1)
+    return _d(s)
+
+
+def data_age_days(sid, meta, now):
+    """Сколько суток данным ряда. None — сказать нечего (нет asof или он в будущем).
+
+    Будущее — не дефект: у дивидендного календаря точки это ОТСЕЧКИ, они впереди
+    по построению (оплачено 12.08.2026).
+    """
+    asof = _asof_date((meta or {}).get("asof"))
+    if asof is None:
+        return None
+    today = (now or datetime.now(timezone.utc)).date()
+    age = (today - asof).days
+    return age if age >= 0 else None
+
+
 def _st(sid, pts, meta, now):
     """Статус ряда по CONTRACT §7: missing → error → stale → ok.
 
     pts нужен только как признак «данные есть» — сгодится любая непустая
     последовательность (для рядов, собранных из нескольких подрядов).
+
+    ДВЕ РАЗНЫЕ ПРОТУХШЕСТИ, и до 26.08.2026 проверялась только первая:
+      1. источник не ОПРАШИВАЛСЯ (fetched_at старше SLA) — он молчит;
+      2. источник отвечает исправно, но отдаёт СТАРОЕ (asof старше своей нормы).
+    Вторая не ловилась вовсе: для FRED, который каждый день бодро возвращает Brent
+    недельной давности, опрос всегда свежий. Возраст данных замечала одна лишь
+    протяжка в панели — и молча, значение просто исчезало по истечении лимита.
+    Именно так неделю выглядели исправными и сломанный расчёт доходности ВДО, и
+    отвалившийся по сертификату ALGOPACK.
     """
     if not pts:
         return "missing"
@@ -225,9 +265,32 @@ def _st(sid, pts, meta, now):
     age = _age_min((meta or {}).get("fetched_at"), now)
     if sla and age is not None and age > sla and _poll_missed(sid, meta, now):
         return "stale"
+    norm = registry.data_age_norm(sid)
+    data_age = data_age_days(sid, meta, now)
+    if norm is not None and data_age is not None and data_age > norm:
+        return "stale"
     if declared in _STATUS_RANK:
         return declared
     return "ok"
+
+
+def stale_reason(sid, pts, meta, now):
+    """Почему ряд протух: "poll" (не опрашивался) | "data" (отдаёт старое) | None.
+
+    Причины разные и чинятся по-разному: первая — конвейер или расписание, вторая —
+    сам источник. Одно слово «устарел» на обе посылало владельца искать не там.
+    """
+    if _st(sid, pts, meta, now) != "stale":
+        return None
+    spec = registry.SERIES.get(sid)
+    if spec is None:
+        base = max((k for k in registry.SERIES if sid.startswith(k)), key=len, default=None)
+        spec = registry.SERIES.get(base) or {}
+    sla = SLA_MINUTES.get(spec.get("sla")) if spec.get("sla") else None
+    age = _age_min((meta or {}).get("fetched_at"), now)
+    if sla and age is not None and age > sla and _poll_missed(sid, meta, now):
+        return "poll"
+    return "data"
 
 
 series_status = _st          # публичное имя для run.py (сводка по источникам)

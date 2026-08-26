@@ -396,6 +396,13 @@ def _sources_fallback(now):
                    "fetched_at": meta.get("fetched_at"),
                    "status": status,
                    "lag_min": _age_min(meta.get("fetched_at"), now),
+                   # Возраст ДАННЫХ рядом с возрастом опроса: источник может
+                   # отвечать каждую минуту и отдавать при этом недельной давности
+                   # число (FRED c Brent, ALGOPACK на бесплатном откате).
+                   "data_age_days": (monitors_mod.data_age_days(cand, meta, now)
+                                     if monitors_mod else None),
+                   "stale_reason": (monitors_mod.stale_reason(cand, pts, meta, now)
+                                    if monitors_mod else None),
                    "series": cand}
             if best is None or _worse(status, best["status"]):
                 best = row
