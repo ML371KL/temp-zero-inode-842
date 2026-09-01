@@ -1168,5 +1168,48 @@ class TestNexusMirror(AlertsCase):
         self.assertEqual(self.sent, [])
 
 
+class HealthDeadWordingCase(AlertsCase):
+    """Тревога о здоровье не выносит модели приговор, которого нет в данных.
+
+    01.09.2026 владельцу ушло «модель перестала работать на свежей истории» и
+    «знаку оценки доверять нельзя» — на IC −0,08 при интервале, накрывающем ноль
+    втрое, и одном месяце ниже нуля из шести, которые требует регламент §7.
+    Число верное, вывод — нет.
+    """
+
+    def fire(self, **hl):
+        base = {"status": "dead", "n": 24, "ic_24m": -0.08,
+                "ic_ci95": [-0.49, 0.33], "below_zero_months": 1,
+                "review_months": 6, "review_due": False}
+        base.update(hl)
+        p = payload()
+        p["core"]["health"] = base
+        self.seed(payload())
+        evs = self.alerts.run(p, dry_run=False, now=NOW)
+        return next(e for e in evs if e["kind"] == "health_dead")
+
+    def test_заголовок_описывает_факт_а_не_приговор(self):
+        ev = self.fire()
+        self.assertNotIn("перестала работать", ev["title"])
+        self.assertIn("минус", ev["title"])
+
+    def test_интервал_и_счётчик_месяцев_в_факте(self):
+        ev = self.fire()
+        self.assertIn("интервал", ev["fact"])
+        self.assertIn("накрывает ноль", ev["fact"])
+        self.assertIn("порог регламента — 6", ev["fact"])
+
+    def test_смысл_не_запрещает_панель_а_объясняет_регламент(self):
+        ev = self.fire()
+        self.assertNotIn("доверять нельзя", ev["meaning"])
+        self.assertIn("шести месяцев", ev["meaning"])
+
+    def test_узкий_интервал_не_называется_накрывающим_ноль(self):
+        # Если однажды окно вырастет и интервал перестанет накрывать ноль —
+        # оговорка обязана исчезнуть, иначе она превратится в мантру.
+        ev = self.fire(ic_24m=-0.55, ic_ci95=[-0.70, -0.40])
+        self.assertNotIn("накрывает ноль", ev["fact"])
+
+
 if __name__ == "__main__":
     unittest.main()

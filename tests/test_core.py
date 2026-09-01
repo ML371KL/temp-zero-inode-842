@@ -360,6 +360,23 @@ class TestHealthReviewStreak(unittest.TestCase):
                          self.health.below_zero_streak(out["series"])[0])
         self.assertEqual(out["below_since"], self.health.below_zero_streak(out["series"])[1])
 
+    def test_интервал_едет_в_витрину_вместе_с_числом(self):
+        """ic_ci95 обязан быть В ВЫХОДЕ compute_health, а не только в хелпере.
+
+        мутация: `ci_lo, ci_hi = (None, None)` в compute_health -> карточка и
+        тревога снова показывают голое число, и «−0,08» опять читается приговором.
+        """
+        out = self.health.compute_health(self.anti_correlated())
+        ci = out["ic_ci95"]
+        self.assertIsNotNone(ci, "интервал не доехал до витрины")
+        self.assertEqual(len(ci), 2)
+        self.assertLess(ci[0], out["ic_24m"])
+        self.assertGreater(ci[1], out["ic_24m"])
+        self.assertEqual(tuple(ci), self.health.ic_ci95(out["ic_24m"], out["n"]))
+        # И он же обязан быть напечатан в записке — иначе поле есть, а читатель
+        # его не видит.
+        self.assertIn("интервал", out["note"])
+
     def test_порог_регламента_срабатывает_на_длинной_серии(self):
         out = self.health.compute_health(self.anti_correlated())
         self.assertGreaterEqual(out["below_zero_months"], self.constants.HEALTH_REVIEW_MONTHS)
@@ -377,6 +394,53 @@ class TestHealthReviewStreak(unittest.TestCase):
         self.assertIsInstance(out["review_due"], bool)
         self.assertEqual(out["review_due"],
                          out["below_zero_months"] >= self.constants.HEALTH_REVIEW_MONTHS)
+
+
+class TestHealthInterval(unittest.TestCase):
+    """Рядом с IC обязан ехать его доверительный интервал.
+
+    ОПЛАЧЕНО ТРЕВОГОЙ 01.09.2026. Владелец получил «модель перестала работать на
+    свежей истории, знаку оценки доверять нельзя» на значении IC −0,08. Число
+    было ПОСЧИТАНО ВЕРНО (движок правильно отбрасывает две последние пары, чтобы
+    незакрытый месяц не попал в окно), но при n=24 стандартная ошибка рангового
+    IC около 0,21: интервал [−0,47; +0,34] накрывает ноль втрое. То есть честный
+    диагноз — «на этом окне информации нет», а не «модель сломалась». Отчёт
+    реколибровки печатал интервал уже год, живая карточка и тревога — нет.
+    """
+
+    def setUp(self):
+        self.health = need(self, "pipeline.compute.health", "ic_ci95", "compute_health")
+
+    def test_интервал_считается_и_накрывает_ноль_на_коротком_окне(self):
+        lo, hi = self.health.ic_ci95(-0.077, 24)
+        self.assertLess(lo, 0)
+        self.assertGreater(hi, 0)
+        # se = 1/sqrt(23) = 0,2085; 1,96·se = 0,4087 — считаем руками, не кодом.
+        self.assertAlmostEqual(lo, -0.486, places=2)
+        self.assertAlmostEqual(hi, 0.332, places=2)
+
+    def test_на_коротком_окне_ни_одно_значение_не_отличимо_от_нуля(self):
+        """При n=24 интервал шире ±0,4 — это свойство окна, а не рынка."""
+        for ic in (-0.40, -0.08, 0.0, 0.15, 0.40):
+            lo, hi = self.health.ic_ci95(ic, 24)
+            with self.subTest(ic=ic):
+                self.assertLess(lo, 0, f"IC {ic}: интервал не накрыл ноль снизу")
+                self.assertGreater(hi, 0, f"IC {ic}: интервал не накрыл ноль сверху")
+
+    def test_без_выборки_интервала_нет(self):
+        self.assertEqual(self.health.ic_ci95(None, 24), (None, None))
+        self.assertEqual(self.health.ic_ci95(0.2, 3), (None, None))
+
+    def test_записка_не_объявляет_модель_сломанной(self):
+        # мутация: вернуть «ядро не работает, доверять знаку нельзя» -> красный.
+        note = self.health._note({"ic_24m": -0.08, "n": 24, "status": "dead",
+                                  "ic_ci95": [-0.49, 0.33], "coverage": 1.0,
+                                  "below_zero_months": 1, "below_since": "2026-07-31",
+                                  "review_months": 6, "review_due": False})
+        self.assertIn("не видно", note)
+        self.assertIn("накрывает ноль", note)
+        self.assertNotIn("не работает", note)
+        self.assertIn("порог регламента — 6", note)
 
 
 if __name__ == "__main__":
