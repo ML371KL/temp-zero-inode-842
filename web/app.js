@@ -489,7 +489,11 @@
     ]);
 
     var hl = core.health || {};
-    var hlStatus = { ok: 'работает', warn: 'слабеет', dead: 'сломана' }[hl.status] || 'нет данных';
+    /* «сломана» — приговор, которого данные не выдерживают: при окне 24 месяца
+       интервал ±0,41, и любое значение от −0,4 до +0,4 неотличимо от нуля.
+       Статус dead означает «связи на этом окне не видно», а не «модель сломана»;
+       слово стояло рядом с текстом, который прямо это опровергал. */
+    var hlStatus = { ok: 'работает', warn: 'слабеет', dead: 'связи не видно' }[hl.status] || 'нет данных';
     var hlIco = ico(hl.status === 'ok' ? 'good' : (hl.status === 'warn' ? 'warn' : (hl.status === 'dead' ? 'crit' : 'flat')));
     hlIco.setAttribute('class', 'sig__ico');
     hlIco.style.color = hl.status === 'ok' ? 'var(--good)' : (hl.status === 'warn' ? 'var(--warn)' : (hl.status === 'dead' ? 'var(--crit)' : 'var(--ink-3)'));
