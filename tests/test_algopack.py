@@ -14,6 +14,7 @@
 """
 
 import os
+import tempfile
 import unittest
 from datetime import datetime, timezone
 from unittest import mock
@@ -100,7 +101,7 @@ class FutoiRoutingCase(unittest.TestCase):
         os.environ.pop("MOEX_ALGOPACK_TOKEN", None)
         self.assertFalse(self.iss.algopack_ready())
         with mock.patch.object(self.iss.http, "get_json", return_value=self.rows()) as g:
-            _rows, _cols, url, bad = self.iss._futoi_window("MX", "2026-08-01", "2026-08-11")
+            _rows, _cols, url, bad, _info = self.iss._futoi_window("MX", "2026-08-01", "2026-08-11")
         self.assertEqual(bad, 0)
         self.assertIn(self.iss.ISS, url)
         self.assertEqual(g.call_count, 1)
@@ -109,7 +110,7 @@ class FutoiRoutingCase(unittest.TestCase):
         os.environ["MOEX_ALGOPACK_TOKEN"] = TOKEN
         self.assertTrue(self.iss.algopack_ready())
         with mock.patch.object(self.iss.http, "get_json", return_value=self.rows()):
-            _rows, _cols, url, bad = self.iss._futoi_window("MX", "2026-08-01", "2026-08-11")
+            _rows, _cols, url, bad, _info = self.iss._futoi_window("MX", "2026-08-01", "2026-08-11")
         self.assertEqual(bad, 0)
         self.assertIn("apim.moex.com", url)
 
@@ -126,8 +127,10 @@ class FutoiRoutingCase(unittest.TestCase):
             return self.rows()
 
         with mock.patch.object(self.iss.http, "get_json", side_effect=flaky):
-            rows, _cols, url, bad = self.iss._futoi_window("MX", "2026-08-01", "2026-08-11")
+            rows, _cols, url, bad, info = self.iss._futoi_window("MX", "2026-08-01", "2026-08-11")
         self.assertEqual(bad, 0, "откат должен считаться успехом, а не отказом окна")
+        # …но ПРИЧИНА отказа шлюза обязана уехать наверх: 401 — это подписка.
+        self.assertEqual(info["paid_fail"], "auth")
         self.assertEqual(len(rows), 1)
         self.assertIn(self.iss.ISS, url)
         self.assertEqual(len(calls), 2)
@@ -136,9 +139,113 @@ class FutoiRoutingCase(unittest.TestCase):
         os.environ["MOEX_ALGOPACK_TOKEN"] = TOKEN
         boom = self.iss.FetchError("сеть легла")
         with mock.patch.object(self.iss.http, "get_json", side_effect=boom):
-            rows, _cols, _url, bad = self.iss._futoi_window("MX", "2026-08-01", "2026-08-11")
+            rows, _cols, _url, bad, info = self.iss._futoi_window("MX", "2026-08-01", "2026-08-11")
         self.assertEqual(rows, [])
         self.assertEqual(bad, 1)
+        self.assertEqual(info["paid_fail"], "net",
+                         "сетевой отказ шлюза не должен читаться как проблема подписки")
+
+
+class FutoiNoteCase(unittest.TestCase):
+    """Записка futoi называет НАСТОЯЩУЮ причину деградации.
+
+    Оплачено дважды за неделю: 26.08.2026 шлюз ALGOPACK падал по сертификату,
+    27.08 — по DNS резолвера Hetzner, и всё это время meta писала «проверьте
+    подписку» при живом оплаченном ключе. Проблема сети выглядела проблемой
+    оплаты, и владельцу предлагали чинить не то. Вторая ложь тех же дней: окна,
+    в которых бесплатный ISS ОТКАЗАЛ («Free users can't receive data for the
+    last 14 days»), считались «отданными бесплатным ISS».
+    """
+
+    def setUp(self):
+        self.iss = need(self, "pipeline.fetch.iss", "futoi", "_futoi_window")
+        os.environ["MOEX_ALGOPACK_TOKEN"] = TOKEN
+        self.addCleanup(lambda: os.environ.pop("MOEX_ALGOPACK_TOKEN", None))
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.prev_state = os.environ.get("STATE_DIR")
+        os.environ["STATE_DIR"] = self.tmp.name
+        self.addCleanup(self._restore_state)
+
+    def _restore_state(self):
+        if self.prev_state is None:
+            os.environ.pop("STATE_DIR", None)
+        else:
+            os.environ["STATE_DIR"] = self.prev_state
+
+    def run_futoi(self, window_result):
+        """futoi() на одном окне с подставным _futoi_window.
+
+        История в сторе «есть» (last_date подменён): пустое окно при живой
+        истории — штатный лаг, а не отказ (empty_is_fatal). Ровно так выглядели
+        прогоны 27–31.08, когда шлюз лежал: точек 0, статус ok.
+        """
+        with mock.patch.object(self.iss, "_futoi_window", return_value=window_result),              mock.patch.object(self.iss.store, "last_date", return_value="2026-08-20"):
+            out = self.iss.futoi(ticker="MX", start="2026-08-29", end="2026-08-31",
+                                 chunk_days=3)
+        return out[0][2]  # meta первого подряда — записка у всех одна
+
+    def paid_rows(self):
+        cols = ["tradedate", "clgroup", "seqnum", "pos", "pos_long", "pos_short",
+                "pos_long_num", "pos_short_num"]
+        rows = [["2026-08-29", "FIZ", 1, 10.0, 60.0, -50.0, 100.0, 90.0]]
+        return rows, cols
+
+    def test_сетевой_отказ_шлюза_не_винит_подписку(self):
+        # мутация: слить ветки auth/net -> DNS-отказ снова станет «проверьте подписку».
+        rows_url = ("https://iss.moex.com/x", 0)
+        meta = self.run_futoi(([], ["ERROR_MESSAGE"], rows_url[0], rows_url[1],
+                               {"paid_fail": "net", "free_denied": True}))
+        self.assertIn("недоступен", meta["note"])
+        self.assertIn("подписка ни при чём", meta["note"])
+        self.assertNotIn("проверьте подписку", meta["note"])
+        self.assertFalse(meta["algopack"])
+
+    def test_отказ_ключа_говорит_про_подписку(self):
+        meta = self.run_futoi(([], ["ERROR_MESSAGE"], "https://iss.moex.com/x", 0,
+                               {"paid_fail": "auth", "free_denied": True}))
+        self.assertIn("проверьте подписку", meta["note"])
+        self.assertIn("HTTP 401/403", meta["note"])
+
+    def test_отказанные_окна_не_считаются_отданными(self):
+        meta = self.run_futoi(([], ["ERROR_MESSAGE"], "https://iss.moex.com/x", 0,
+                               {"paid_fail": "net", "free_denied": True}))
+        self.assertIn("бесплатный отказал: 1", meta["note"])
+        self.assertNotIn("окон отдано бесплатным ISS", meta["note"])
+
+    def test_мёртвый_шлюз_с_пустыми_руками_не_рапортует_без_задержки(self):
+        # мутация: вернуть формулу paid = free_served == 0 -> «позиции без
+        # задержки» при нуле полученных окон.
+        meta = self.run_futoi(([], ["ERROR_MESSAGE"], "https://iss.moex.com/x", 0,
+                               {"paid_fail": "net", "free_denied": True}))
+        self.assertNotIn("без задержки", meta["note"])
+        self.assertFalse(meta["algopack"])
+
+    def run_futoi_http(self):
+        """Старый сценарий: подставной http, живой _futoi_window."""
+        payload = {"futoi": {"columns": ["tradedate", "clgroup", "pos", "seqnum"],
+                             "data": [["2026-08-11", "FIZ", 100, 1]]}}
+        with mock.patch.object(self.iss.http, "get_json", return_value=payload), \
+             mock.patch.object(self.iss.store, "last_date", return_value="2026-08-10"):
+            return self.iss.futoi(ticker="MX", start="2026-08-10", end="2026-08-11")
+
+    def test_без_подписки_записка_про_задержку(self):
+        os.environ.pop("MOEX_ALGOPACK_TOKEN", None)
+        meta = self.run_futoi_http()[0][2]
+        self.assertIn("14 дней", meta["note"])
+        self.assertFalse(meta["algopack"])
+
+    def test_с_подпиской_записка_про_отсутствие_задержки(self):
+        meta = self.run_futoi_http()[0][2]
+        self.assertIn("без задержки", meta["note"])
+        self.assertTrue(meta["algopack"])
+
+    def test_живой_платный_путь_как_прежде(self):
+        rows, cols = self.paid_rows()
+        meta = self.run_futoi((rows, cols, self.iss.ALGOPACK + "/x", 0,
+                               {"paid_fail": None, "free_denied": False}))
+        self.assertEqual(meta["note"], "ALGOPACK: позиции без задержки")
+        self.assertTrue(meta["algopack"])
 
 
 class LiveQuotesCase(unittest.TestCase):
@@ -286,42 +393,6 @@ class LiveQuotesCase(unittest.TestCase):
         self.assertEqual(sorted(self.tv.LIVE_UIDS),
                          ["live_cny_tom", "live_gld_tom", "live_imoex", "live_rgbi",
                           "live_rvi"])
-
-
-class FutoiNoteCase(unittest.TestCase):
-    """Записка о задержке обязана следовать режиму, а не быть константой."""
-
-    def setUp(self):
-        self.iss = need(self, "pipeline.fetch.iss", "futoi")
-        self.prev = os.environ.get("MOEX_ALGOPACK_TOKEN")
-        self.addCleanup(self._restore)
-
-    def _restore(self):
-        if self.prev is None:
-            os.environ.pop("MOEX_ALGOPACK_TOKEN", None)
-        else:
-            os.environ["MOEX_ALGOPACK_TOKEN"] = self.prev
-
-    def run_futoi(self):
-        payload = {"futoi": {"columns": ["tradedate", "clgroup", "pos", "seqnum"],
-                             "data": [["2026-08-11", "FIZ", 100, 1]]}}
-        with mock.patch.object(self.iss.http, "get_json", return_value=payload), \
-             mock.patch.object(self.iss.store, "last_date", return_value="2026-08-10"):
-            return self.iss.futoi(ticker="MX", start="2026-08-10", end="2026-08-11")
-
-    def test_без_подписки_записка_про_задержку(self):
-        os.environ.pop("MOEX_ALGOPACK_TOKEN", None)
-        out = self.run_futoi()
-        meta = out[0][2]
-        self.assertIn("14 дней", meta["note"])
-        self.assertFalse(meta["algopack"])
-
-    def test_с_подпиской_записка_про_отсутствие_задержки(self):
-        os.environ["MOEX_ALGOPACK_TOKEN"] = TOKEN
-        out = self.run_futoi()
-        meta = out[0][2]
-        self.assertIn("без задержки", meta["note"])
-        self.assertTrue(meta["algopack"])
 
 
 if __name__ == "__main__":

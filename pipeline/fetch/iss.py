@@ -559,19 +559,33 @@ def futoi(ticker="MX", series_prefix=None, start=None, end=None, chunk_days=3,
     lo, hi = _window(frm, till)
     asked = failed = 0
     free_served = 0   # окна, фактически отданные БЕСПЛАТНОЙ базой при живом ключе
+    denied = 0        # окна, в которых бесплатный ISS отказал («последние 14 дней»)
+    paid_fail = set()  # чем кончались походы в платный шлюз: {"auth"} / {"net"}
+
+    def _tally(url, bad, info):
+        nonlocal free_served, denied
+        if info.get("paid_fail"):
+            paid_fail.add(info["paid_fail"])
+        if info.get("free_denied"):
+            # Окно не отдал НИКТО: считать его «отданным бесплатно» значило бы
+            # снова прятать мёртвый шлюз за успокаивающей запиской.
+            denied += 1
+        elif not bad and not url.startswith(ALGOPACK):
+            free_served += 1
+
     while day <= till:
         chunk_end = min(dates.add_days(day, max(1, chunk_days) - 1), till)
-        rows, cols, url, bad = _futoi_window(ticker, day, chunk_end)
+        rows, cols, url, bad, info = _futoi_window(ticker, day, chunk_end)
         asked, failed = asked + 1, failed + bad
-        free_served += 0 if bad or url.startswith(ALGOPACK) else 1
+        _tally(url, bad, info)
         if len(rows) >= FUTOI_ROW_CAP:
             # Ответ обрезан по 1000 строк — окно надо сузить до одного дня,
             # иначе тихо потеряем начало периода.
             rows, cols = [], []
             for one in dates.iter_days(day, chunk_end):
-                r, c, url, bad = _futoi_window(ticker, one, one)
+                r, c, url, bad, info = _futoi_window(ticker, one, one)
                 asked, failed = asked + 1, failed + bad
-                free_served += 0 if bad or url.startswith(ALGOPACK) else 1
+                _tally(url, bad, info)
                 rows.extend(r)
                 cols = cols or c
         _futoi_absorb(rows, cols, best, lo, hi)
@@ -603,12 +617,27 @@ def futoi(ticker="MX", series_prefix=None, start=None, end=None, chunk_days=3,
     # Возраст сигнала на панели врал бы, а владелец узнавал бы об истёкшем ключе
     # случайно (аудит 18.08.2026).
     key_present = algopack_ready()
-    paid = key_present and free_served == 0
+    # «Оплаченный путь» = ключ есть, шлюз ни разу не падал и всё пришло из него.
+    # Прежняя формула (free_served == 0) считала оплаченным и прогон, где шлюз
+    # умер, а бесплатный отказал во всех свежих окнах: нулей в обоих счётчиках
+    # хватало для «позиции без задержки» при пустых руках.
+    paid = key_present and not paid_fail and free_served == 0
+    tail_free = f"; окон отдано бесплатным ISS: {free_served}" if free_served else ""
+    tail_denied = (f"; в свежих окнах бесплатный отказал: {denied} "
+                   f"(отдаёт только старше 14 дней)" if denied else "")
     if paid:
         note = "ALGOPACK: позиции без задержки"
+    elif key_present and "auth" in paid_fail:
+        # Единственная ветка, где уместно слово «подписка»: шлюз ДОСТУПЕН и
+        # ответил отказом на сам ключ.
+        note = ("шлюз ALGOPACK отверг ключ (HTTP 401/403) — проверьте подписку"
+                + tail_free + tail_denied)
+    elif key_present and "net" in paid_fail:
+        note = ("платный шлюз ALGOPACK недоступен (DNS/сеть/TLS) — подписка ни "
+                "при чём, чинить доступ с машины" + tail_free + tail_denied)
     elif key_present:
         note = (f"ключ ALGOPACK есть, но {free_served} окон отданы бесплатным ISS "
-                f"(задержка ~14 дней) — проверьте подписку")
+                f"(задержка ~14 дней)")
     else:
         note = "бесплатный ISS публикует с задержкой ~14 дней"
     status = "ok"
@@ -640,19 +669,36 @@ def _futoi_window(ticker, day_from, day_till, base=None):
     params = {"from": dates.fmt_date(day_from), "till": dates.fmt_date(day_till)}
     bases = [base] if base else ([ALGOPACK, ISS] if algopack_ready() else [ISS])
     url = _url(path, params, bases[0])
+    # info — ЧТО ИМЕННО случилось с окном, а не только «получилось/нет»:
+    #   paid_fail: "auth" — шлюз отверг ключ (HTTP 401/403), это про подписку;
+    #              "net"  — до шлюза не добрались (DNS/сеть/TLS), подписка ни при чём;
+    #   free_denied — бесплатный ISS ответил ERROR_MESSAGE «Free users can't
+    #              receive data for the last 14 days»: окно не отдано НИКЕМ.
+    # Различие оплачено дважды: 26.08.2026 шлюз падал по сертификату, 27.08 — по
+    # DNS резолвера Hetzner, и обе недели meta писала «проверьте подписку» при
+    # живом ключе. Проблема сети выглядела проблемой оплаты.
+    info = {"paid_fail": None, "free_denied": False}
     for attempt, host_base in enumerate(bases):
         url = _url(path, params, host_base)
         try:
             payload = http.get_json(url)
         except FetchError as e:
+            if host_base == ALGOPACK:
+                auth = (getattr(e, "status", None) in (401, 403)
+                        or "HTTP 401" in str(e) or "HTTP 403" in str(e))
+                info["paid_fail"] = "auth" if auth else "net"
             http.LOG(f"futoi {ticker} {day_from}..{day_till}"
                      f"{' (ALGOPACK)' if host_base == ALGOPACK else ''}: {e}")
             if attempt + 1 < len(bases):
                 continue
-            return [], [], url, 1
+            return [], [], url, 1, info
         block = payload.get("futoi") or {}
-        return (block.get("data") or []), list(block.get("columns") or []), url, 0
-    return [], [], url, 1
+        rows = block.get("data") or []
+        cols = list(block.get("columns") or [])
+        if host_base != ALGOPACK and any(str(c).upper() == "ERROR_MESSAGE" for c in cols):
+            info["free_denied"] = True
+        return rows, cols, url, 0, info
+    return [], [], url, 1, info
 
 
 def _futoi_absorb(rows, cols, best, lo=None, hi=None):
