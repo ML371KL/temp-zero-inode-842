@@ -26,9 +26,9 @@ import math
 from datetime import date, timedelta
 
 try:  # прогон как пакет: python -m pipeline.run
-    from ..lib import calc, dates as datelib, registry
+    from ..lib import calc, constants, dates as datelib, registry
 except ImportError:  # прогон как python pipeline/run.py (корень sys.path = pipeline/)
-    from lib import calc, dates as datelib, registry
+    from lib import calc, constants, dates as datelib, registry
 
 __all__ = ["build_panel", "PanelError"]
 
@@ -282,12 +282,23 @@ def build_panel(store):
 
     # ---- цена индекса: тренд, просадка, моментум ------------------------------
     cols["ma200"] = calc.rolling_mean(px, 200)
+    # Расстояние до 200-дневной средней — сырьё для тренда С ГИСТЕРЕЗИСОМ (ворота
+    # слоя решения, аудит 02.09.2026): бык выше +2 %, медведь ниже −2 %, между ними
+    # прежнее состояние. Сырой бит «цена > MA200» остаётся — на нём стоят CELL_STATS.
+    cols["px_ma_ratio"] = [None if not (calc.is_num(p) and calc.is_num(m) and m > 0)
+                           else p / m - 1.0 for p, m in zip(px, cols["ma200"])]
     cols["dd252"] = calc.drawdown_from_max(px, 252)
     cols["mom63"] = calc.log_return(px, 63)
     cols["realized_vol_21"] = calc.realized_vol(cols["ret1"], 21)
     # Порог стресса волы: 80-й перцентиль за 756 дней (min 252) — окно ВКЛЮЧАЕТ
     # текущий день, ровно как rv.rolling(756, min_periods=252).quantile(0.8).
     cols["vol_thresh80"] = calc.rolling_quantile(cols["realized_vol_21"], 756, 0.80,
+                                                 min_periods=252)
+    # Порог ВЫКЛЮЧЕНИЯ волы для ворот с гистерезисом: флаг включается выше p80, а
+    # снимается только ниже p60 — тем же способом, теми же окном и минимумом, иначе
+    # два порога расходятся по семантике окна и гистерезис становится случайным.
+    cols["vol_thresh60"] = calc.rolling_quantile(cols["realized_vol_21"], 756,
+                                                 constants.DECISION["vol_off_quantile"],
                                                  min_periods=252)
 
     # ---- облигации: окна считаем на СОБСТВЕННОМ календаре RGBI ----------------

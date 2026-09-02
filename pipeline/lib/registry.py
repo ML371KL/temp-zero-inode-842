@@ -134,6 +134,23 @@ SERIES = {
     "breadth": dict(fetcher="iss.breadth", args={}, cadence="daily", pub_lag_days=0,
                     sla="iss_daily", required=False, role="monitor",
                     label="Доля бумаг выше 200-дневной"),
+    # Концентрация участников (HHI) по ВСЕМУ рынку акций — платный датасет ALGOPACK.
+    # Точка дня — агрегаты равновзвешенно по бумагам, где метрика определена:
+    # nf = среднее (hhi_netflow_buy − hhi_netflow_sell), bs = среднее
+    # (hhi_agressive_buy − hhi_agressive_sell), n — бумаг в агрегате,
+    # hhi_volume_mean. Подряды пишутся отдельными файлами hi2_market_<subkey>,
+    # как zcyc -> zcyc_y1 (точка в id недопустима в имени файла и ключе R2).
+    # Аудит 02.09.2026: IC nf к 21 дню +0,32 (n=73), ловит дно на 10–50 дней
+    # раньше ворот — живёт ТЕНЬЮ (compute/shadow.py), в решение не входит.
+    "hi2_market": dict(fetcher="algopack.hi2_market", args={}, cadence="daily",
+                       pub_lag_days=0, sla="iss_daily", required=False, role="monitor",
+                       label="Концентрация участников (HI2, весь рынок)",
+                       subkeys=["nf", "bs", "n", "hhi_volume_mean"],
+                       note="2 запроса/день к https://apim.moex.com/iss/datashop/algopack/"
+                            "eq/hi2.json?date=YYYY-MM-DD (страницы по 1000 строк, 11 метрик "
+                            "× ~140 бумаг, публикуется 18:46 МСК); бесплатного дублёра нет — "
+                            "без ключа ALGOPACK (env MOEX_ALGOPACK_TOKEN) ряд стареет, тайл "
+                            "молчит. Ретро при пустом сторе — не более 260 торговых дней"),
 
     # ------------------------------------------------------------------- ЦБ РФ
     "usd_cbr": dict(fetcher="cbr.fx", args={"code": "R01235"}, cadence="daily",
@@ -234,6 +251,38 @@ SERIES = {
                            "и умолчание make_meta по последней точке здесь неверно"),
 }
 
+# ------------------------------------------------------------------- тень
+# Теневые сигналы (аудит 02.09.2026, compute/shadow.py): считаются на каждом
+# суточном прогоне, на позицию НЕ влияют, а история пишется в стор рядами
+# shadow_<id>, чтобы через 12 месяцев наблюдения было что сверять ВНЕ выборки.
+# Фетчера у них нет — точку кладёт сам расчёт (fetcher=None): режимы прогона их
+# не опрашивают (cadence "derived" не входит ни в один MODES), а норма возраста
+# данных на них не распространяется — отсутствие новой точки означает, что
+# прогон не считал тень, и об этом скажет сам блок shadow в data.json.
+SHADOW_SIGNALS = {
+    "repricing": "Тень: репрайсинг ожиданий по ставке (Δ21 спреда год−ключ)",
+    "usd_ma200": "Тень: курс к своей MA200 (z)",
+    "brent_usd_gap": "Тень: Brent к своей MA504 в долларах (z)",
+    "hi2_nf21z": "Тень: концентрация нетто-потока HI2 (z 21д)",
+    "breadth_early": "Тень: ранний бит ширины рынка (<40 %)",
+    "volume_capitulation": "Тень: капитуляция по обороту",
+    "futoi_gross": "Тень: брутто-вовлечённость физлиц в MX",
+    "dividend_season": "Тень: дивидендный сезон (ожидаемый гэп индекса)",
+    "rotation_trigger": "Тень: большая ротация из фондов ликвидности",
+    "position": "Тень: позиция с битом репрайсинга",
+}
+for _sid, _label in SHADOW_SIGNALS.items():
+    SERIES[f"shadow_{_sid}"] = dict(fetcher=None, args={}, cadence="derived",
+                                    pub_lag_days=0, sla=None, required=False,
+                                    role="shadow", label=_label,
+                                    note="пишется compute/shadow.py, источника нет")
+del _sid, _label
+
+# Возраст точки теневого ряда — не дефект источника (источника нет): норму не
+# проверяем, как и у аукционов. Множество пополняется здесь, а не литералом выше,
+# чтобы список теней жил в одном месте.
+DATA_AGE_EXEMPT.update(k for k, v in SERIES.items() if v.get("role") == "shadow")
+
 # Что тянет каждый режим прогона.
 #
 # key_rate и polymarket_ceasefire стоят в интрадее не ради цены, а ради СКОРОСТИ
@@ -248,17 +297,32 @@ SERIES = {
 # каждый день ради числа, которое меняется восемь раз в год.
 MANUAL_EXTRA = ("cb_consensus",)
 
+def _fetcher(spec):
+    """Имя фетчера строкой; у теневых рядов его нет вовсе (None) — пустая строка,
+    чтобы списки режимов ниже не падали на .startswith у None."""
+    return str(spec.get("fetcher") or "")
+
+
 MODES = {
     "intraday": ["imoex", "imoex2", "rgbi", "rvi", "cny_tom", "gld_tom", "brent_moex",
                  "key_rate", "polymarket_ceasefire"],
     "daily": [k for k, v in SERIES.items()
               if v["cadence"] in ("daily", "event")
-              and not v["fetcher"].startswith("manual") and k not in MANUAL_EXTRA],
+              and not _fetcher(v).startswith("manual") and k not in MANUAL_EXTRA],
     "weekly": ["cpi_weekly", "ofz_auctions", "imoex2", "dividends"],
     "monthly": [k for k, v in SERIES.items() if v["cadence"] in ("monthly", "decade")],
-    "manual": ([k for k, v in SERIES.items() if v["fetcher"].startswith("manual")]
+    "manual": ([k for k, v in SERIES.items() if _fetcher(v).startswith("manual")]
                + [k for k in MANUAL_EXTRA if k in SERIES]),
 }
+
+
+def fetchable():
+    """Ряды, у которых есть фетчер — то, что вообще можно опрашивать (bootstrap).
+
+    Теневые ряды (role="shadow") фетчера не имеют: попытка «загрузить» их кончилась
+    бы отказом и пометкой status=error на ряду, который на самом деле исправен.
+    """
+    return [sid for sid, spec in SERIES.items() if _fetcher(spec)]
 
 
 def series_for_mode(mode):

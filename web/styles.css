@@ -97,6 +97,13 @@
   --warn-ink: #bc8104;
   --serious-ink: #c34716;
 
+  /* акцент позиции. Позиция — не оценка, поэтому «акции» набраны НЕ синим
+   * «плюсом» (--pos) и не зелёным статусом, а собственным тоном; «деньги» —
+   * чернилами. Один токен на весь слой позиции: слово в шапке, лента истории,
+   * свотч легенды. На светлой поверхности 6,0:1, на тёмной 7,1:1 — это текст,
+   * и тест контраста держит его в паре с обеими поверхностями. */
+  --accent: #1f5fb8;
+
   --shadow: 0 1px 2px rgba(11, 11, 11, .04), 0 12px 32px -20px rgba(11, 11, 11, .28);
   --radius: 14px;
   --radius-sm: 9px;
@@ -136,6 +143,7 @@
     --good-ink: #0ca30c;
     --warn-ink: #fab219;
     --serious-ink: #ec835a;
+    --accent: #6ea8f5;
     --shadow: none;
   }
 }
@@ -166,6 +174,7 @@
   --good-ink: #0ca30c;
   --warn-ink: #fab219;
   --serious-ink: #ec835a;
+  --accent: #6ea8f5;
   --shadow: none;
 }
 
@@ -594,7 +603,8 @@ body { overflow-x: hidden; }
  */
 .howto__card { padding: 24px; }
 .howto__grid { display: grid; gap: 24px; }
-@media (min-width: 760px) { .howto__grid { grid-template-columns: repeat(3, 1fr); } }
+@media (min-width: 760px) { .howto__grid { grid-template-columns: repeat(2, 1fr); } }
+@media (min-width: 1000px) { .howto__grid { grid-template-columns: repeat(4, 1fr); } }
 .howto__k {
   font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
   color: var(--ink-3); margin-bottom: 8px;
@@ -680,11 +690,12 @@ body { overflow-x: hidden; }
 
 .guide__table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 16px 0 20px; }
 .guide__table { min-width: 560px; }
-.guide__table th, .guide__table td { white-space: normal; }
-.guide__table th[scope="col"] { white-space: nowrap; }
+/* Специфичность выше, чем у table.data td (0,1,2): иначе nowrap общей таблицы
+ * побеждал, и длинные ячейки руководства уезжали за край на любом экране шире
+ * телефона — таблица состава ядра прокручивалась вбок, а не переносилась. */
+table.data.guide__table th, table.data.guide__table td { white-space: normal; vertical-align: top; }
+table.data.guide__table th[scope="col"] { white-space: nowrap; }
 .guide__table th[scope="row"] { font-weight: 600; }
-.guide__table td, .guide__table th { vertical-align: top; }
-.guide__table td { white-space: normal; }
 .guide__dim { color: var(--ink-3); font-weight: 400; font-size: 13px; }
 
 .guide__tiers { display: grid; gap: 14px; margin: 16px 0 8px; }
@@ -699,3 +710,61 @@ body { overflow-x: hidden; }
 .guide__dl { max-width: 78ch; }
 .guide__dl dt { font-weight: 600; font-size: 15px; margin-top: 14px; }
 .guide__dl dd { margin: 4px 0 0; font-size: 15px; line-height: 1.6; color: var(--ink-2); text-wrap: pretty; }
+
+/* ───────────────────────────────────────────────────────── позиция
+ *
+ * Первая строка панели. Крупное слово набрано тем же кеглем, что имя режима
+ * (26–38px, 700), чтобы позиция и ворота читались как две части одного ответа,
+ * а не как заголовок и подзаголовок. Заглавные — только здесь: это единственная
+ * строка, которая говорит, где стоят деньги. «Акции» — акцент, «деньги» —
+ * чернила; ни красного, ни зелёного: позиция — не оценка рынка.
+ */
+.position { padding: 20px 24px; border-bottom: 1px solid var(--hair); }
+.position__row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 16px; }
+.position__name {
+  font-size: clamp(26px, 4.2vw, 38px); font-weight: 700; letter-spacing: -.01em;
+  line-height: 1.1; text-transform: uppercase; color: var(--ink-2);
+}
+.position--long .position__name { color: var(--accent); }
+.position__meta { font-size: 15px; color: var(--ink-2); text-wrap: pretty; }
+.position__grid { display: grid; gap: 16px 32px; margin-top: 16px; }
+@media (min-width: 900px) { .position__grid { grid-template-columns: 1.15fr 1fr; } }
+.position__note {
+  font-size: 13px; color: var(--ink-3); margin-top: 12px;
+  max-width: 68ch; line-height: 1.45; text-wrap: pretty;
+}
+.position__cond { margin-top: 6px; max-width: 68ch; }
+.position__cond li {
+  position: relative; padding-left: 16px; margin-top: 5px;
+  font-size: 13px; line-height: 1.45; color: var(--ink-2); text-wrap: pretty;
+}
+.position__cond li::before {
+  content: ""; position: absolute; left: 2px; top: 8px;
+  width: 5px; height: 5px; border-radius: 50%; background: var(--ink-3);
+}
+.position__ribbon { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--hair); }
+.position__ribbon .stat__k { margin-bottom: 4px; }
+.legend__sw--accent { background: var(--accent); }
+/* Режим в шапке: сноска про распределение и n — мелко, но чернилами 4,5:1. */
+.hero__fine {
+  font-size: 13px; color: var(--ink-3); margin-top: 14px;
+  max-width: 68ch; line-height: 1.45; text-wrap: pretty;
+}
+/* Закрытый месяц под шкалой — справочная строка второго ряда, кеглем ниже. */
+.gauge__fine { font-size: 11px; }
+.section__note { font-size: 13px; color: var(--ink-3); max-width: 78ch; margin-bottom: 14px; text-wrap: pretty; }
+table.data tr.is-current th, table.data tr.is-current td { font-weight: 600; }
+@media (max-width: 620px) { .position { padding: 16px; } }
+
+/* ───────────────────────────────────────────────────────────── тень
+ *
+ * Пунктир — единственный визуальный признак «в решение не входит»; бит тени
+ * набран чернилами, а не статусным цветом: у тени нет права выглядеть сигналом.
+ */
+.tile--shadow { border-style: dashed; box-shadow: none; }
+.shadow__state {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 13px; color: var(--ink-2); white-space: nowrap;
+}
+.shadow__dot { width: 9px; height: 9px; border-radius: 50%; flex: none; box-shadow: inset 0 0 0 1.5px var(--ink-3); }
+.shadow__dot--on { background: var(--ink); box-shadow: none; }

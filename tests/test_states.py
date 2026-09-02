@@ -21,8 +21,9 @@ from tests import need, panel_small
 class StatesCase(unittest.TestCase):
     def setUp(self):
         self.states = need(self, "pipeline.compute.states", "compute_states", "cell_code",
-                           "_gate_ok")
-        self.constants = need(self, "pipeline.lib.constants", "CELL_STATS", "STATE_RULES", "CELL_RULES")
+                           "_gate_ok", "_t975")
+        self.constants = need(self, "pipeline.lib.constants", "CELL_STATS", "STATE_RULES",
+                              "CELL_RULES", "REGIMES")
         self.panel = panel_small()
         self.expect = self.panel["expect"]
         self.out = self.states.compute_states(
@@ -250,19 +251,19 @@ class TestActiveSignals(StatesCase):
 
     def test_only_signals_of_this_cell_are_on(self):
         # Ячейка (медведь, стресс, облиг. стресс), фаза смягчения, эра пост-2022.
-        # Включены: mom63 (вола-стресс), switch_spread (смягчение), rb_gap
-        # (вола-стресс), dy_trail (пост-2022), rgbi_mom21 (медведь).
-        # мутация: игнорировать `when` -> на панели появится покупка просадки
-        # (dd252), которая при облигационном стрессе даёт −0,55%/мес вместо +1,43%.
+        # Включены: mom63 (вола-стресс), dd252 (медведь — с 02.09.2026 условие
+        # trend=0 вместо bond=0), switch_spread (смягчение), dy_trail (пост-2022),
+        # rgbi_mom21 (медведь). rb_gap и futoi_z120 из второго ряда убраны аудитом.
+        # мутация: игнорировать `when` -> все сигналы включены в любой ячейке.
         self.assertEqual(sorted(self.by_id), sorted(self.expect["active_signals"]))
         for sid in self.expect["inactive_signals"]:
             self.assertNotIn(sid, self.by_id)
 
     def test_verdicts_follow_sign_times_z(self):
-        # Вердикт = знак сигнала × его z по 252 дням. У rb_gap знак −1, поэтому
-        # провал значения вниз это «за лонг», а не «против».
-        # мутация: потерять знак сигнала -> контрарианские ноги (rb_gap, dd252,
-        # futoi) начнут советовать ровно наоборот.
+        # Вердикт = знак сигнала × его z по 252 дням. У dd252 знак −1, поэтому
+        # рост просадки к своей норме (z +0,95) это «против лонга».
+        # мутация: потерять знак сигнала -> контрарианская нога dd252 начнёт
+        # советовать ровно наоборот.
         for sid, verdict in self.expect["active_signals"].items():
             self.assertEqual(self.by_id[sid]["verdict"], verdict, sid)
 
@@ -381,6 +382,83 @@ class TestEraGate(StatesCase):
                          "сигнал эры после 2022 активен в 2010-х")
 
 
+class TestGate(StatesCase):
+    """Ворота позиции: флаги с гистерезисом, режим, статистика режимов (02.09.2026).
+
+    Флаг с гистерезисом ВКЛЮЧАЕТСЯ там же, где сырой бит (иначе разъехались бы ячейка
+    и ворота), а СНИМАЕТСЯ позже — на панели фикстуры это видно по тренду: сырой
+    бит падает на 242-м дне (цена под MA200), флаг ворот — на 248-м (ниже −2 %).
+    """
+
+    def test_текущие_флаги_и_даты(self):
+        want = self.expect["gate"]
+        gate = self.out["gate"]
+        for axis in ("trend", "vol", "bond"):
+            self.assertEqual(gate[axis], want[axis], axis)
+            self.assertEqual(gate["since"][axis], want["since"][axis], axis)
+        self.assertEqual(gate["open"], want["open"])
+        self.assertEqual(gate["cell_code"], self.expect["cell_code"])
+
+    def test_гистерезис_снимает_тренд_позже_сырого_бита(self):
+        # мутация: снять гистерезис (band=0) -> since тренда совпадёт с сырым битом.
+        self.assertGreater(self.out["gate"]["since"]["trend"], self.out["since"]["trend"])
+
+    def test_пороги_выключения_в_расстояниях(self):
+        by_id = {d["id"]: d for d in self.out["distances"]}
+        self.assertEqual(by_id["trend"]["off_threshold"], -2.0)
+        self.assertEqual(by_id["trend"]["on_threshold"], 2.0)
+        # Порог снятия волы — 60-й перцентиль, он НИЖЕ порога включения (80-й).
+        self.assertLess(by_id["vol"]["off_threshold"], by_id["vol"]["threshold"])
+        self.assertIn("60-й перцентиль", by_id["vol"]["text_off"])
+        # −3 % лог = −2,96 % простыми -> −3,0 после округления; выше порога включения.
+        self.assertEqual(by_id["bond"]["off_threshold"], -3.0)
+        self.assertGreater(by_id["bond"]["off_threshold"], by_id["bond"]["threshold"])
+        self.assertIn("снимается выше", by_id["bond"]["text_off"])
+
+    def test_режим_из_трёх(self):
+        self.assertEqual(self.out["regime"]["id"], self.expect["regime"])
+        self.assertEqual(self.out["regime"]["cells_in_regime"], ["bear|stress|stress"])
+        ids = [r["id"] for r in self.constants.REGIMES]
+        self.assertEqual(sorted(self.out["regime_stats"]), sorted(ids))
+        cur = [k for k, v in self.out["regime_stats"].items() if v["current"]]
+        self.assertEqual(cur, [self.expect["regime"]])
+
+    def test_статистика_режима_по_закрытым_месяцам(self):
+        # 300 дней панели -> ~15 месяцев, две последние пары отброшены, как в health;
+        # у каждого режима есть цена и избыток над кэшем с одинаковой формой.
+        for reg in self.out["regime_stats"].values():
+            for part in ("price", "excess"):
+                for key in ("n", "mean_pct", "median_pct", "hit", "ci95_pct"):
+                    self.assertIn(key, reg[part], f"{reg['id']}.{part}")
+                self.assertLessEqual(reg[part]["n"], 13)
+                if reg[part]["n"] >= 2:
+                    lo, hi = reg[part]["ci95_pct"]
+                    self.assertLessEqual(lo, reg[part]["mean_pct"])
+                    self.assertGreaterEqual(hi, reg[part]["mean_pct"])
+            # избыток над кэшем считается по подмножеству месяцев со ставкой
+            self.assertLessEqual(reg["excess"]["n"], reg["price"]["n"])
+
+    def test_лента_ворот_помесячно_и_по_известным_кодам(self):
+        series = self.out["series_gate"]
+        self.assertTrue(series)
+        days = [row[0] for row in series]
+        self.assertEqual(days, sorted(days))
+        self.assertEqual(len(set(d[:7] for d in days)), len(days))
+        known = {self.states.cell_code(*key) for key in self.constants.CELL_STATS}
+        for _day, code in series:
+            self.assertIn(code, known)
+        self.assertEqual(series[-1], [self.expect["last_date"], self.expect["cell_code"]])
+
+    def test_квантиль_t_без_scipy(self):
+        # Табличные значения t(0,975): 1 -> 12,706; 10 -> 2,228; 20 -> 2,086; 60 -> 2,000.
+        t = self.states._t975
+        self.assertAlmostEqual(t(1), 12.706, places=2)
+        self.assertAlmostEqual(t(10), 2.228, places=2)
+        self.assertAlmostEqual(t(20), 2.086, places=2)
+        self.assertAlmostEqual(t(60), 2.000, places=2)
+        self.assertAlmostEqual(t(23), 2.069, places=2)
+
+
 class TestDegenerate(unittest.TestCase):
     def test_empty_panel_does_not_crash(self):
         # Отказ источников не имеет права ронять прогон (контракт §0).
@@ -389,6 +467,8 @@ class TestDegenerate(unittest.TestCase):
         self.assertEqual(out["current"], {})
         self.assertEqual(out["series"], [])
         self.assertEqual(out["distances"], [])
+        self.assertEqual(out["gate"], {})
+        self.assertIsNone(out["regime"])
 
 
 if __name__ == "__main__":

@@ -73,7 +73,11 @@ class TileCase(unittest.TestCase):
         self.store.save_series(sid, {"id": sid, "points": dict(points), "meta": m})
 
     def tile(self, tid, now=NOW):
-        return dict(self.monitors.BUILDERS)[tid](self.store, now)
+        # Снятые с витрины тайлы (cpi_weekly, аудит 02.09.2026) живут функциями
+        # _t_<id> без строки в BUILDERS: их data-path тоже проверяется, чтобы
+        # возврат тайла стоил одной строки, а не починки.
+        fn = dict(self.monitors.BUILDERS).get(tid) or getattr(self.monitors, f"_t_{tid}")
+        return fn(self.store, now)
 
     def vitals(self, t, tid, today=TODAY):
         """Требование №3: на исправных данных статус «ok», asof есть и не в будущем."""
@@ -149,6 +153,15 @@ class TileCase(unittest.TestCase):
                  "2026-07-21", "2026-07-28", "2026-08-04", "2026-08-11"]
         self.put("cpi_weekly", dict(zip(
             weeks, [0.20, 0.18, 0.12, 0.07, 0.10, 0.05, 0.15, 0.10])))
+
+    def seed_expectations(self):
+        """Год ОФЗ 13.65 тридцать дней подряд, последние три — 13.75; ключ 14.0 всё
+        время; RUSFAR 13.9; полгода 13.5. Спред сегодня −0.25, 21 точку назад −0.35."""
+        span = days("2026-08-14", 30)
+        self.put("zcyc_y1", {d: (13.75 if d in span[-3:] else 13.65) for d in span})
+        self.put("zcyc_y0_5", {span[-1]: 13.5})
+        self.put("key_rate", {"2026-07-01": 14.0})
+        self.put("rusfar3m", {"2026-08-14": 13.9})
 
     def seed_ofz(self):
         self.put("ofz_auctions", {"2026-08-06": 61.0, "2026-08-13": 43.2},
@@ -295,7 +308,11 @@ class TestТайлыНаЖивыхДанных(TileCase):
         self.assertEqual(p["positive_days_before"], 0)
         self.assertIn("Вклады 15.6%", t["headline"])
         self.assertIn("дивидендов 7.7%", t["headline"])
-        self.assertIn("-7.9 п.п. не в пользу акций", t["headline"])
+        # Спред — число, а не вердикт (аудит 02.09.2026): «в пользу/не в пользу
+        # акций» снято, вместо него — единственная фаза, где спред работает.
+        self.assertIn("спред -7.9 п.п.; как сигнал работает только в фазе смягчения",
+                      t["headline"])
+        self.assertNotIn("в пользу", t["headline"])
 
     def test_dividends_окно_90_дней_гэп_и_реинвест(self):
         """Суммы выплат, гэп индекса и реинвест — из окна 90 дней, не всего календаря.
@@ -350,6 +367,83 @@ class TestТайлыНаЖивыхДанных(TileCase):
         self.assertIn("консенсус 15.00%", t["headline"])
         self.assertIn("снижение", p["priced_text"])
         self.assertIn("0.60", p["priced_text"])
+        self.assertNotIn("cpi_weekly_4w", p)   # ИПЦ не сидирован — строки нет, не «н/д»
+
+    def test_cb_meeting_строка_недельной_инфляции(self):
+        """Недельный ИПЦ снят с витрины отдельным тайлом (аудит 02.09.2026) и живёт
+        одной строкой здесь, где читается — перед заседанием. Руками: последние
+        четыре недели +0.10, +0.05, +0.15, +0.10 → сумма +0.40, последняя 11.08."""
+        self.seed_cb()
+        self.seed_cpi()
+        t = self.tile("cb_meeting")
+        self.vitals(t, "cb_meeting")
+        p = t["payload"]
+        self.assertEqual(p["cpi_weekly_4w"],
+                         "недельная инфляция за 4 нед.: +0.10%, +0.05%, +0.15%, +0.10% "
+                         "(сумма +0.40%, последняя неделя 11.08)")
+        self.assertEqual(p["cpi_weekly_prints"][-1], ["2026-08-11", 0.1])
+        self.assertEqual(len(p["cpi_weekly_prints"]), 4)
+
+    def test_expectations_четыре_спреда_и_заголовок(self):
+        """Цена ожиданий: год ОФЗ − ключ, Δ21, RUSFAR − ключ, полгода − ключ — все в п.п.
+
+        Руками: 13.75 − 14.0 = −0.25 (в цене 0.25 п.п. смягчения); 21 точку назад
+        13.65 − 14.0 = −0.35 → Δ21 = +0.10; RUSFAR 13.9 − 14.0 = −0.10; полгода
+        13.5 − 14.0 = −0.50. Порог репрайсинга +0.25 не пробит. Мутация «последняя
+        ставка вместо действовавшей» здесь невидима (ставка одна), зато потерянный
+        знак спреда напечатал бы «ужесточения».
+        """
+        self.seed_expectations()
+        t = self.tile("expectations")
+        self.vitals(t, "expectations")
+        self.assertEqual(t["asof"], "2026-08-14")
+        p = t["payload"]
+        self.assertEqual(p["y1_pct"], 13.75)
+        self.assertEqual(p["key_rate_pct"], 14.0)
+        self.assertEqual(p["spread_y1_key_pp"], -0.25)
+        self.assertEqual(p["chg_21d_pp"], 0.1)
+        self.assertEqual(p["spread_rusfar_key_pp"], -0.1)
+        self.assertEqual(p["spread_y05_key_pp"], -0.5)
+        self.assertEqual(p["y05_pct"], 13.5)
+        self.assertEqual(p["repricing_threshold_pp"], 0.25)
+        self.assertFalse(p["repricing"])
+        self.assertEqual(len(p["series"]), 30)
+        self.assertEqual(p["series"][-1], ["2026-08-14", -0.25])
+        self.assertEqual(t["headline"],
+                         "Год ОФЗ 13.75% против ключа 14.00%: в цене 0.25 п.п. смягчения; "
+                         "за 21 день спред +0.10 п.п.")
+        self.assertIn("тень", t["note"])
+        self.assertIn("направление не предсказывает", t["note"])
+
+    def test_expectations_ставка_берётся_действовавшая_в_день_среза(self):
+        """Ключ поднят 05.08 с 14 до 16: точки кривой до 05.08 сравниваются с 14, после —
+        с 16. Мутация «последняя ставка на всё» дала бы Δ21 = 13.75 − 16 − (13.65 − 16)
+        = +0.10 вместо честных −1.90 (шаг ЦБ и есть «репрайсинг» этих трёх недель)."""
+        self.seed_expectations()
+        self.put("key_rate", {"2026-07-01": 14.0, "2026-08-05": 16.0})
+        t = self.tile("expectations")
+        p = t["payload"]
+        self.assertEqual(p["key_rate_pct"], 16.0)
+        self.assertEqual(p["spread_y1_key_pp"], -2.25)
+        self.assertEqual(p["chg_21d_pp"], -1.9)
+        self.assertIn("в цене 2.25 п.п. смягчения", t["headline"])
+
+    def test_expectations_репрайсинг_подписывается(self):
+        self.seed_expectations()
+        span = days("2026-08-14", 30)
+        self.put("zcyc_y1", {d: (14.2 if d in span[-3:] else 13.65) for d in span})
+        t = self.tile("expectations")
+        self.assertEqual(t["payload"]["chg_21d_pp"], 0.55)
+        self.assertTrue(t["payload"]["repricing"])
+        self.assertIn("репрайсинг ожиданий (тень)", t["headline"])
+        self.assertIn("в цене 0.20 п.п. ужесточения", t["headline"])
+
+    def test_expectations_без_ключа_нет_данных(self):
+        span = days("2026-08-14", 5)
+        self.put("zcyc_y1", {d: 13.65 for d in span})
+        t = self.tile("expectations")
+        self.assertEqual(t["status"], "missing")
+        self.assertIn("Источники", t["note"])
 
     def test_cpi_weekly_процент_недели_и_saar(self):
         """Недельные +0.10% остаются +0.10%, годовая оценка — по честной формуле.
@@ -359,6 +453,9 @@ class TestТайлыНаЖивыхДанных(TileCase):
         «+10.00%» — инфляцию, которой нет.
         """
         self.seed_cpi()
+        # Тайл снят с витрины (аудит 02.09.2026), функция осталась: data-path
+        # по-прежнему проверяется, а в BUILDERS его быть не должно.
+        self.assertNotIn("cpi_weekly", dict(self.monitors.BUILDERS))
         t = self.tile("cpi_weekly")
         self.vitals(t, "cpi_weekly")
         self.assertEqual(t["asof"], "2026-08-11")
@@ -482,6 +579,11 @@ class TestТайлыНаЖивыхДанных(TileCase):
         self.assertIn("+6.56", t["headline"])
         self.assertIn("выше своей 120-дневной нормы", t["headline"])
         self.assertIn(f"держателей лонга 12{NBSP}500, шорта 8{NBSP}300", t["headline"])
+        # Вердикт снят (аудит 02.09.2026): знак сигнала сменился в 2024–2026,
+        # заголовок — только факты, нота говорит, что в решение он не входит.
+        self.assertNotIn("контрариан", t["headline"])
+        self.assertIn("в решение не входит", t["note"].lower())
+        self.assertIn("2024–2026", t["note"])
 
     def test_rvi_уровень_и_перцентиль_без_второго_умножения(self):
         """Перцентиль средним рангом, руками: 25 значений, ниже 32.5 ровно 13 →
@@ -582,6 +684,9 @@ class TestТайлыНаЖивыхДанных(TileCase):
         self.assertIn("42% бумаг", t["headline"])
         self.assertIn("+12 п.п. за месяц", t["headline"])
         self.assertNotIn(f"4{NBSP}200", t["headline"])  # двойной масштаб ×100×100
+        # Знак ширины зависит от эры — нота обязана назвать обе (аудит 02.09.2026).
+        self.assertIn("подтверждение до 2022", t["note"])
+        self.assertIn("контрариан в 2025–2026", t["note"])
 
     def test_mcxsm_относительная_сила_со_знаком(self):
         """Отношение малых капп к индексу: рост на 10% за 63 дня — «лучше», не «хуже».
@@ -654,22 +759,32 @@ class TestВсеТайлыРазом(TileCase):
         будущего и без «н/д» в заголовке: «н/д» на полном сторе значит, что тайл
         потерял своё же число — ровно так выглядели все четыре прод-дефекта.
         """
-        for seed in (self.seed_orfr, self.seed_lqdt, self.seed_market,
-                     self.seed_deposit, self.seed_dividends, self.seed_cb,
-                     self.seed_cpi, self.seed_ofz, self.seed_polymarket,
+        # seed_expectations раньше seed_cb: оба кладут key_rate, и для тайла
+        # заседания важнее его собственная ставка (16 %), для ожиданий — любая.
+        for seed in (self.seed_expectations, self.seed_orfr, self.seed_lqdt,
+                     self.seed_market, self.seed_deposit, self.seed_dividends,
+                     self.seed_cb, self.seed_cpi, self.seed_ofz, self.seed_polymarket,
                      self.seed_futoi, self.seed_rvi, self.seed_rub_barrel,
                      self.seed_breadth, self.seed_mcxsm, self.seed_hy,
                      self.seed_retail):
             seed()
         tiles = self.monitors.build_monitors(self.store, NOW)
-        self.assertEqual([t["id"] for t in tiles],
-                         [tid for tid, _ in self.monitors.BUILDERS])
+        ids = [t["id"] for t in tiles]
+        self.assertEqual(ids, [tid for tid, _ in self.monitors.BUILDERS])
         self.assertEqual(len(tiles), 16)
+        # Состав после аудита 02.09.2026: cpi_weekly снят, expectations добавлен.
         expected_ids = {"orfr", "lqdt", "deposit_spread", "dividends", "cb_meeting",
-                        "cpi_weekly", "ofz_auctions", "polymarket", "futoi", "rvi",
+                        "expectations", "ofz_auctions", "polymarket", "futoi", "rvi",
                         "rub_barrel", "sep_node", "breadth", "mcxsm", "hy_spread",
                         "retail"}
-        self.assertEqual({t["id"] for t in tiles}, expected_ids)
+        self.assertEqual(set(ids), expected_ids)
+        # Порядок — порядок на витрине: то, что читается перед решением по ставке,
+        # первым; описательные тайлы — последними.
+        self.assertEqual(ids[:2], ["expectations", "cb_meeting"])
+        self.assertEqual(ids[-2:], ["mcxsm", "retail"])
+        self.assertEqual(ids[2:14], ["orfr", "futoi", "hy_spread", "rub_barrel",
+                                     "deposit_spread", "dividends", "ofz_auctions", "rvi",
+                                     "breadth", "polymarket", "sep_node", "lqdt"])
         for t in tiles:
             with self.subTest(tile=t["id"]):
                 self.vitals(t, t["id"])

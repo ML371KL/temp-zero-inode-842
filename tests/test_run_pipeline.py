@@ -238,5 +238,60 @@ class TestIntradayQuotes(RunCase):
         self.assertEqual(self.run._quotes(NOW)["imoex"]["value"], 2293.32)
 
 
+class TestDecisionInRun(RunCase):
+    """Слой решения в прогоне (02.09.2026): build_full отдаёт позицию, тень изолирована,
+    интрадей берёт вердикт с позицией из прошлого data.json."""
+
+    DAYS = ["2026-08-03", "2026-08-04", "2026-08-05", "2026-08-06", "2026-08-07",
+            "2026-08-10", "2026-08-11"]
+
+    def seed_store(self):
+        self.store.upsert_points("imoex", {d: 2280.0 + i for i, d in enumerate(self.DAYS)},
+                                 {"source": "iss", "status": "ok", "asof": self.DAYS[-1],
+                                  "fetched_at": FETCHED})
+
+    def test_build_full_возвращает_решение_и_тень(self):
+        self.seed_store()
+        core, states, decision, shadow = self.run.build_full(NOW, self.journal)
+        self.assertIn(decision["position"]["state"], ("long", "flat"))
+        self.assertEqual(decision["position"]["decision_day"], self.DAYS[-1])
+        self.assertIsInstance(shadow, dict)
+        self.assertIn("gate", states)
+        self.assertIn("health", core)
+
+    def test_упавшая_тень_не_роняет_прогон(self):
+        # мутация: убрать try/except вокруг тени -> прогон падает целиком из-за блока,
+        # который на позицию не влияет по определению.
+        self.seed_store()
+        broken = mock.Mock(compute_shadow=mock.Mock(side_effect=RuntimeError("тень упала")))
+        with mock.patch.object(self.run, "shadow_mod", broken):
+            _core, _states, decision, shadow = self.run.build_full(NOW, self.journal)
+        self.assertIn("тень упала", shadow.get("error", ""))
+        self.assertTrue(any("тень" in w for w in self.journal.warns))
+        self.assertIsNotNone(decision["position"])
+
+    def test_без_модуля_тени_блок_пустой(self):
+        self.seed_store()
+        with mock.patch.object(self.run, "shadow_mod", None):
+            _core, _states, _decision, shadow = self.run.build_full(NOW, self.journal)
+        self.assertEqual(shadow, {})
+
+    def test_интрадей_берёт_позицию_из_прошлого_data_json(self):
+        # мутация: собирать вердикт заново из core/states -> позиция и тень исчезают
+        # с витрины на весь торговый день.
+        self.seed_store()
+        publish = need(self, "pipeline.publish", "build_payload", "publish")
+        prev = publish.build_payload(
+            core={"value": 0.5, "sign": 1}, states={"current": {"trend": 0, "vol": 1, "bond": 1}},
+            mode="daily", asof="2026-08-10",
+            decision={"position": {"state": "long", "since": "2026-08-07"}},
+            shadow={"note": "тень", "signals": []})
+        publish.publish(prev, "daily", store=None, dry_run=True)
+        payload = self.run.build_payload_for_mode("intraday", NOW, self.journal)
+        self.assertEqual(payload["verdict"]["position"]["state"], "long")
+        self.assertEqual(payload["shadow"]["note"], "тень")
+        self.assertEqual(payload["asof_trading_day"], "2026-08-10")
+
+
 if __name__ == "__main__":
     unittest.main()

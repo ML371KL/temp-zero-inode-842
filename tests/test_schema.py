@@ -60,8 +60,9 @@ class PayloadCase(unittest.TestCase):
                             "fit_size", "MAX_BYTES")
         self.constants = need(self, "pipeline.lib.constants", "SCHEMA_VERSION",
                               "MONITOR_TIERS", "TIER_NOTES", "CELL_STATS")
-        core_mod = need(self, "pipeline.compute.core", "compute_core")
+        core_mod = need(self, "pipeline.compute.core", "compute_core", "monthly_frame")
         states_mod = need(self, "pipeline.compute.states", "compute_states")
+        decision_mod = need(self, "pipeline.compute.decision", "compute_decision")
         monitors_mod = need(self, "pipeline.compute.monitors", "build_monitors")
         self.store_mod = need(self, "pipeline.lib.store", "upsert_points")
 
@@ -75,6 +76,12 @@ class PayloadCase(unittest.TestCase):
         self.expect = panel["expect"]
         self.states = states_mod.compute_states({"dates": panel["dates"],
                                                  "cols": panel["cols"]})
+        # Решение — на той же замороженной панели, что и состояния: ядра у неё нет
+        # (ног нет в фикстуре), и это штатный случай «знак не определён».
+        self.decision = decision_mod.compute_decision(
+            {"dates": panel["dates"], "cols": panel["cols"]},
+            core_mod.monthly_frame({"dates": panel["dates"], "cols": panel["cols"]}),
+            self.states)
         month_panel = {"dates": month_labels(), "cols": {
             "imoex": [3000.0 + 10.0 * i for i in range(MONTHS)],
             "usd_mom63": alternating(True),
@@ -96,7 +103,8 @@ class PayloadCase(unittest.TestCase):
                              "status": "ok", "lag_min": 12}},
             events=[{"ts": GENERATED_AT, "kind": "state_change", "severity": "info",
                      "text": "облигационный флаг включён"}],
-            mode="daily", asof=self.expect["last_date"], generated_at=GENERATED_AT)
+            mode="daily", asof=self.expect["last_date"], generated_at=GENERATED_AT,
+            decision=self.decision, shadow={"note": "тень", "signals": []})
 
     def _restore_env(self):
         if self.prev is None:
@@ -111,8 +119,9 @@ class TestRequiredShape(PayloadCase):
         # пустую страницу без единого сообщения об ошибке.
         for key in ("schema", "generated_at", "run_mode", "asof_trading_day",
                     "stale_after_minutes", "verdict", "core", "states", "monitors",
-                    "sources", "events"):
+                    "sources", "events", "shadow"):
             self.assertIn(key, self.payload)
+        self.assertIsInstance(self.payload["shadow"], dict)
 
     def test_types(self):
         self.assertEqual(self.payload["schema"], self.constants.SCHEMA_VERSION)
@@ -149,6 +158,39 @@ class TestRequiredShape(PayloadCase):
         self.assertEqual(verdict["cell_stats"].get("best_pct"), stats["best_pct"])
         self.assertEqual(verdict["core_value"], self.core["value"])
         self.assertTrue(verdict["rule"].strip())
+        # Режим из трёх — рядом с ячейкой, и он обязан говорить о той же ячейке.
+        self.assertEqual(verdict["regime"]["id"], self.expect["regime"])
+        self.assertIn(self.expect["cell_code"], verdict["regime"]["cells_in_regime"])
+
+    def test_verdict_position_block(self):
+        """Первая строка панели — позиция; её поля читает и фронт, и правило алертов.
+
+        мутация: потерять `state` или `since` -> блок позиции на панели пустой,
+        событие position_change не родится никогда.
+        """
+        pos = self.payload["verdict"]["position"]
+        for key in ("state", "since", "reason_text", "execute", "decision_day",
+                    "next_decision", "comp_daily", "comp_state", "comp_threshold",
+                    "gate_open", "regime", "cash_rate", "conditions", "history",
+                    "switches_per_year"):
+            self.assertIn(key, pos, key)
+        self.assertIn(pos["state"], ("long", "flat"))
+        self.assertTrue(DAY.match(pos["since"]))
+        self.assertTrue(DAY.match(pos["next_decision"]))
+        self.assertEqual(pos["decision_day"], self.expect["last_date"])
+        self.assertEqual(pos["regime"], self.payload["verdict"]["regime"]["id"])
+        self.assertIsInstance(pos["conditions"], list)
+        prev = self.payload["verdict"]["position_prev_rule"]
+        self.assertIn(prev["state"], ("long", "flat"))
+
+    def test_old_style_payload_has_no_position(self):
+        # Обратная совместимость: без решения вердикт собирается как раньше, и фронт
+        # обязан работать с обоими видами payload.
+        old = self.publish.build_payload(core=self.core, states=self.states, monitors=[],
+                                         sources={}, mode="daily",
+                                         asof=self.expect["last_date"])
+        self.assertNotIn("position", old["verdict"])
+        self.assertEqual(old["shadow"], {})
 
     def test_core_block(self):
         core = self.payload["core"]
@@ -163,12 +205,19 @@ class TestRequiredShape(PayloadCase):
             # Механизм обязателен: число без механизма — это гадание, а панель
             # обещает объяснимость (CONTRACT §3).
             self.assertTrue(comp["mechanism"].strip(), comp["id"])
-        self.assertIn(core["health"]["status"], ("ok", "warn", "dead"))
+        self.assertIn(core["health"]["status"], ("ok", "warn", "review"))
+        self.assertTrue(core["health"]["status_text"])
+        self.assertEqual(core["health"]["review_months"], 12)
 
     def test_states_block(self):
         states = self.payload["states"]
-        for key in ("current", "distances", "active_signals", "cells", "series"):
+        for key in ("current", "distances", "active_signals", "cells", "series",
+                    "gate", "regime", "regime_stats", "series_gate"):
             self.assertIn(key, states)
+        gate = states["gate"]
+        for key in ("trend", "vol", "bond", "open", "since", "cell_code", "thresholds"):
+            self.assertIn(key, gate, key)
+        self.assertEqual(sorted(states["regime_stats"]), ["calm", "stress", "toxic"])
         self.assertIn("since", states["current"])
         for dist in states["distances"]:
             for key in ("id", "text", "value", "threshold", "gap_pct"):
@@ -239,9 +288,13 @@ class TestSerialisation(PayloadCase):
         fat = json.loads(json.dumps(self.payload))
         fat["monitors"][0]["payload"]["series"] = [[f"2026-{i % 12 + 1:02d}-01", i]
                                                    for i in range(4000)]
-        data, cut = self.publish.fit_size(fat, limit=20 * 1024)
+        # Лимит — чуть выше базового размера: раздутый ряд тайла обязан вырезаться
+        # первым, а до событий лестница дойти не должна. Абсолютное число здесь
+        # не годится: базовый payload растёт вместе с витриной (позиция, режимы).
+        limit = len(self.publish.dumps(self.payload)) + 1024
+        data, cut = self.publish.fit_size(fat, limit=limit)
         self.assertIn("monitor_series", cut)
-        self.assertLessEqual(len(data), 20 * 1024)
+        self.assertLessEqual(len(data), limit)
         self.assertEqual(len(fat["events"]), len(self.payload["events"]))
 
 

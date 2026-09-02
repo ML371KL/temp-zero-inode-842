@@ -129,6 +129,9 @@ def hours_minutes(minutes):
 # Эмодзи несёт вид события, а не эмоцию: читатель на телефоне отличает их раньше,
 # чем прочитает заголовок. Набор и роль — те же, что у 837/838.
 KIND = {
+    # Позиция — итог ворот и наклона, отдельный слой поверх обоих: своё событие,
+    # в семейство режима не сливается (alerts.REGIME_FAMILY).
+    "position_change":   {"emoji": "🧭", "label": "смена позиции"},
     "core_flip":         {"emoji": "🎯", "label": "смена оценки рынка"},
     "state_cell_change": {"emoji": "🔀", "label": "смена режима рынка"},
     "bond_flag_on":      {"emoji": "⚠️", "label": "сигнал риска"},
@@ -146,8 +149,9 @@ DEFAULT_KIND = {"emoji": "📊", "label": "событие"}
 # (`/usr/local/sbin/dash-notify`): 🔴 сломалось, 🟡 подозрительно, 🟢 починилось.
 OPS_KIND = {
     "source_stale":      "🟡",
-    "health_dead":       "🔴",
-    "health_review_due": "🟡",
+    # health_review заменил health_dead + health_review_due (аудит 02.09.2026): это
+    # не поломка, а достигнутый порог плановой ревалидации — поэтому жёлтый.
+    "health_review":     "🟡",
     "core_missing":      "🔴",
     "lease_lost":        "🟡",
     "payload_oversize":  "🟡",

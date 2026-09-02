@@ -35,22 +35,34 @@ ASOF = "2026-08-11"
 PREV_ASOF = "2026-08-10"
 
 
+def position_block(state):
+    """Блок позиции слоя решения (verdict.position) в объёме правила position_change."""
+    flat = state == "flat"
+    return {"state": state, "since": "2026-08-07",
+            "reason": "gate_close" if flat else "gate_open",
+            "reason_text": ("ворота закрылись: ОФЗ под давлением (просадка RGBI глубже −4%)"
+                            if flat else
+                            "ворота открылись: ОФЗ вышли из стресса (просадка RGBI мельче −3%)"),
+            "cash_rate": 12.9, "execute": "на следующем закрытии"}
+
+
 def payload(core=0.68, trend=0, vol=1, bond=1, asof=ASOF, health="ok",
             cell="bear|stress|stress", monitors=None, sources=None,
-            review_due=False, streak=0):
+            review_due=False, streak=0, position=None):
     """Витрина в объёме, который читают правила алертов."""
     return {
         "asof_trading_day": asof,
         "core": {"value": core, "sign": (0 if core is None else (1 if core > 0 else -1)),
                  "health": {"status": health, "n": 24, "ic_24m": -0.02,
                             "review_due": review_due, "below_zero_months": streak,
-                            "below_since": "2026-01-30" if streak else None,
-                            "review_months": 6}},
+                            "below_since": "2025-09-30" if streak else None,
+                            "review_months": 12}},
         "states": {"current": {"trend": trend, "vol": vol, "bond": bond},
                    "distances": [{"id": "bond", "text": "просадка RGBI −1,2% от максимума"}]},
         "verdict": {"cell_code": cell, "cell_label": "токсичная",
                     "core_label": "умеренный лонг",
-                    "cell_stats": {"mean_fwd1m_pct": -0.55, "hit": 0.4, "n": 12}},
+                    "cell_stats": {"mean_fwd1m_pct": -0.55, "hit": 0.4, "n": 12},
+                    **({"position": position_block(position)} if position else {})},
         "monitors": monitors if monitors is not None else [tile_cb()],
         "sources": sources if sources is not None else {"iss": {"status": "ok"}},
     }
@@ -133,7 +145,8 @@ class TestOnlyTransitions(AlertsCase):
         self.assertEqual(self.sent, [])
 
     def test_first_run_on_clean_machine_is_silent(self):
-        events = self.alerts.run(payload(bond=0, health="dead"), dry_run=False, now=NOW)
+        events = self.alerts.run(payload(bond=0, health="review", review_due=True, streak=12,
+                                         position="flat"), dry_run=False, now=NOW)
         self.assertEqual([e["kind"] for e in events], [])
 
 
@@ -285,14 +298,15 @@ class TestSeedFromPublishedPayload(AlertsCase):
     def test_clean_runner_restores_snapshot_from_data_json(self):
         # Фолбэк GHA поднимается с пустым STATE_DIR каждый раз: без снимка detect
         # молчит по определению, и ровно в аварии VPS канал был глухим.
-        published = payload(core=0.68, bond=1)
+        published = payload(core=0.68, bond=1, position="flat")
         evs = self.alerts.run(payload(core=0.61, bond=0, cell="bear|stress|ok",
-                                      health="dead",
+                                      health="review", review_due=True, streak=12,
+                                      position="long",
                                       sources={"iss": {"status": "error", "lag_min": 4300,
                                                        "asof": "2026-08-05"}}),
                               dry_run=False, now=NOW, seed_payload=published)
         kinds = [e["kind"] for e in evs]
-        for kind in ("buy_window_open", "source_stale", "health_dead"):
+        for kind in ("buy_window_open", "source_stale", "health_review", "position_change"):
             self.assertIn(kind, kinds)
         # Снятый облигационный флаг — часть того же поворота, поэтому он не отдельное
         # сообщение, а подпункт окна входа (см. TestRegimeMerge).
@@ -579,7 +593,7 @@ class TestTexts(AlertsCase):
         prev = {"cell": "bull|calm|ok", "core_value": 0.66, "core_sign": 1, "trend": 1,
                 "vol": 0, "bond": 1, "health": "ok", "key_rate": 15.0, "deposit": 16.0,
                 "orfr_asof": "2026-06-30", "auction_date": "2026-07-29",
-                "sources": {"iss": "ok"}}
+                "position": "long", "sources": {"iss": "ok"}}
         state = {"last": prev, "core_sign_alerted": 1, "core_value_alerted": 0.66,
                  # Якорь депозитной ставки — уровень, о котором СООБЩАЛИ (не
                  # вчерашний снимок): рост меряется от него.
@@ -596,7 +610,8 @@ class TestTexts(AlertsCase):
                  "headline": "ставка выросла",
                  "payload": {"deposit_pct": 16.4, "deposit_asof": ASOF, "spread_pp": 8.1}}]
         bad = payload(core=-0.66, trend=0, vol=1, bond=0, cell="bear|stress|ok",
-                      health="dead", monitors=mons,
+                      health="review", review_due=True, streak=12, position="flat",
+                      monitors=mons,
                       sources={"iss": {"status": "stale", "lag_min": 4300,
                                        "asof": "2026-08-05"}})
         # merge=False — СЫРОЙ выход правил. После слияния семейства режима часть
@@ -621,8 +636,8 @@ class TestTexts(AlertsCase):
         kinds = {e["kind"] for e in self.all_kinds()}
         for kind in ("core_flip", "state_cell_change", "bond_flag_off", "bond_flag_on",
                      "buy_window_open", "cb_reminder", "cb_decision", "orfr_published",
-                     "auction_failed", "deposit_uptick", "source_stale", "health_dead",
-                     "core_missing", "lease_lost", "payload_oversize"):
+                     "auction_failed", "deposit_uptick", "source_stale", "health_review",
+                     "core_missing", "lease_lost", "payload_oversize", "position_change"):
             self.assertIn(kind, kinds)
 
     def test_every_event_carries_a_number(self):
@@ -900,9 +915,17 @@ class TestHealthReviewEvent(AlertsCase):
     потеря события навсегда при недоставке.
     """
 
-    def due(self, now=NOW, streak=7):
-        return self.alerts.run(payload(review_due=True, streak=streak, health="dead"),
+    def due(self, now=NOW, streak=12):
+        return self.alerts.run(payload(review_due=True, streak=streak, health="review"),
                                dry_run=False, now=now)
+
+    def test_ниже_нуля_без_порога_молчит(self):
+        # ГЛАВНОЕ изменение 02.09.2026: первый месяц ниже нуля — не событие. Прежний
+        # health_dead слал приговор на IC −0,08 при интервале, накрывающем ноль втрое.
+        # мутация: вернуть тревогу на статус warn -> здесь появится событие.
+        self.seed(payload())
+        evs = self.alerts.run(payload(health="warn", streak=5), dry_run=False, now=NOW)
+        self.assertEqual([e["kind"] for e in evs if e["kind"].startswith("health")], [])
 
     def kinds(self, events):
         return [e["kind"] for e in events]
@@ -910,9 +933,9 @@ class TestHealthReviewEvent(AlertsCase):
     def test_переход_даёт_ровно_одно_событие(self):
         self.seed(payload())
         first = self.due()
-        self.assertEqual(self.kinds(first).count("health_review_due"), 1)
+        self.assertEqual(self.kinds(first).count("health_review"), 1)
         second = self.due(NOW + timedelta(days=1))
-        self.assertEqual(self.kinds(second).count("health_review_due"), 0)
+        self.assertEqual(self.kinds(second).count("health_review"), 0)
 
     def test_уходит_только_в_ops_канал(self):
         # мутация: убрать kind из OPS_KINDS -> санитарное событие уезжает в канал
@@ -928,9 +951,9 @@ class TestHealthReviewEvent(AlertsCase):
         self.seed(payload())
         self.due()
         feed = self.alerts.payload_events()
-        self.assertFalse([e for e in feed if e.get("kind") == "health_review_due"])
+        self.assertFalse([e for e in feed if e.get("kind") == "health_review"])
         self.assertFalse([e for e in self.state().get("feed") or []
-                          if e.get("kind") == "health_review_due"])
+                          if e.get("kind") == "health_review"])
 
     def test_недоставленное_событие_не_теряется(self):
         # ГЛАВНОЕ: снимок писался безусловно, поэтому недоставленное событие
@@ -938,13 +961,13 @@ class TestHealthReviewEvent(AlertsCase):
         # а заново правило его не породит, пока держится та же серия.
         self.seed(payload())
         self.online = False
-        self.assertEqual(self.kinds(self.due()).count("health_review_due"), 1)
+        self.assertEqual(self.kinds(self.due()).count("health_review"), 1)
         self.assertFalse(self.state()["last"].get("health_review_due"),
                          "защёлка не имеет права защёлкнуться без доставки")
         self.online = True
         # Прошли сутки — очередь повторов уже пуста, спасти может только защёлка.
         again = self.due(NOW + timedelta(hours=30))
-        self.assertEqual(self.kinds(again).count("health_review_due"), 1)
+        self.assertEqual(self.kinds(again).count("health_review"), 1)
 
     def test_доставленное_событие_защёлкивается(self):
         self.seed(payload())
@@ -963,15 +986,15 @@ class TestHealthReviewEvent(AlertsCase):
         os.environ.pop("ERROR_BOT_TOKEN")
         self.seed(payload())
         batch = self.due()
-        self.assertEqual(self.kinds(batch).count("health_review_due"), 1)
-        self.assertEqual([e["outcome"] for e in batch if e["kind"] == "health_review_due"],
+        self.assertEqual(self.kinds(batch).count("health_review"), 1)
+        self.assertEqual([e["outcome"] for e in batch if e["kind"] == "health_review"],
                          [self.telegram.OFF])
         self.assertFalse(self.state()["last"].get("health_review_due"),
                          "защёлка сработала, хотя событие никуда не ушло")
         # Канал настроили — находка обязана дойти.
         os.environ["ERROR_BOT_TOKEN"] = "тест-ops"
         again = self.due(NOW + timedelta(hours=30))
-        self.assertEqual(self.kinds(again).count("health_review_due"), 1)
+        self.assertEqual(self.kinds(again).count("health_review"), 1)
         self.assertIn("§7", " ".join(self.by_channel.get("ops") or []))
 
 
@@ -1168,47 +1191,104 @@ class TestNexusMirror(AlertsCase):
         self.assertEqual(self.sent, [])
 
 
-class HealthDeadWordingCase(AlertsCase):
+class HealthReviewWordingCase(AlertsCase):
     """Тревога о здоровье не выносит модели приговор, которого нет в данных.
 
     01.09.2026 владельцу ушло «модель перестала работать на свежей истории» и
     «знаку оценки доверять нельзя» — на IC −0,08 при интервале, накрывающем ноль
-    втрое, и одном месяце ниже нуля из шести, которые требует регламент §7.
-    Число верное, вывод — нет.
+    втрое, и одном месяце ниже нуля. С 02.09.2026 тревога одна (health_review) и
+    приходит только на пороге ×12; её текст — про плановую ревалидацию.
     """
 
     def fire(self, **hl):
-        base = {"status": "dead", "n": 24, "ic_24m": -0.08,
-                "ic_ci95": [-0.49, 0.33], "below_zero_months": 1,
-                "review_months": 6, "review_due": False}
+        base = {"status": "review", "n": 24, "ic_24m": -0.12,
+                "ic_ci95": [-0.53, 0.29], "below_zero_months": 12,
+                "below_since": "2025-09-30", "review_months": 12, "review_due": True}
         base.update(hl)
         p = payload()
         p["core"]["health"] = base
         self.seed(payload())
         evs = self.alerts.run(p, dry_run=False, now=NOW)
-        return next(e for e in evs if e["kind"] == "health_dead")
+        return next(e for e in evs if e["kind"] == "health_review")
 
-    def test_заголовок_описывает_факт_а_не_приговор(self):
+    def test_заголовок_описывает_порог_а_не_приговор(self):
         ev = self.fire()
         self.assertNotIn("перестала работать", ev["title"])
-        self.assertIn("минус", ev["title"])
+        self.assertIn("порог", ev["title"])
 
     def test_интервал_и_счётчик_месяцев_в_факте(self):
         ev = self.fire()
         self.assertIn("интервал", ev["fact"])
-        self.assertIn("накрывает ноль", ev["fact"])
-        self.assertIn("порог регламента — 6", ev["fact"])
+        self.assertIn("12 месяцев подряд", ev["fact"])
+        self.assertIn("сентябрь 2025", ev["fact"])
 
-    def test_смысл_не_запрещает_панель_а_объясняет_регламент(self):
+    def test_смысл_называет_реколибровку_а_не_позицию(self):
         ev = self.fire()
         self.assertNotIn("доверять нельзя", ev["meaning"])
-        self.assertIn("шести месяцев", ev["meaning"])
+        self.assertIn("реколибровка", ev["meaning"])
+        self.assertIn("не сокращение позиции", ev["meaning"])
 
-    def test_узкий_интервал_не_называется_накрывающим_ноль(self):
-        # Если однажды окно вырастет и интервал перестанет накрывать ноль —
-        # оговорка обязана исчезнуть, иначе она превратится в мантру.
-        ev = self.fire(ic_24m=-0.55, ic_ci95=[-0.70, -0.40])
-        self.assertNotIn("накрывает ноль", ev["fact"])
+    def test_без_интервала_факт_остаётся_целым(self):
+        ev = self.fire(ic_ci95=None)
+        self.assertNotIn("интервал", ev["fact"])
+        self.assertRegex(ev["fact"], r"\d")
+
+
+class TestPositionChange(AlertsCase):
+    """Событие слоя решения: смена позиции «акции ↔ деньги» (02.09.2026)."""
+
+    def test_переход_в_деньги(self):
+        self.seed(payload(position="long"))
+        evs = self.alerts.run(payload(position="flat"), dry_run=False, now=NOW)
+        ev = next(e for e in evs if e["kind"] == "position_change")
+        self.assertEqual(ev["title"], "Позиция: акции → деньги")
+        self.assertEqual(ev["before"], "акции")
+        self.assertEqual(ev["after"], "деньги (ставка 12,9%)")
+        self.assertIn("ворота закрылись", ev["detail"].lower())
+        self.assertIn("следующем закрытии", ev["detail"])
+        self.assertIn("07.08.2026", ev["detail"])
+        self.assertEqual(ev["severity"], "warn")
+
+    def test_переход_в_акции(self):
+        self.seed(payload(position="flat"))
+        evs = self.alerts.run(payload(position="long"), dry_run=False, now=NOW)
+        ev = next(e for e in evs if e["kind"] == "position_change")
+        self.assertEqual(ev["title"], "Позиция: деньги → акции")
+        self.assertEqual((ev["before"], ev["after"]), ("деньги (ставка 12,9%)", "акции"))
+        self.assertEqual(ev["severity"], "info")
+
+    def test_без_смены_молчит(self):
+        self.seed(payload(position="flat"))
+        evs = self.alerts.run(payload(position="flat"), dry_run=False, now=NOW)
+        self.assertFalse([e for e in evs if e["kind"] == "position_change"])
+
+    def test_снимок_без_позиции_не_переход(self):
+        # Первый прогон новой версии поверх старого снимка (без position) — молча.
+        self.seed(payload())
+        evs = self.alerts.run(payload(position="long"), dry_run=False, now=NOW)
+        self.assertFalse([e for e in evs if e["kind"] == "position_change"])
+        again = self.alerts.run(payload(position="flat"), dry_run=False,
+                                now=NOW + timedelta(days=1))
+        self.assertEqual([e["kind"] for e in again if e["kind"] == "position_change"],
+                         ["position_change"])
+
+    def test_не_сливается_с_семейством_режима(self):
+        # Смена режима и смена позиции — две новости: позиция есть итог ворот и
+        # наклона, и её событие не уходит подпунктом в «Что за этим стоит».
+        self.seed(payload(position="long", vol=0, bond=1, cell="bear|calm|stress"))
+        evs = self.alerts.run(payload(position="flat", vol=1, bond=1,
+                                      cell="bear|stress|stress"), dry_run=False, now=NOW)
+        kinds = [e["kind"] for e in evs]
+        self.assertIn("position_change", kinds)
+        self.assertIn("state_cell_change", kinds)
+        self.assertNotIn("position_change", str([e.get("merged") for e in evs]))
+
+    def test_уходит_в_канал_рынка_и_в_ленту(self):
+        self.seed(payload(position="long"))
+        self.alerts.run(payload(position="flat"), dry_run=False, now=NOW)
+        self.assertTrue(any("Позиция" in t for t in self.by_channel.get("alerts") or []))
+        feed = self.alerts.payload_events()
+        self.assertTrue([e for e in feed if e["kind"] == "position_change"])
 
 
 if __name__ == "__main__":

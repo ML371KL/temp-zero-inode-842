@@ -735,12 +735,90 @@
     return box.node;
   }
 
+  /* ───────────────────────────────── 8. Лента позиции (акции / деньги) */
+
+  /** RLE-отрезки [[дата, 0|1]] с 2004 года: акции — акцентная заливка, деньги —
+   *  нейтральная середина шкалы с волосяной рамкой (та же, что у ленты ячеек:
+   *  --mid к поверхности даёт 1,23, и без рамки «деньги» читались бы дырой).
+   *
+   *  Ось времени пропорциональна ДАТАМ, а не числу отрезков: смен около трёх в
+   *  год, и равные ширины врали бы про длительность — год в деньгах выглядел бы
+   *  как неделя. Цвет один и не полярный: позиция — не оценка рынка, поэтому
+   *  «акции» нарисованы акцентом, а не синим «плюсом», и рядом всегда легенда. */
+  function positionRibbon(rle, opts) {
+    opts = opts || {};
+    var H = opts.height || 56;
+    var box = chartBox(H);
+    var segs = (rle || []).filter(function (r) { return r && r[0] != null && (+r[1] === 0 || +r[1] === 1); })
+      .map(function (r) { return { t: Date.parse(String(r[0])), d: String(r[0]), v: +r[1] }; })
+      .filter(function (s) { return isFinite(s.t); });
+    var endT = opts.end ? Date.parse(String(opts.end)) : NaN;
+    box.render(function (W) {
+      if (!segs.length) return emptyFig(W, H, 'нет данных: история позиции пуста');
+      var padT = 8, bandH = 22;
+      var lastT = segs[segs.length - 1].t;
+      var t0 = segs[0].t, t1 = isFinite(endT) && endT > lastT ? endT : lastT + 30 * 864e5;
+      var x = function (t) { return (t - t0) / (t1 - t0) * W; };
+      var kids = [];
+      segs.forEach(function (s, i) {
+        var a = x(s.t), b = x(i + 1 < segs.length ? segs[i + 1].t : t1);
+        kids.push(el('rect', {
+          x: a, y: padT, width: Math.max(0.7, b - a + 0.4), height: bandH,
+          fill: s.v ? tok('--accent') : tok('--mid')
+        }));
+      });
+      kids.push(el('rect', {
+        x: 0.5, y: padT + 0.5, width: Math.max(1, W - 1), height: bandH - 1,
+        fill: 'none', stroke: tok('--axis'), 'stroke-width': 1
+      }));
+      // Годовые засечки — редкие, чтобы подписи не столкнулись (как у ленты ячеек).
+      var y0 = new Date(t0).getUTCFullYear(), y1 = new Date(t1).getUTCFullYear();
+      var step = Math.max(1, Math.round((y1 - y0 + 1) / Math.max(3, Math.floor(W / 78))));
+      for (var yr = y0 + 1; yr <= y1; yr++) {
+        if ((yr - y0) % step) continue;
+        var px = x(Date.UTC(yr, 0, 1));
+        if (px < 0 || px > W) continue;
+        kids.push(el('line', { x1: px, y1: padT + bandH, x2: px, y2: padT + bandH + 4, 'class': 'axisline' }));
+        kids.push(el('text', {
+          x: px, y: padT + bandH + 17, 'class': 'tick',
+          'text-anchor': px < 14 ? 'start' : (px > W - 14 ? 'end' : 'middle')
+        }, [document.createTextNode(String(yr))]));
+      }
+      var cross = el('rect', { x: 0, y: padT, width: 2, height: bandH, fill: 'none', stroke: tok('--ink'), 'stroke-width': 1.5, opacity: 0 });
+      kids.push(cross);
+      var hit = el('rect', { 'class': 'hit', x: 0, y: padT, width: W, height: bandH });
+      kids.push(hit);
+      var last = segs[segs.length - 1];
+      var svg = el('svg', {
+        'class': 'fig', width: W, height: H, viewBox: '0 0 ' + W + ' ' + H, role: 'img',
+        'aria-label': (opts.aria || 'Позиция по годам') + ': ' + segs.length + ' отрезков с ' +
+          fmtDay(segs[0].d) + ', сейчас ' + (last.v ? 'акции' : 'деньги') + ' с ' + fmtDay(last.d)
+      }, kids);
+      var tip = box.tip;
+      hit.addEventListener('pointermove', function (e) {
+        var r = svg.getBoundingClientRect();
+        var t = t0 + clamp((e.clientX - r.left) / W, 0, 1) * (t1 - t0);
+        var i = 0;
+        for (var k = 0; k < segs.length; k++) if (segs[k].t <= t) i = k;
+        var a = x(segs[i].t), b = x(i + 1 < segs.length ? segs[i + 1].t : t1);
+        cross.setAttribute('x', a); cross.setAttribute('width', Math.max(1.5, b - a)); cross.setAttribute('opacity', 1);
+        showTip(tip, (a + b) / 2, padT + bandH / 2, [
+          { title: fmtDay(segs[i].d) + (i + 1 < segs.length ? ' — ' + fmtDay(segs[i + 1].d) : ' — сейчас') },
+          { k: 'позиция', v: segs[i].v ? 'акции' : 'деньги', color: segs[i].v ? tok('--accent') : null }
+        ]);
+      });
+      hit.addEventListener('pointerleave', function () { cross.setAttribute('opacity', 0); hideTip(tip); });
+      return svg;
+    });
+    return box.node;
+  }
+
   global.Charts = {
     el: el, h: h, tok: tok, isNum: isNum, clamp: clamp,
     fmtNum: fmtNum, fmtDay: fmtDay, fmtMon: fmtMon,
     polarityScale: polarityScale, signedHistory: signedHistory, spark: spark,
     stateRibbon: stateRibbon, thresholdBar: thresholdBar,
-    miniSeries: miniSeries, flowBars: flowBars,
+    miniSeries: miniSeries, flowBars: flowBars, positionRibbon: positionRibbon,
     flush: flush, resetResize: resetResize
   };
 })(window);

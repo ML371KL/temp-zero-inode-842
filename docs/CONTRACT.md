@@ -53,6 +53,8 @@ list_dirty() -> [series_id]                        # для выгрузки в 
 
 `required=true` стоит у шести: `imoex`, `key_rate`, `mcftr`, `rgbi`, `usd_cbr`, `zcyc`.
 
+Аудит 02.09.2026 добавил ряд `hi2_market` (role `monitor`, fetcher `algopack.hi2_market`: индекс концентрации участников по всему рынку с платного шлюза ALGOPACK, 2 запроса в день, публикация 18:46 МСК, бесплатного дублёра нет — при недоступности ряд стареет, теневой сигнал молчит) и производные ряды тени `shadow_<id>` (role `shadow`, fetcher `None`, cadence `derived`): их пишет `compute/shadow.py` через `store.upsert_points`, чтобы копить историю сигналов вне выборки; сторож свежести и `_coverage` их протухшими не считают. Актуальный состав — `pipeline/lib/registry.py`.
+
 Режимы прогона (`registry.MODES`) — какие ряды тянет каждый такт: `intraday` (9 рядов), `daily` (23), `weekly` (4), `monthly` (6), `manual` (2). Ряд, не попавший ни в один режим, не обновляется никогда и при этом выглядит исправным — за этим следит `ops/check_schedule.py` в CI.
 
 ## 3. `data.json` (то, что читает фронт)
@@ -75,7 +77,21 @@ list_dirty() -> [series_id]                        # для выгрузки в 
                    "median_fwd1m_pct": 0.64, "worst_pct": -30.0, "best_pct": 18.0},
     "rule": "…текст правила дня…",
     "core_value": 0.50,
-    "core_label": "умеренный лонг"
+    "core_label": "умеренный лонг",
+    "regime": {"id": "toxic", "label": "ворота закрыты", "cells_in_regime": ["bear|stress|stress"]},
+    "position": {"state": "flat", "since": "2026-05-22", "reason": "comp_neg",
+                 "reason_text": "оценка рынка ушла ниже −0,2 в день решения",
+                 "execute": "на следующем закрытии", "decision_day": "2026-09-01",
+                 "is_decision_day": false, "next_decision": "2026-09-04",
+                 "comp_daily": 0.8101, "comp_state": 1, "comp_state_since": "2026-07-10",
+                 "comp_threshold": 0.2, "gate_open": false, "gate_since": "2026-06-29",
+                 "flags": {"trend": 0, "vol": 1, "bond": 1}, "regime": "toxic",
+                 "cash_rate": 12.89, "cash_rate_asof": "2026-09-01",
+                 "conditions": ["ворота откроются, когда снимется ЛЮБОЙ из флагов: …"],
+                 "history": [["2004-01-06", 0], ["2004-05-07", 1], …],
+                 "switches_per_year": 1.2, "start": "2004-01-06"},
+    "position_prev_rule": {"state": "flat", "since": "2026-05-29", "reason": "comp_neg",
+                           "rule": "прежнее правило: сырые флаги без гистерезиса, …"}
   },
   "core": {
     "value": 0.50,
@@ -95,10 +111,11 @@ list_dirty() -> [series_id]                        # для выгрузки в 
        "spark": [[date, z], …]}
     ],
     "series": [["2004-01-31", 0.4], …],
-    "health": {"ic_24m": 0.18, "n": 24, "status": "ok|warn|dead",
+    "health": {"ic_24m": 0.18, "n": 24, "status": "ok|warn|review",
+               "status_text": "связь видна",
                "window_months": 24, "coverage": 1.0, "months_total": 320,
                "below_zero_months": 0, "below_since": null,
-               "review_months": 6, "review_due": false,
+               "review_months": 12, "review_due": false,
                "sign_since": "2026-06-30", "sign_age_days": 43,
                "asof_month": "2026-06-30",
                "series": [["2006-01-31", 0.31], …],
@@ -117,7 +134,22 @@ list_dirty() -> [series_id]                        # для выгрузки в 
                         "verdict": "против лонга", "why": "в стрессе IC +0.41",
                         "gate": "Волатильность: стресс"}],
     "cells": [{"code": "bull|calm|ok", "mean_fwd1m_pct": 0.93, "n": 110, "hit": 0.59}],
-    "series": [["2004-01-31", "bear|calm|ok"], …]
+    "series": [["2004-01-31", "bear|calm|ok"], …],
+    "gate": {"trend": 0, "vol": 1, "bond": 1, "open": false, "open_since": "2026-06-29",
+             "since": {"trend": "2026-04-29", "vol": "2026-06-29", "bond": "2026-06-19"},
+             "cell_code": "bear|stress|stress",
+             "thresholds": {"trend_band": 0.02, "vol_on_quantile": 0.8, "vol_off_quantile": 0.6,
+                            "bond_on": -0.04, "bond_off": -0.03},
+             "asof": "2026-09-01"},
+    "regime": {"id": "toxic", "label": "ворота закрыты", "cells_in_regime": ["bear|stress|stress"]},
+    "regime_stats": {"toxic": {"id": "toxic", "label": "ворота закрыты",
+                               "cells": ["bear|stress|stress"], "current": true,
+                               "price": {"n": 33, "mean_pct": -3.07, "median_pct": 0.36,
+                                         "hit": 0.515, "ci95_pct": [-7.54, 1.41]},
+                               "excess": {"n": 21, "mean_pct": -2.95, "median_pct": -0.27,
+                                          "hit": 0.429, "ci95_pct": [-8.14, 2.23]}},
+                     "stress": {…}, "calm": {…}},
+    "series_gate": [["2004-01-30", "bull|calm|ok"], …]
   },
   "monitors": [
     {"id": "orfr", "title": "Потоки ОРФР", "tier": "monitor", "status": "ok",
@@ -128,8 +160,11 @@ list_dirty() -> [series_id]                        # для выгрузки в 
   "quotes": {"imoex": {"value": 2301.43, "chg_pct": -0.96, "asof": "2026-08-12",
                        "updatetime": "19:00:11", "intraday": true, "delay_min": 0,
                        "age_min": 0.0, "instrument": "IMOEX", "label": "Индекс МосБиржи"}},
-  "events": [{"ts": "2026-08-11T16:05:00Z", "kind": "state_change|core_flip|cb",
-              "severity": "info|warn", "text": "…", "comment": "…|null"}]
+  "events": [{"ts": "2026-08-11T16:05:00Z", "kind": "state_change|core_flip|position_change|cb",
+              "severity": "info|warn", "text": "…", "comment": "…|null"}],
+  "shadow": {"note": "Тень: считается и копит историю, на позицию не влияет …",
+             "asof": "2026-09-01", "signals": [{"id": "repricing", "…": "…"}],
+             "shadow_position": {"…": "…"}}
 }
 ```
 
@@ -145,6 +180,14 @@ list_dirty() -> [series_id]                        # для выгрузки в 
 - **`sign` — знак вхождения, и фронт рисует `sign × z`, а не сырой `z`.** У компонентов ядра (`core.components[]`) и сигналов второго ряда (`states.active_signals[]`) есть `sign` (−1|1): у ноги бочки и части сигналов он отрицательный, и положительный z толкает композит ВНИЗ. Показать сырой z — значит нарисовать карточку «за лонг», которая работает против него; поэтому крупное число карточки — вклад (`contrib = sign × z` у компонентов; фронт считает то же из `z` и `sign` у сигналов), `verdict` тоже считается по вкладу. Рядом у компонентов: `tier` (уровень доказательности A/B), `protected` (нога включена флагом «не защищена» — REGIME §4), `available` (нога дожила до текущего месяца; при false `weight = 0`). У сигналов второго ряда `gate` — словами, каким условием текущая ячейка включила сигнал (сигналы с закрытыми воротами в списке не появляются вовсе).
 - **`states.current.bit_asof` — дата последнего НАБЛЮДЕНИЯ, на котором стоит каждый бит.** Ряд-питатель может умереть, а `last_valid` дальше лимита протяжки честно возвращает значение произвольной давности: умерший ряд RGBI показывал «облигации спокойны» как текущее состояние, и ворота стояли открытыми, пока RGBI реально падал (аудит 18.08.2026). Модель это поле не меняет — это подпись: фронт сравнивает `bit_asof` с `asof_trading_day` и при отставании больше 7 суток пишет на бите «данные от …» вместо «с …». `since` (дата, с которой бит в текущем значении) дублируется в двух местах — `states.since` и `states.current.since` — намеренно: дублировать три даты дешевле, чем спорить с фронтом о пути.
 
+- **`verdict.position` — первая строка панели, и это ИТОГ, а не совет.** `state` — `long` (акции) или `flat` (деньги); позиция = ворота открыты (`gate_open`) И знак наклона `comp_state` = +1. Ворота — флаги `states.gate` с гистерезисом, читаются ежедневно; знак — по дневному композиту `comp_daily` с порогом `comp_threshold` (±0,2), решается ТОЛЬКО в последний торговый день недели (`is_decision_day`, `next_decision`). `since` — день решения последней смены, `reason` ∈ {`gate_close`, `comp_neg`, `gate_open`, `comp_pos`, `entry`}, `reason_text` — то же словами, `execute` — «на следующем закрытии» (позиция по закрытию дня t действует с закрытия t+1). `conditions` — что должно случиться, чтобы позиция сменилась; `history` — RLE позиций с 2004 (только смены); `cash_rate` — ставка вкладов, по которой считается «деньги». `position_prev_rule` — та же позиция по прежнему правилу (сырые биты, закрытый месяц, ±0,1) для сравнения в первые месяцы. Отсутствие `verdict.position` = старый payload: блок не рисовать, ничего не ломать.
+- **`states.gate` — флаги С ГИСТЕРЕЗИСОМ, `states.current` — сырые биты, и они расходятся намеренно.** Включаются оба в одной точке (цена под MA200 / вола выше p80 / RGBI глубже −4 %), а снимаются флаги ворот позже: тренд ниже −2 % к MA200 (бык — выше +2 %), вола ниже p60, RGBI выше −3 % (`gate.thresholds`, `distances[].off_threshold` / `text_off`). Ячейка, CELL_STATS и второй ряд по-прежнему стоят на сырых битах; ворота позиции — на `gate`. `gate.open` учитывает и то, что сырой бит этого дня определён: мёртвый ряд закрывает ворота.
+- **`states.regime` / `regime_stats` — три режима поверх восьми ячеек.** Ячейки внутри режима статистически неразличимы (аудит 02.09.2026, F2), поэтому витрина говорит о режиме, а таблица ячеек остаётся справочной. `regime_stats[id].price` — форвардный месяц по цене, `excess` — за вычетом ставки вкладов /12 (месяцы без ставки пропущены, поэтому `n` меньше); `mean_pct`/`median_pct` — ЛОГАРИФМИЧЕСКИЕ проценты ×100, как `mean_fwd1m_pct` в CELL_STATS; `ci95_pct` — t-интервал среднего; только закрытые месяцы (две последние пары отброшены, как в health).
+- **`core.health.status` ∈ {ok, warn, review}; `dead` упразднён.** `warn` — «связи на этом окне не видно» (при n=24 интервал ±0,41 накрывает ноль — это не поломка); `review` — ТОЛЬКО при `below_zero_months` ≥ `review_months` (12): плановая ревалидация состава, протокол «реколибровка, не сокращение позиции». `status_text` — та же фраза словами для карточки.
+- **`shadow` — на позицию не влияет.** Сигналы, которые считаются и копят историю (constants.SHADOW_NOTE); блок может быть `{}` (тень не считалась) или `{"error": …}` (упала — прогон это не остановило). Состав сигналов описан в `docs/INDICATORS.md`.
+- **Форма `shadow` для фронта.** `{note, asof, signals: [...], shadow_position: {...}}`. Сигнал: `id, label, group (rates|legs|flows|gate|retail_era), value, unit (z|п.п.|доля|%|млрд ₽), asof, state (0|1, null у непрерывных), status (ok|error|no_series|no_data|warming), note, history (≤24 месячных точек [дата, значение]), history_saved`; у `repricing` дополнительно `state_daily`, `state_month_end`, `month_end_date`, `threshold_pp`, `spread_pp` (в теневой позиции читается бит на конце месяца); у теневых ног (`usd_ma200`, `brent_usd_gap`, `hi2_nf21z`) — `sign`, `contrib = sign × value`, `raw`. Сигналы: `repricing`, `usd_ma200`, `brent_usd_gap`, `hi2_nf21z`, `breadth_early`, `volume_capitulation`, `futoi_gross`, `dividend_season`, `rotation_trigger`, `trades_contrarian` (последние пять — группа `retail_era`). Ошибка одного сигнала — его `status`, не блока. `shadow_position` — позиция по правилу «пакет + бит репрайсинга, читаемый на конце месяца» (P3m): `status` (`ok` | `unavailable` с `reason`-текстом), `state` (`long|flat`), `since`, `reason` (коды автомата плюс `es_exit|es_block|es_clear`), `es_now`, `main_state`, `differs_from_main`, `diff_days_5y`, `switches_per_year`, `history` (RLE с 2004-01-06), `note`. Фронт рисует тень отдельным разделом после мониторов пунктирными карточками: значение с единицей, бит словами «включён / выключен» (чернилами, не статусным цветом — у тени нет права выглядеть сигналом), дата, нота, мини-история; теневая позиция — отдельной карточкой с лентой. Без `shadow` раздел не рисуется.
+- **`monitors[]` — 16 тайлов, `expectations` вместо `cpi_weekly`.** Порядок из `monitors.BUILDERS`: `expectations`, `cb_meeting`, `orfr`, `futoi`, `hy_spread`, `rub_barrel`, `deposit_spread`, `dividends`, `ofz_auctions`, `rvi`, `breadth`, `polymarket`, `sep_node`, `lqdt`, `mcxsm`, `retail`. Payload `expectations` («Цена ожиданий по ставке», тир B): `y1_pct`, `y05_pct`, `key_rate_pct`, `rusfar3m_pct`, `spread_y1_key_pp` (крупное число: год ОФЗ − ключ), `spread_y05_key_pp`, `spread_rusfar_key_pp`, `chg_21d_pp` (Δ за 21 торговый день), `repricing_threshold_pp` (0,25), `repricing` (bool — рост спреда больше порога, детектор турбулентности из тени), `series` (120 дн), `key_rate_asof`/`rusfar_asof` (их читает `tileAsof`, когда `asof` тайла в будущем). Фронт печатает четыре числа и мини-историю; вердикта тайл не выносит — как уровень спред направление не предсказывает. `cb_meeting` несёт строку `cpi_weekly_4w` (текст) и `cpi_weekly_prints` — недельный ИПЦ переехал сюда (фронт печатает любое строковое поле payload, начинающееся с `cpi`). `futoi` и `breadth` — тир `monitor`; заголовок `futoi` без вердикта «контрариан за/против».
+
 Дополнительные объекты: `history/daily.json` (`{"imoex": [[d,v]…], "core": …, "rgbi": …, "states": …}`, прореженно до 2004), `history/monitors.json`.
 
 ## 4. Модули пайплайна
@@ -156,7 +199,8 @@ pipeline/
        telegram,nexus,commentary,wording,xlsx}.py  + lib/ca/ (закреплённые корни TLS)
   fetch/{iss,cbr,minfin,consultant,tg,rosstat,investfunds,polymarket,orfr,moex_press,
          auctions,dividends,tinvest,external,manual}.py
-  compute/{panel,core,states,monitors,health}.py
+  compute/{panel,core,states,decision,shadow,monitors,health}.py
+  fetch/algopack.py      # HI2 (ALGOPACK), ряд hi2_market
   publish.py  alerts.py
 ```
 
@@ -170,7 +214,14 @@ build_panel(store) -> {"dates": [YYYY-MM-DD…], "cols": {"usd_mom63": [float|No
 # compute/core.py
 compute_core(panel) -> {"value","sign","sign_since","components":[…],"series":[…],"health":{…}}
 # compute/states.py
-compute_states(panel) -> {"current":{…},"since":{…},"distances":[…],"active_signals":[…],"series":[…]}
+compute_states(panel) -> {"current":{…},"since":{…},"distances":[…],"active_signals":[…],"series":[…],
+                          "gate":{…},"regime":{…},"regime_stats":{…},"series_gate":[…]}
+# compute/decision.py (аудит 02.09.2026)
+daily_composite(panel, mf) -> [float|None…]          # дневной композит «как compute_core любым днём»
+run_automaton(dates, gate_open, comp_state, is_decision_day, es=None) -> (pos, reasons)
+compute_decision(panel, mf, states) -> {"position":{…},"position_prev_rule":{…},"daily":{…}}
+# compute/shadow.py — только стандартная библиотека, каждый сигнал в своём try
+compute_shadow(store, panel, states, decision, now) -> {"note","asof","signals":[…],"shadow_position":{…}}
 # compute/monitors.py
 build_monitors(store) -> [ {…tile…} ]
 # publish.py
@@ -184,9 +235,9 @@ publish(payload, mode) -> None    # лиз → PUT data.json → PUT history/* �
 
 ## 6. События (`alerts.py`)
 
-Только переходы, дедуп по ключу в состоянии: `core_flip`, `state_cell_change`, `bond_flag_on/off`, `buy_window_open` (vol=1 & bond=0), `cb_decision` (сюрприз/в линию), `cb_reminder` (за день), `orfr_published`, `auction_failed`, `deposit_uptick`, санитарные (`source_stale`, `lease_lost`, `health_dead`, `health_review_due`).
+Только переходы, дедуп по ключу в состоянии: `position_change` (смена `verdict.position.state` между прогонами — «Позиция: акции → деньги» / «деньги → акции», before/after — «акции» / «деньги (ставка N %)», detail — причина словами и «исполнять на следующем закрытии»; первый прогон молчит, как `core_flip`; в `REGIME_FAMILY` не сливается — это отдельный слой), `core_flip`, `state_cell_change`, `bond_flag_on/off`, `buy_window_open` (vol=1 & bond=0), `cb_decision` (сюрприз/в линию), `cb_reminder` (за день), `orfr_published`, `auction_failed`, `deposit_uptick`, санитарные (`source_stale`, `lease_lost`, `health_review` — только при переходе здоровья в `review`, то есть двенадцать месяцев подряд ниже нуля; прежние `health_dead` и `health_review_due` объединены в него).
 
-**Два рода событий, и они не смешиваются.** Рыночные (`core_flip`, `state_cell_change`, `bond_flag_*`, `buy_window_open`, `cb_*`, `orfr_published`, `auction_failed`, `deposit_uptick`) идут в ленту: журнал витрины, хаб NEXUS, телеграм-канал панели. Санитарные — `OPS_KINDS` в `alerts.py` (`source_stale`, `health_dead`, `health_review_due`, `lease_lost`, `payload_oversize`, `core_missing`) — идут ТОЛЬКО в общий ops-канал панелей (`ERROR_BOT_TOKEN`/`ERROR_CHAT_ID`, тот же бот, что у `dash-notify` на VPS) и в `events` витрины не попадают. Причина: журнал читают как ленту рынка, а «источник отдаёт 503» рынку ничего не сообщает — вперемешку они гасят друг друга.
+**Два рода событий, и они не смешиваются.** Рыночные (`position_change`, `core_flip`, `state_cell_change`, `bond_flag_*`, `buy_window_open`, `cb_*`, `orfr_published`, `auction_failed`, `deposit_uptick`) идут в ленту: журнал витрины, хаб NEXUS, телеграм-канал панели. Санитарные — `OPS_KINDS` в `alerts.py` (`source_stale`, `health_review`, `lease_lost`, `payload_oversize`, `core_missing`) — идут ТОЛЬКО в общий ops-канал панелей (`ERROR_BOT_TOKEN`/`ERROR_CHAT_ID`, тот же бот, что у `dash-notify` на VPS) и в `events` витрины не попадают. Причина: журнал читают как ленту рынка, а «источник отдаёт 503» рынку ничего не сообщает — вперемешку они гасят друг друга.
 
 **Комментарий (`comment`)** — разбор события бесплатной моделью через OpenRouter (`lib/commentary.py`). Проставляется до отправки и уезжает одинаковым во все три места; в телеграме и в хабе — отдельным абзацем после «💬», как у 837/838. Отсутствие комментария (нет ключа, лежит провайдер) — законный режим: событие уходит голым фактом.
 

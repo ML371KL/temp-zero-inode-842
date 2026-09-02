@@ -57,6 +57,8 @@ core_mod = _optional("pipeline.compute.core")
 states_mod = _optional("pipeline.compute.states")
 health_mod = _optional("pipeline.compute.health")
 monitors_mod = _optional("pipeline.compute.monitors")
+decision_mod = _optional("pipeline.compute.decision")
+shadow_mod = _optional("pipeline.compute.shadow")
 
 MODES = ("intraday", "daily", "weekly", "monthly", "manual", "bootstrap", "selftest")
 QUOTE_SERIES = [("imoex", "Индекс МосБиржи"), ("rgbi", "RGBI"), ("rvi", "RVI"),
@@ -167,7 +169,9 @@ def _normalize(res):
 def plan(mode, now, only=None):
     """[(series_id, spec, причина пропуска|None)] — печатается в журнал как есть."""
     if mode == "bootstrap":
-        ids = list(registry.SERIES)
+        # Только ряды с фетчером: теневые (role="shadow") кладёт сам расчёт, и попытка
+        # «загрузить» их пометила бы исправный ряд status=error.
+        ids = registry.fetchable()
     else:
         ids = [sid for sid, _ in registry.series_for_mode(mode)]
     if only:
@@ -377,6 +381,8 @@ def _sources_fallback(now):
     stored = set(store.list_series()) if hasattr(store, "list_series") else set()
     known, empty = {}, {}
     for sid, spec in registry.SERIES.items():
+        if not spec.get("fetcher"):
+            continue  # теневой ряд без источника — не семья источников, а расчёт
         family = str(spec.get("fetcher", "")).split(".")[0]
         # Ряд реестра может разворачиваться в НЕСКОЛЬКО рядов стора: zcyc -> zcyc_y1…,
         # futoi_mx -> futoi_mx_pos…, orfr_flows -> orfr_flows_fiz… Искать по точному
@@ -490,16 +496,45 @@ def _monitors(now, journal):
     return tiles
 
 
+def _shadow(panel, states, decision, now, journal):
+    """Тень считается в try/except: она не имеет права ронять прогон.
+
+    Ошибка тени — это {"error": …} в payload и предупреждение в журнале: витрина
+    покажет «тень не посчиталась», а позиция и ядро уедут как обычно.
+    """
+    if shadow_mod is None:
+        journal.debug("compute", "модуля тени нет — блок shadow пустой")
+        return {}
+    try:
+        return shadow_mod.compute_shadow(store, panel, states, decision, now)
+    except Exception as exc:  # noqa: BLE001 — граница изоляции
+        journal.warn("compute", f"тень упала: {type(exc).__name__}: {exc}")
+        return {"error": f"{type(exc).__name__}: {exc}"}
+
+
 def build_full(now, journal):
-    """Полный пересчёт: панель → ядро → состояния → мониторы."""
+    """Полный пересчёт: панель → ядро → состояния → решение → тень.
+
+    -> (core, states, decision, shadow). Месячный срез считается ОДИН раз и
+    передаётся и в ядро, и в решение: дневной композит обязан быть тем же ядром.
+    """
     panel = panel_mod.build_panel(store)
     core = core_mod.compute_core(panel)
     states = states_mod.compute_states(panel)
+    decision = None
+    if decision_mod is not None:
+        mf = core_mod.monthly_frame(panel)
+        decision = decision_mod.compute_decision(panel, mf, states)
+    shadow = _shadow(panel, states, decision, now, journal)
     dates = (panel or {}).get("dates") or []
+    pos = ((decision or {}).get("position") or {})
     journal.line("compute", f"панель {len(dates)}×{len((panel or {}).get('cols') or {})} "
                             f"ядро={core.get('value')} знак={core.get('sign')} "
-                            f"здоровье={(core.get('health') or {}).get('status')}")
-    return core, states
+                            f"здоровье={(core.get('health') or {}).get('status')} "
+                            f"позиция={pos.get('state')} с {pos.get('since')} "
+                            f"({pos.get('reason')}) ворота="
+                            f"{'открыты' if pos.get('gate_open') else 'закрыты'}")
+    return core, states, decision, shadow
 
 
 def build_payload_for_mode(mode, now, journal):
@@ -511,22 +546,26 @@ def build_payload_for_mode(mode, now, journal):
     if mode == "intraday":
         prev = publish_mod.read_local_payload()
         if prev and (prev.get("core") or prev.get("states")):
-            journal.line("compute", "интрадей: ядро и состояния взяты из прошлого прогона "
-                                    f"(asof {prev.get('asof_trading_day')})")
+            journal.line("compute", "интрадей: ядро, состояния и позиция взяты из прошлого "
+                                    f"прогона (asof {prev.get('asof_trading_day')})")
             # asof_trading_day остаётся ДНЁМ ВЕРДИКТА, а не днём последней котировки:
             # иначе панель подписала бы вчерашнее ядро сегодняшней датой. Свежесть
-            # цен живёт отдельно, в quotes.
+            # цен живёт отдельно, в quotes. Вердикт (с позицией) и тень — тоже из
+            # прошлого прогона: пересобирать вердикт из core/states значило бы
+            # терять позицию на весь торговый день.
             return publish_mod.build_payload(
                 core=prev.get("core"), states=prev.get("states"), monitors=monitors,
                 sources=sources, mode=mode,
-                asof=prev.get("asof_trading_day") or asof, quotes=quotes)
+                asof=prev.get("asof_trading_day") or asof, quotes=quotes,
+                verdict=prev.get("verdict"), shadow=prev.get("shadow"))
         journal.warn("compute", "интрадей без прошлого data.json — считаем полностью")
 
     if not all((panel_mod, core_mod, states_mod, store)):
         raise RuntimeError("нет модулей расчёта: " + ", ".join(sorted(MISSING_MODULES)))
-    core, states = build_full(now, journal)
+    core, states, decision, shadow = build_full(now, journal)
     return publish_mod.build_payload(core=core, states=states, monitors=monitors,
-                                     sources=sources, mode=mode, asof=asof, quotes=quotes)
+                                     sources=sources, mode=mode, asof=asof, quotes=quotes,
+                                     decision=decision, shadow=shadow)
 
 
 def _seed_payload(journal):
@@ -576,10 +615,13 @@ def selftest(journal):
     for name, mod in (("pipeline.lib.store", store), ("pipeline.compute.panel", panel_mod),
                       ("pipeline.compute.core", core_mod), ("pipeline.compute.states", states_mod),
                       ("pipeline.compute.health", health_mod),
-                      ("pipeline.compute.monitors", monitors_mod)):
+                      ("pipeline.compute.monitors", monitors_mod),
+                      ("pipeline.compute.decision", decision_mod),
+                      ("pipeline.compute.shadow", shadow_mod)):
         state = "есть" if mod is not None else f"НЕТ ({MISSING_MODULES.get(name)})"
         journal.line("selftest", f"модуль {name}: {state}")
-        if mod is None and name != "pipeline.compute.health":
+        # Тень — не обязательна: без неё прогон живёт, блок shadow пустой.
+        if mod is None and name not in ("pipeline.compute.health", "pipeline.compute.shadow"):
             problems.append(f"нет модуля {name}")
 
     if len(constants.CELL_STATS) != 8:
@@ -675,7 +717,8 @@ def main(argv=None):
         payload = publish_mod.build_payload(
             core=prev.get("core"), states=prev.get("states"),
             monitors=_monitors(now, journal), sources=_sources(now, journal),
-            mode=args.mode, asof=prev.get("asof_trading_day"), quotes=_quotes(now))
+            mode=args.mode, asof=prev.get("asof_trading_day"), quotes=_quotes(now),
+            verdict=prev.get("verdict"), shadow=prev.get("shadow"))
 
     # Алерты изолированы целиком: это единственный этап, который сам ничего не
     # публикует. Раньше исключение в правиле или мусор в alerts_state.json

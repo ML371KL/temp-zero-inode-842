@@ -7,6 +7,12 @@
  * Цвет нигде не работает в одиночку: у состояния ячейки, статуса источника и
  * вердикта сигнала рядом с цветом всегда стоят иконка и словесная подпись — это
  * требование доступности и заодно защита от чтения панели в оттенках серого.
+ *
+ * Первая строка панели — ПОЗИЦИЯ (акции / деньги), итог ворот и наклона; её
+ * считает конвейер (compute/decision.py), фронт не выводит решение сам. Поля
+ * аудита 02.09.2026 (verdict.position, states.gate, states.regime_stats, shadow,
+ * тайл expectations) необязательны: витрина без них рисуется как прежде, новые
+ * блоки просто не появляются — старый data.json остаётся законным входом.
  */
 (function () {
   'use strict';
@@ -278,11 +284,135 @@
     ]);
   }
 
+  /* ──────────────────────────────────────────────────────── позиция */
+
+  var POSITION_WORD = { long: 'акции', flat: 'деньги' };
+  // Причина последней смены словами читателя. Конвейер кладёт reason_text; код
+  // причины — запас на случай витрины, где текста ещё нет.
+  var REASON_WORD = {
+    gate_close: 'ворота закрылись', comp_neg: 'наклон ниже порога в день решения',
+    gate_open: 'ворота открылись', comp_pos: 'наклон выше порога в день решения',
+    entry: 'вход: ворота открыты и наклон за акции',
+    es_exit: 'цена ожиданий по ставке резко выросла', es_block: 'ждём, пока цена ожиданий по ставке успокоится',
+    es_clear: 'цена ожиданий по ставке успокоилась (день решения)'
+  };
+  var COMP_STATE_WORD = { '1': '+ (за акции)', '-1': '− (за деньги)', '0': 'не определён' };
+  var WEEKDAY = ['воскресенье', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота'];
+  function weekdayOf(iso) {
+    var t = Date.parse(String(iso || ''));
+    return isFinite(t) ? WEEKDAY[new Date(t).getUTCDay()] : '';
+  }
+  function pct2(v) { return isNum(v) ? fmtNum(v, 2, true) + '%' : '—'; }
+  // Код сочетания признаков («bear|stress|stress») — внутренний ключ модели;
+  // читателю он показывается словами, теми же, что на битах шапки.
+  var CELL_WORD = { bull: 'бык', bear: 'медведь', stress: 'стресс', calm: 'спокойно', ok: 'ок' };
+  function cellWords(code) {
+    return String(code || '').split('|').filter(Boolean).map(function (w) { return CELL_WORD[w] || w; }).join(' · ');
+  }
+  function share(v) { return isNum(v) ? Math.round(v * 100) + '%' : '—'; }
+
+  /* Строка позиции — первая на панели и единственный её итог: ворота ∧ наклон.
+   *
+   * До аудита 02.09.2026 витрина держала три разных прочтения знака (закрытый
+   * месяц, дневной с гистерезисом, дневной без) и ни одного слова «позиция»:
+   * читатель собирал решение сам и собирал по-разному (просадка от −26% до −34%
+   * в зависимости от прочтения). Теперь позицию считает конвейер (decision.py),
+   * а фронт только показывает: состояние, с какой даты и почему, ставку денег
+   * во флэте, дату следующего решения по наклону и список того, что позицию
+   * сменит. Тон: «акции» — акцент, «деньги» — чернила. НЕ красный и не зелёный:
+   * позиция — не оценка рынка, а место, где стоят деньги.
+   *
+   * Старая витрина без verdict.position — законный вход: блок не рисуется. */
+  function renderPosition(d) {
+    var v = d.verdict || {}, p = v.position;
+    if (!p || !POSITION_WORD[p.state]) return null;
+    var long = p.state === 'long';
+    var reason = p.reason_text || REASON_WORD[p.reason] || '';
+    var st = d.states || {};
+    var regimeLabel = (v.regime || st.regime || {}).label || '';
+    var thr = isNum(p.comp_threshold) ? p.comp_threshold : 0.2;
+
+    var facts = [];
+    if (!long && isNum(p.cash_rate)) {
+      facts.push(stat('Деньги', '≈ ' + fmtNum(p.cash_rate, 1, false) + '% годовых',
+        'вклады топ-10' + (p.cash_rate_asof ? ' на ' + fmtDay(p.cash_rate_asof) : '')));
+    }
+    if (p.next_decision) {
+      var wd = weekdayOf(p.next_decision);
+      facts.push(stat('Следующее решение по наклону', ruDay(p.next_decision) + (wd ? ' (' + wd + ')' : ''),
+        'порог ±' + fmtNum(thr, 1, false) + ' по дневному наклону'));
+    }
+    if (p.gate_open === true || p.gate_open === false) {
+      facts.push(stat('Ворота', p.gate_open ? 'открыты' : 'закрыты',
+        [regimeLabel || null, p.gate_since ? 'с ' + ruDay(p.gate_since) : null].filter(Boolean).join(' · ') || null));
+    }
+    if (isNum(p.comp_state)) {
+      facts.push(stat('Знак решения', COMP_STATE_WORD[String(p.comp_state)] || '—',
+        [isNum(p.comp_daily) ? 'дневной наклон ' + fmtNum(p.comp_daily, 2, true) : null,
+         p.comp_state_since ? 'с ' + ruDay(p.comp_state_since) : null].filter(Boolean).join(' · ') || null));
+    }
+    if (isNum(p.switches_per_year)) {
+      facts.push(stat('Смен в год', fmtNum(p.switches_per_year, 1, false), 'в среднем за пять лет'));
+    }
+
+    var conds = Array.isArray(p.conditions) ? p.conditions.filter(function (c) { return c; }) : [];
+    var prev = v.position_prev_rule;
+    var prevNote = (prev && POSITION_WORD[prev.state])
+      ? ' По прежнему правилу (' + ruText(prev.rule || 'знак закрытого месяца, ворота без гистерезиса') + '): ' +
+        POSITION_WORD[prev.state] + (prev.since ? ' с ' + fmtDay(prev.since) : '') + '.'
+      : '';
+
+    function sw(cls, bg) {
+      var s = h('span', { 'class': 'legend__sw' + (cls ? ' ' + cls : '') });
+      if (bg) s.style.background = bg;
+      return s;
+    }
+    var legend = h('div', { 'class': 'legend', style: 'margin-top:8px' }, [
+      h('span', { 'class': 'legend__i' }, [sw('legend__sw--accent'), h('span', { text: 'акции' })]),
+      h('span', { 'class': 'legend__i' }, [sw(null, 'var(--mid)'), h('span', { text: 'деньги' })])
+    ]);
+
+    return h('div', { 'class': 'position position--' + p.state }, [
+      h('div', { 'class': 'kicker', text: 'Позиция · итог ворот и наклона' }),
+      h('div', { 'class': 'position__row' }, [
+        h('span', { 'class': 'position__name', text: 'Позиция: ' + POSITION_WORD[p.state] }),
+        h('span', { 'class': 'position__meta', text: (p.since ? 'с ' + fmtDay(p.since) : '') +
+          (reason ? (p.since ? ' · ' : '') + ruText(reason) : '') })
+      ]),
+      h('div', { 'class': 'position__grid' }, [
+        h('div', null, [
+          facts.length ? h('div', { 'class': 'stats' }, facts) : null,
+          h('p', { 'class': 'position__note', text: 'Исполнять ' + ruText(p.execute || 'на следующем закрытии') +
+            ' после дня решения. Ворота читаются каждый день, наклон решается по пятницам; позиция — не оценка рынка, а место, где стоят деньги.' + prevNote })
+        ]),
+        conds.length ? h('div', null, [
+          h('div', { 'class': 'stat__k', text: 'Что изменит позицию' }),
+          h('ul', { 'class': 'position__cond' }, conds.map(function (c) { return h('li', { text: ruText(c) }); }))
+        ]) : null
+      ]),
+      Array.isArray(p.history) && p.history.length ? h('div', { 'class': 'position__ribbon' }, [
+        h('div', { 'class': 'stat__k', text: 'Акции и деньги с 2004 года' }),
+        C.positionRibbon(p.history, { end: p.decision_day || d.asof_trading_day, aria: 'Позиция по правилу панели с 2004 года' }),
+        legend
+      ]) : null
+    ]);
+  }
+
+  var REGIME_QUALITY = { toxic: 'crit', stress: 'warn', calm: 'good' };
+  var QUALITY_COLOR = { crit: 'var(--crit)', warn: 'var(--warn)', good: 'var(--good)', flat: 'var(--ink-3)' };
+
   function renderHero(d) {
-    var v = d.verdict || {}, st = (d.states || {}).current || {}, core = d.core || {};
-    var since = st.since || {};
+    var v = d.verdict || {}, st = d.states || {}, core = d.core || {};
+    var cur = st.current || {};
+    // Ворота с гистерезисом (states.gate) главнее сырых битов: именно по ним
+    // считается позиция, и именно они переключаются реже (вола p80/p60, RGBI
+    // −4/−3%, тренд ±2% от MA200). Сырые биты остаются для ленты ячеек и их
+    // статистики. Старая витрина без gate — сырые биты, как раньше.
+    var gateSrc = st.gate && typeof st.gate === 'object' ? st.gate : null;
+    var bitsSrc = gateSrc || cur;
+    var since = (gateSrc && gateSrc.since) || cur.since || st.since || {};
     var bits = ['trend', 'vol', 'bond'].map(function (key) {
-      var raw = st[key];
+      var raw = bitsSrc[key];
       // Бит может отсутствовать: states.py кладёт null, когда у ряда нет валидных
       // значений, а при пустой панели current приходит пустым целиком. Раньше
       // «нет данных» рисовалось уверенным «медведь / спокойно» — и всегда в
@@ -301,7 +431,7 @@
       // произвольной давности как «текущее». Модель это не меняет, но подпись
       // обязана сказать, что бит стоит на старом наблюдении (> 7 суток от
       // торгового дня витрины) — иначе «облигации спокойны» читается как сегодня.
-      var bitAsof = (st.bit_asof || {})[key];
+      var bitAsof = (cur.bit_asof || {})[key];
       var tradingDay = d.asof_trading_day || '';
       var bitStale = bitAsof && tradingDay &&
         (Date.parse(tradingDay) - Date.parse(bitAsof)) > 7 * 86400 * 1000;
@@ -323,75 +453,103 @@
     bits.push(h('span', { 'class': 'bit bit--neutral' }, [
       h('span', { 'class': 'bit__dot' }),
       h('span', { 'class': 'bit__k', text: 'Ставка' }),
-      h('span', { 'class': 'bit__v', text: PHASE[String(st.rate_phase)] || 'нет данных' })
+      h('span', { 'class': 'bit__v', text: PHASE[String(cur.rate_phase)] || 'нет данных' })
     ]));
 
-    var mean = (v.cell_stats || {}).mean_fwd1m_pct;
-    var quality = !isNum(mean) ? 'flat' : (mean <= -1.5 ? 'crit' : (mean < 0.3 ? 'warn' : 'good'));
-    var qColor = { crit: 'var(--crit)', warn: 'var(--warn)', good: 'var(--good)', flat: 'var(--ink-3)' }[quality];
+    var kicker = gateSrc ? 'Ворота · читаются ежедневно, с гистерезисом' : 'Ворота риска · что сейчас можно';
+    var regime = v.regime || st.regime || null;
+    var rsRaw = regime && regime.id && st.regime_stats && st.regime_stats[regime.id] ? st.regime_stats[regime.id] : null;
+    // Две формы блока: вложенная {price:{…}, excess:{…}} (states.py) и плоская
+    // из спецификации (mean_pct / excess_mean_pct) — читаем обе, рисуем одну.
+    var rstats = rsRaw ? {
+      price: rsRaw.price || { n: rsRaw.n, mean_pct: rsRaw.mean_pct, median_pct: rsRaw.median_pct,
+                              hit: rsRaw.hit, ci95_pct: rsRaw.ci95_pct || rsRaw.ci95 },
+      excess: rsRaw.excess || { n: rsRaw.n, mean_pct: rsRaw.excess_mean_pct, median_pct: rsRaw.excess_median_pct,
+                                hit: rsRaw.excess_hit, ci95_pct: null }
+    } : null;
+    var left;
+    if (regime && regime.label) {
+      /* Три режима вместо восьми ячеек. Аудит 02.09.2026: из 28 пар ячеек
+       * различима одна (по Манну–Уитни — ни одной), любое разбиение вне выборки
+       * предсказывает хуже безусловного среднего. Восемь подписей с двумя знаками
+       * после запятой создавали точность, которой нет; статистика режима считается
+       * по закрытым месяцам и показывается двумя мерами — по цене индекса и над
+       * деньгами (за вычетом ставки вкладов): решение принимается во второй. */
+      var rq = REGIME_QUALITY[regime.id] || 'flat';
+      var rIco = ico(rq);
+      rIco.setAttribute('class', 'cellname__ico');
+      rIco.style.color = QUALITY_COLOR[rq];
+      var cellText = cellWords((gateSrc && gateSrc.cell_code) || v.cell_code);
+      var rp = rstats ? rstats.price : null, rx = rstats ? rstats.excess : null;
+      var ci = rp && rp.ci95_pct && isNum(rp.ci95_pct[0]) ? rp.ci95_pct : null;
+      left = h('div', { 'class': 'hero__cell' }, [
+        h('div', { 'class': 'kicker', text: kicker }),
+        h('div', { 'class': 'bits' }, bits),
+        h('div', { 'class': 'cellname' }, [rIco, h('span', { text: regime.label })]),
+        h('div', { 'class': 'cellcode', text: 'режим из трёх' + (cellText ? ' · сочетание: ' + cellText : '') }),
+        rstats ? h('div', { 'class': 'stat__k', style: 'margin-bottom:8px', text: 'Следующий месяц по цене индекса' }) : null,
+        rp ? h('div', { 'class': 'stats' }, [
+          stat('Медиана', pct2(rp.median_pct), 'типичный исход', toneOf(rp.median_pct)),
+          stat('Среднее', pct2(rp.mean_pct), 'среднее тянут хвосты', toneOf(rp.mean_pct)),
+          stat('Доля плюсовых', share(rp.hit), 'из ' + (isNum(rp.n) ? rp.n : '—') + ' закрытых месяцев')
+        ]) : null,
+        rx ? h('div', { 'class': 'stat__k', style: 'margin:14px 0 8px', text: 'Над деньгами · за вычетом ставки вкладов' }) : null,
+        rx ? h('div', { 'class': 'stats' }, [
+          stat('Медиана', pct2(rx.median_pct), 'в этой мере принимается решение', toneOf(rx.median_pct)),
+          stat('Среднее', pct2(rx.mean_pct), null, toneOf(rx.mean_pct)),
+          stat('Доля плюсовых', share(rx.hit), 'из ' + (isNum(rx.n) ? rx.n : '—') + ' месяцев со ставкой')
+        ]) : (rp ? null : h('p', { 'class': 'empty', text: 'Статистика режима ещё не рассчитана' })),
+        h('p', { 'class': 'hero__fine', text: (ci ? '95% интервал среднего по цене: ' + fmtNum(ci[0], 1, true) + '%…' + fmtNum(ci[1], 1, true) + '%. ' : '') +
+          'Распределение, а не прогноз: восемь сочетаний признаков статистически неразличимы, поэтому режимов три; их таблица — в разделе «Машина состояний».' })
+      ]);
+    } else {
+      var mean = (v.cell_stats || {}).mean_fwd1m_pct;
+      var quality = !isNum(mean) ? 'flat' : (mean <= -1.5 ? 'crit' : (mean < 0.3 ? 'warn' : 'good'));
+      var cellIco = ico(quality);
+      cellIco.setAttribute('class', 'cellname__ico');
+      cellIco.style.color = QUALITY_COLOR[quality];
+      left = h('div', { 'class': 'hero__cell' }, [
+        h('div', { 'class': 'kicker', text: kicker }),
+        h('div', { 'class': 'bits' }, bits),
+        h('div', { 'class': 'cellname' }, [cellIco, h('span', { text: v.cell_label || 'ячейка не определена' })]),
+        h('div', { 'class': 'cellcode', text: cellWords(v.cell_code) }),
+        /* Среднее по ячейке — ХВОСТОВАЯ статистика: у токсичной оно −2,94% при
+         * медиане +0,64% и 13 плюсовых месяцах из 24. Одно среднее читается как
+         * прогноз на месяц, читатель получает +5% и перестаёт верить панели. Рядом
+         * со средним обязаны стоять медиана (типичный месяц) и худший месяц (то,
+         * ради чего ворота закрыты). */
+        h('div', { 'class': 'stats' }, [
+          stat('Медиана месяца', pct2((v.cell_stats || {}).median_fwd1m_pct), 'типичный исход', toneOf((v.cell_stats || {}).median_fwd1m_pct)),
+          stat('Средний форвардный месяц', pct2(mean), 'среднее тянут хвосты', toneOf(mean)),
+          stat('Худший месяц', isNum((v.cell_stats || {}).worst_pct)
+            ? fmtNum(v.cell_stats.worst_pct, 1, true) + '%' : '—',
+            'за что закрыты ворота', toneOf((v.cell_stats || {}).worst_pct)),
+          /* Доля плюсовых, медиана и края посчитаны по ЗАКРЫТЫМ месяцам, а
+           * «наблюдений» — это пары исследования: у токсичной ячейки 24 против 25,
+           * потому что последний месяц ещё идёт. */
+          stat('Доля плюсовых', share((v.cell_stats || {}).hit),
+            isNum((v.cell_stats || {}).n_closed) ? 'из ' + v.cell_stats.n_closed + ' закрытых месяцев' : null),
+          stat('Наблюдений', isNum((v.cell_stats || {}).n) ? String(v.cell_stats.n) : '—',
+            (isNum((v.cell_stats || {}).n_closed) && v.cell_stats.n_closed !== v.cell_stats.n)
+              ? 'месяцев в ячейке; последний ещё идёт' : 'месяцев в ячейке')
+        ])
+      ]);
+    }
 
-    var cellIco = ico(quality);
-    cellIco.setAttribute('class', 'cellname__ico');
-    cellIco.style.color = qColor;
-
-    var left = h('div', { 'class': 'hero__cell' }, [
-      h('div', { 'class': 'kicker', text: 'Ворота риска · что сейчас можно' }),
-      h('div', { 'class': 'bits' }, bits),
-      h('div', { 'class': 'cellname' }, [cellIco, h('span', { text: v.cell_label || 'ячейка не определена' })]),
-      h('div', { 'class': 'cellcode', text: (v.cell_code || '').split('|').join(' · ') }),
-      /* Среднее по ячейке — ХВОСТОВАЯ статистика: у токсичной оно −2,94% при
-       * медиане +0,64% и 13 плюсовых месяцах из 24. Одно среднее читается как
-       * прогноз на месяц, читатель получает +5% и перестаёт верить панели. Рядом
-       * со средним обязаны стоять медиана (типичный месяц) и худший месяц (то,
-       * ради чего ворота закрыты). */
-      h('div', { 'class': 'stats' }, [
-        stat('Медиана месяца', isNum((v.cell_stats || {}).median_fwd1m_pct)
-          ? fmtNum(v.cell_stats.median_fwd1m_pct, 2, true) + '%' : '—',
-          'типичный исход', toneOf((v.cell_stats || {}).median_fwd1m_pct)),
-        stat('Средний форвардный месяц', isNum(mean) ? fmtNum(mean, 2, true) + '%' : '—',
-          'среднее тянут хвосты', toneOf(mean)),
-        stat('Худший месяц', isNum((v.cell_stats || {}).worst_pct)
-          ? fmtNum(v.cell_stats.worst_pct, 1, true) + '%' : '—',
-          'за что закрыты ворота', toneOf((v.cell_stats || {}).worst_pct)),
-        /* Доля плюсовых, медиана и края посчитаны по ЗАКРЫТЫМ месяцам, а
-         * «наблюдений» — это пары исследования: у токсичной ячейки 24 против 25,
-         * потому что последний месяц ещё идёт. Раньше два числа из разных выборок
-         * стояли рядом молча, и доля выглядела арифметически невозможной — на этом
-         * её однажды уже «исправили» по незакрытому месяцу. */
-        stat('Доля плюсовых', isNum((v.cell_stats || {}).hit) ? Math.round(v.cell_stats.hit * 100) + '%' : '—',
-          isNum((v.cell_stats || {}).n_closed) ? 'из ' + v.cell_stats.n_closed + ' закрытых месяцев' : null),
-        stat('Наблюдений', isNum((v.cell_stats || {}).n) ? String(v.cell_stats.n) : '—',
-          (isNum((v.cell_stats || {}).n_closed) && v.cell_stats.n_closed !== v.cell_stats.n)
-            ? 'месяцев в ячейке; последний ещё идёт' : 'месяцев в ячейке')
-      ])
-    ]);
-
-    /* Два крупных ответа в шапке спорили друг с другом: «токсичная ячейка» (плохо)
-     * и цветное «+0,69 умеренный лонг» (хорошо), причём второе было крупнее и
-     * единственным цветным — читатель за три секунды уносил именно его. У чисел
-     * разные роли, и их надо назвать: ячейка — ВОРОТА (что можно делать), композит
-     * — НАКЛОН (куда). Кегль композита придавливаем здесь же, рядом с ролью:
-     * ворота главнее наклона, и на узком экране это должно остаться верным.
-     */
-    var gate = quality === 'crit' ? 'closed' : (quality === 'warn' ? 'ajar' : (quality === 'good' ? 'open' : null));
-    var tilt = isNum(core.value) && core.value !== 0 ? (core.value > 0 ? 'up' : 'down') : null;
+    /* Подпись под наклоном строится от ПОЗИЦИИ, а не от знака дневного числа.
+     * Раньше здесь жило третье, никем не документированное прочтение знака
+     * («core.value > 0 → наклон вверх»), и оно спорило и с закрытым месяцем, и
+     * с гистерезисом алертов. Витрина без позиции подписи не получает вовсе:
+     * лучше пусто, чем ещё одно прочтение. */
+    var p = v.position;
     var gateNote = null;
-    if (gate && tilt) {
-      if (gate === 'closed') {
-        gateNote = tilt === 'up'
-          ? 'Сигнал есть, но ворота закрыты: ячейка исторически убыточна — вход только по подтверждению.'
-          : 'Ворота закрыты и наклон вниз: оба ответа против риска.';
-      } else if (gate === 'ajar') {
-        gateNote = tilt === 'up'
-          ? 'Ворота приоткрыты: наклон вверх, но ячейка около нуля — риск дозируем.'
-          : 'Ворота приоткрыты, наклон вниз: добавлять риск не за что.';
-      } else {
-        gateNote = tilt === 'up'
-          ? 'Ворота открыты и наклон вверх: оба ответа в одну сторону.'
-          : 'Ворота открыты, но наклон вниз: ячейка разрешает риск, модель его не подтверждает.';
-      }
+    if (p && POSITION_WORD[p.state]) {
+      var why = p.reason_text || REASON_WORD[p.reason] || '';
+      gateNote = 'Позиция — ' + POSITION_WORD[p.state] + (why ? ': ' + ruText(why) : '') +
+        '. Наклон читается в день решения, ворота — каждый день.';
     }
     var me = core.month_end || {};
+    var thr = p && isNum(p.comp_threshold) ? p.comp_threshold : 0.2;
 
     var right = h('div', { 'class': 'hero__gauge' }, [
       h('div', { 'class': 'kicker', text: 'Наклон · куда смотрит ядро' }),
@@ -414,12 +572,18 @@
         })
       ]),
       h('div', { 'class': 'gauge__meta' }, [
-        h('div', { text: core.sign_since ? 'знак не менялся с ' + fmtDay(core.sign_since) : 'знак ещё не определялся' }),
-        // Дневное число дрожит внутри месяца, а решение по исследованию — месячное
-        // (REGIME §6). Показываем последний ЗАКРЫТЫЙ месяц: именно с ним надо
-        // сравнивать «сегодня», иначе месячный шаг живёт только в документации.
+        // Решение по наклону — раз в неделю по ДНЕВНОМУ значению с порогом ±0,2
+        // (аудит 02.09.2026, ступень P1): закрытый месяц больше не решает, но
+        // остаётся справочной строкой мелко — им сверяют, куда складывается месяц.
+        p ? h('div', { text: 'решение по наклону — по пятницам (последний торговый день недели), порог ±' + fmtNum(thr, 1, false) }) : null,
+        p && isNum(p.comp_state) ? h('div', { text: 'знак решения: ' + (COMP_STATE_WORD[String(p.comp_state)] || '—') +
+          (p.comp_state_since ? ' с ' + fmtDay(p.comp_state_since) : '') +
+          (isNum(p.comp_daily) ? ' · дневной ' + fmtNum(p.comp_daily, 2, true) + (p.decision_day ? ' на ' + fmtDay(p.decision_day) : '') : '') }) : null,
+        !p ? h('div', { text: core.sign_since ? 'знак не менялся с ' + fmtDay(core.sign_since) : 'знак ещё не определялся' }) : null,
         isNum(me.value) ? h('div', {
-          title: 'Ребаланс мышления месячный: внутримесячные колебания композита решения не меняют',
+          'class': p ? 'gauge__fine' : null,
+          title: p ? 'Справочно: значение на последнем закрытом месяце; решение принимается по дневному значению в день решения'
+            : 'Ребаланс мышления месячный: внутримесячные колебания композита решения не меняют',
           text: 'последний закрытый месяц: ' + fmtNum(me.value, 2, true) +
             (me.label ? ' (' + me.label + ')' : '') + (me.date ? ' на ' + fmtDay(me.date) : '')
         }) : null
@@ -429,6 +593,7 @@
     var ruleIco = ico('info', 'rule__ico');
     return h('div', { 'class': 'hero' }, [
       renderQuotes(d),
+      renderPosition(d),
       h('div', { 'class': 'hero__grid' }, [left, right]),
       v.rule ? h('div', { 'class': 'rule' }, [
         ruleIco,
@@ -489,24 +654,39 @@
     ]);
 
     var hl = core.health || {};
-    /* «сломана» — приговор, которого данные не выдерживают: при окне 24 месяца
-       интервал ±0,41, и любое значение от −0,4 до +0,4 неотличимо от нуля.
-       Статус dead означает «связи на этом окне не видно», а не «модель сломана»;
-       слово стояло рядом с текстом, который прямо это опровергал. */
-    var hlStatus = { ok: 'работает', warn: 'слабеет', dead: 'связи не видно' }[hl.status] || 'нет данных';
-    var hlIco = ico(hl.status === 'ok' ? 'good' : (hl.status === 'warn' ? 'warn' : (hl.status === 'dead' ? 'crit' : 'flat')));
+    /* Статусы после аудита 02.09.2026: ok — связь видна; warn — связи на этом окне
+       не видно (и это НЕ «модель сломана»: при окне 24 месяца интервал ±0,41, а
+       слом быстрее ~5 лет статистически не обнаруживается); review — двенадцать
+       закрытых месяцев подряд ниже нуля, плановая ревалидация состава. Старые
+       витрины присылают dead — читаем его как warn. */
+    var hlWord = { ok: 'связь видна', warn: 'связи не видно', review: 'ревалидация', dead: 'связи не видно' };
+    var hlStatus = hlWord[hl.status] || 'нет данных';
+    var hlKind = { ok: 'good', warn: 'warn', review: 'crit', dead: 'warn' }[hl.status] || 'flat';
+    var hlIco = ico(hlKind);
     hlIco.setAttribute('class', 'sig__ico');
-    hlIco.style.color = hl.status === 'ok' ? 'var(--good)' : (hl.status === 'warn' ? 'var(--warn)' : (hl.status === 'dead' ? 'var(--crit)' : 'var(--ink-3)'));
+    hlIco.style.color = QUALITY_COLOR[hlKind];
+    var reviewMonths = isNum(hl.review_months) ? hl.review_months : 12;
+    var coversZero = hl.ic_ci95 && isNum(hl.ic_ci95[0]) && hl.ic_ci95[0] < 0 && hl.ic_ci95[1] > 0;
+    var hlFoot;
+    if (hl.review_due || hl.status === 'review') {
+      hlFoot = 'IC ниже нуля ' + (hl.below_zero_months || 0) + ' мес подряд — порог плановой ревалидации состава (' +
+        reviewMonths + ' месяцев, §7) достигнут. Протокол — реколибровка, а не сокращение позиции: на истории такие тревоги ' +
+        'были контрарными (после них умение модели и избыток над деньгами выше среднего).';
+    } else if (hl.status === 'warn' || hl.status === 'dead') {
+      hlFoot = (isNum(hl.ic_24m) && hl.ic_24m < 0 ? 'IC ниже нуля' : 'IC около нуля') +
+        (coversZero ? ', и доверительный интервал накрывает ноль: на 24 месяцах отличить модель от монетки нечем. ' : '. ') +
+        '«Связи не видно» — не «модель сломана»: слом быстрее пяти лет статистически не обнаруживается. ' +
+        'Ревалидация состава — после ' + reviewMonths + ' месяцев подряд ниже нуля (сейчас ' + (hl.below_zero_months || 0) + '); ' +
+        'до этого состав не меняется.';
+    } else {
+      hlFoot = 'Состав ядра фиксирован: отбор по скользящей результативности проверялся на истории и проиграл.';
+    }
 
     var health = h('article', { 'class': 'card' }, [
       h('div', { 'class': 'card__head' }, [
         h('h3', { 'class': 'card__title', text: 'Здоровье модели' }),
         h('span', { 'class': 'card__note', text: 'скользящий ранговый IC за 24 месяца' })
       ]),
-      /* Длительность «ниже нуля» — величина, на которую ссылается регламент §7
-       * («health<0 два квартала подряд»). До этого условие было записано словами
-       * и не измерялось: алерт срабатывал на первый месяц статуса dead и молчал
-       * дальше, а порог наступал через полгода — молча. */
       h('div', { 'class': 'health' }, [
         /* Интервал ПОД самим числом, а не в примечании: при окне 24 месяца он
            шириной около ±0,41, то есть шире любого значения, какое здесь может
@@ -521,7 +701,7 @@
         stat('Наблюдений', isNum(hl.n) ? String(hl.n) : '—'),
         isNum(hl.below_zero_months) ? stat('Ниже нуля подряд',
           hl.below_zero_months + ' мес',
-          'порог пересмотра — ' + (hl.review_months || 6),
+          'порог ревалидации — ' + reviewMonths,
           hl.review_due ? 'tone-neg' : 'tone-mut') : null,
         h('div', null, [
           h('div', { 'class': 'stat__k', text: 'Статус' }),
@@ -532,15 +712,7 @@
         height: 44, zero: true, digits: 2, label: 'IC',
         color: tok('--ink-3'), aria: 'Скользящий IC модели по месяцам'
       }) : null,
-      h('p', { 'class': 'card__foot', text: hl.review_due
-        ? 'IC ниже нуля ' + hl.below_zero_months + ' мес подряд — регламентный порог пересмотра состава достигнут (§7). Это повод запустить реколибровку, а не менять ноги: второе условие регламента, механизм у кандидата, проверяется человеком.'
-        : (hl.status === 'dead'
-          ? ((hl.ic_ci95 && isNum(hl.ic_ci95[0]) && hl.ic_ci95[0] < 0 && hl.ic_ci95[1] > 0
-              ? 'IC ушёл ниже нуля, но доверительный интервал накрывает ноль: на 24 месяцах отличить модель от монетки нечем. '
-              : 'IC ушёл ниже нуля. ') + 'Это повод к ревизии состава ядра, а не к подгонке весов, и регламент требует ' + (hl.review_months || 6) + ' месяцев подряд — сейчас ' + (hl.below_zero_months || 0) + '.')
-          : (hl.status === 'warn'
-            ? 'IC около нуля: модель слабеет. Состав меняют только по итогам реколибровки — не по скользящему IC.'
-            : 'Состав ядра фиксирован: отбор по скользящей результативности проверялся на истории и проиграл.')) })
+      h('p', { 'class': 'card__foot', text: hlFoot })
     ]);
 
     return section('Ядро', 'Слой 1 · медленный композит, меняет знак примерно дважды в год', [
@@ -571,25 +743,67 @@
     var ribbon = h('article', { 'class': 'card' }, [
       h('div', { 'class': 'card__head' }, [
         h('h3', { 'class': 'card__title', text: 'Лента ячеек с 2004 года' }),
-        h('span', { 'class': 'card__note', text: 'цвет — средняя форвардная доходность ячейки; ▾ — сейчас' })
+        h('span', { 'class': 'card__note', text: 'цвет — средняя форвардная доходность ячейки по сырым признакам; ▾ — сейчас' })
       ]),
       C.stateRibbon(st.series, cells),
       legend
     ]);
 
+    /* Восемь сочетаний остаются здесь таблицей, а не в шапке: числа исследования
+     * заморожены (CELL_STATS), но попарно неразличимы, и в шапке их место занял
+     * режим из трёх. Текущее сочетание помечено — по сырым признакам, как и
+     * лента: это статистика исследования, а не ворота позиции. */
+    var cellRows = cells.slice().sort(function (a, b) {
+      return (isNum(b.mean_fwd1m_pct) ? b.mean_fwd1m_pct : -99) - (isNum(a.mean_fwd1m_pct) ? a.mean_fwd1m_pct : -99);
+    });
+    var cellsCard = cellRows.length ? h('article', { 'class': 'card', style: 'margin-top:16px' }, [
+      h('div', { 'class': 'card__head' }, [
+        h('h3', { 'class': 'card__title', text: 'Восемь сочетаний признаков' }),
+        h('span', { 'class': 'card__note', text: 'месячные данные 2004–2026; попарно неразличимы, поэтому в шапке — режим из трёх' })
+      ]),
+      h('div', { 'class': 'tablewrap' }, [
+        h('table', { 'class': 'data' }, [
+          h('caption', { text: 'Средний следующий месяц по цене индекса и доля плюсовых месяцев в каждом сочетании трёх признаков. Строка «сейчас» — по сырым признакам, без гистерезиса.' }),
+          h('thead', null, [h('tr', null, [
+            h('th', { scope: 'col', text: 'Сочетание' }), h('th', { scope: 'col', text: 'Название' }),
+            h('th', { scope: 'col', text: 'Средний месяц' }), h('th', { scope: 'col', text: 'Доля плюсовых' }),
+            h('th', { scope: 'col', text: 'Наблюдений' })
+          ])]),
+          h('tbody', null, cellRows.map(function (c) {
+            return h('tr', { 'class': c.current ? 'is-current' : null }, [
+              h('th', { scope: 'row', text: cellWords(c.code) + (c.current ? ' ◂ сейчас' : '') }),
+              h('td', { text: c.label || '—' }),
+              h('td', { 'class': toneOf(c.mean_fwd1m_pct), text: pct2(c.mean_fwd1m_pct) }),
+              h('td', { text: share(c.hit) }),
+              h('td', { text: isNum(c.n) ? String(c.n) : '—' })
+            ]);
+          }))
+        ])
+      ])
+    ]) : null;
+
+    // Расстояние до переключения считается от ТОГО порога, который сработает
+    // следующим: у включённого бита это порог выключения (вола p60, RGBI −3%,
+    // тренд −2% от MA200), у выключенного — порог включения. Витрина без
+    // гистерезиса (старый data.json) присылает один порог — берём его.
+    var gateSrc = st.gate && typeof st.gate === 'object' ? st.gate : (st.current || {});
     var dists = (st.distances || []).map(function (x) {
+      var bit = gateSrc[x.id];
+      var on = bit === 1 || bit === true;
+      var useOff = on && isNum(x.off_threshold);
+      var thr = useOff ? x.off_threshold : (isNum(x.on_threshold) ? x.on_threshold : x.threshold);
+      var text = useOff ? (x.text_off || x.text) : x.text;
+      var which = x.id === 'trend' ? (on ? 'смена на медведя' : 'смена на быка') : (on ? 'снятие флага' : 'включение флага');
       return h('div', { 'class': 'dist' }, [
         h('div', { 'class': 'dist__row' }, [
           h('span', { 'class': 'dist__k', text: x.label || x.id }),
-          h('span', { 'class': 'dist__v', text: fmtNum(x.value, 1, true) + ' → ' + fmtNum(x.threshold, 1, true) })
+          h('span', { 'class': 'dist__v', text: fmtNum(x.value, 1, true) + ' → ' + fmtNum(thr, 1, true) })
         ]),
         // Полярность объявлена у ВСЕХ трёх строк, как требует контракт thresholdBar
-        // (charts.js: «либо у всех, либо ни у одной»; старый ключ invert там
-        // намеренно выпилен и молча игнорировался). Тренд: плохо НИЖЕ MA200;
-        // облигации: плохо ГЛУБЖЕ порога просадки; волатильность: плохо ВЫШЕ
-        // 80-го перцентиля.
-        C.thresholdBar(x.value, x.threshold, { bad: x.id === 'vol' ? 'above' : 'below' }),
-        h('p', { 'class': 'dist__t', text: ruText(x.text) })
+        // (charts.js: «либо у всех, либо ни у одной»). Тренд: плохо НИЖЕ MA200;
+        // облигации: плохо ГЛУБЖЕ порога просадки; волатильность: плохо ВЫШЕ порога.
+        C.thresholdBar(x.value, thr, { bad: x.id === 'vol' ? 'above' : 'below' }),
+        h('p', { 'class': 'dist__t', text: ruText(text) + (isNum(x.off_threshold) ? ' · порог: ' + which : '') })
       ]);
     });
 
@@ -626,22 +840,26 @@
       ]);
     });
 
-    return section('Машина состояний', 'Слой 2 · ворота риска: какие сигналы включены в текущей ячейке', [
+    return section('Машина состояний', 'Слой 2 · ворота риска, восемь сочетаний и сигналы второго ряда', [
       ribbon,
       h('div', { 'class': 'two', style: 'margin-top:16px' }, [
         h('article', { 'class': 'card' }, [
-          h('div', { 'class': 'card__head' }, [h('h3', { 'class': 'card__title', text: 'Расстояние до переключения' })]),
+          h('div', { 'class': 'card__head' }, [
+            h('h3', { 'class': 'card__title', text: 'Расстояние до переключения' }),
+            gateSrc === st.gate ? h('span', { 'class': 'card__note', text: 'до порога, который сработает следующим' }) : null
+          ]),
           dists.length ? h('div', null, dists) : h('p', { 'class': 'empty', text: 'Расстояния ещё не рассчитаны' })
         ]),
         h('article', { 'class': 'card' }, [
           h('div', { 'class': 'card__head' }, [
             h('h3', { 'class': 'card__title', text: 'Активные сигналы второго ряда' }),
-            h('span', { 'class': 'card__note', text: 'вердикт считается по z-скору' })
+            h('span', { 'class': 'card__note', text: 'объясняют, а не голосуют; вердикт считается по z-скору' })
           ]),
           sigs.length ? h('div', null, sigs)
-            : h('p', { 'class': 'empty', text: 'В текущей ячейке сигналы второго ряда не включены' })
+            : h('p', { 'class': 'empty', text: 'В текущем сочетании сигналы второго ряда не включены' })
         ])
-      ])
+      ]),
+      cellsCard
     ]);
   }
 
@@ -654,6 +872,30 @@
       return h('div', { 'class': 'tile__num ' + (sign ? toneOf(v) : ''), text: fmtNum(v, digits, sign) + (unit || '') });
     }
     switch (m.id) {
+      case 'expectations':
+        // Крупно — спред годовой ОФЗ к ключу: это и есть «сколько смягчения в
+        // цене». Рядом три числа того же тайла: изменение спреда за 21 день
+        // (рост больше +0,25 п.п. — детектор турбулентности, живёт в тени),
+        // RUSFAR 3M − ключ и полгода ОФЗ − ключ. Уровень направление не
+        // предсказывает — тир B, не решение.
+        var y1k = isNum(p.spread_y1_key_pp) ? p.spread_y1_key_pp : p.y1_minus_key;
+        var d21 = isNum(p.chg_21d_pp) ? p.chg_21d_pp : p.d21;
+        var rk = isNum(p.spread_rusfar_key_pp) ? p.spread_rusfar_key_pp : p.rusfar_minus_key;
+        var y05k = isNum(p.spread_y05_key_pp) ? p.spread_y05_key_pp : p.y05_minus_key;
+        var y1v = isNum(p.y1_pct) ? p.y1_pct : p.y1, keyv = isNum(p.key_rate_pct) ? p.key_rate_pct : p.key_rate;
+        out.push(num(y1k, 2, ' п.п.', true));
+        out.push(h('div', { 'class': 'tile__sub', text: 'год ОФЗ минус ключ' +
+          ((isNum(y1v) && isNum(keyv)) ? ' (' + fmtNum(y1v, 2, false) + '% против ' + fmtNum(keyv, 2, false) + '%)' : '') +
+          (isNum(d21) ? '; за 21 день ' + fmtNum(d21, 2, true) + ' п.п.' : '') +
+          (p.repricing === true ? ' — рост больше порога, репрайсинг ожиданий (тень)' : '') }));
+        if (isNum(rk) || isNum(y05k)) {
+          out.push(h('div', { 'class': 'tile__sub', text: [
+            isNum(rk) ? 'RUSFAR 3M − ключ ' + fmtNum(rk, 2, true) + ' п.п.' : null,
+            isNum(y05k) ? 'полгода ОФЗ − ключ ' + fmtNum(y05k, 2, true) + ' п.п.' : null
+          ].filter(Boolean).join(' · ') }));
+        }
+        if (p.series) out.push(C.miniSeries(p.series, { digits: 2, zero: true, label: 'год − ключ', unit: ' п.п.', color: tok('--s2') }));
+        break;
       case 'orfr':
         if (p.stack && p.months) {
           var fiz = (p.stack.fiz || []);
@@ -698,6 +940,13 @@
         out.push(num(p.days_left, 0, ' дн.'));
         out.push(h('div', { 'class': 'tile__sub', text: 'до заседания ' + fmtDay(p.next_meeting) + '; ключевая ' + fmtNum(p.key_rate, 2, false) + '%' +
           (isNum(p.consensus) ? ', консенсус ' + fmtNum(p.consensus, 2, false) + '%' : ', консенсус не внесён') }));
+        // Недельная инфляция переехала сюда одной строкой: отдельный тайл снят
+        // аудитом 02.09.2026 (для акций предиктивности нет, для ожиданий по
+        // ставке — контекст). Имя поля выбирает конвейер: печатаем любое
+        // строковое поле payload, начинающееся с cpi.
+        Object.keys(p).forEach(function (k) {
+          if (/^cpi/.test(k) && typeof p[k] === 'string' && p[k]) out.push(h('div', { 'class': 'tile__sub', text: ruText(p[k]) }));
+        });
         break;
       case 'polymarket':
         out.push(num(p.prob_pct, 0, '%'));
@@ -859,6 +1108,97 @@
     ]);
   }
 
+  /* ──────────────────────────────────────────────────────────── тень */
+
+  var SHADOW_STATUS = {
+    error: 'сигнал не посчитался', no_series: 'ряда в сторе нет', no_data: 'данных пока мало', warming: 'ряд ещё прогревается',
+    accumulating: 'накапливаем историю', unavailable: 'недоступна'
+  };
+  var SHADOW_GROUP = {
+    rates: 'ставки', legs: 'теневая нога', flows: 'потоки', gate: 'ворота', retail_era: 'розничная эра'
+  };
+
+  /* Тень: сигналы, которые аудит 02.09.2026 оставил под наблюдение на 12 месяцев.
+   * Считаются и копят историю вне выборки, но на позицию НЕ влияют — поэтому
+   * карточки пунктирные, а состояние бита набрано чернилами, не статусным
+   * цветом: у тени нет права выглядеть сигналом. Витрина без d.shadow — законный
+   * вход: раздел не рисуется. Ошибка одного сигнала приходит его же статусом. */
+  function renderShadow(d) {
+    var sh = d.shadow;
+    if (!sh || typeof sh !== 'object') return null;
+    var sigs = Array.isArray(sh.signals) ? sh.signals : [];
+    var sp = sh.shadow_position && typeof sh.shadow_position === 'object' ? sh.shadow_position : null;
+    var spOk = sp && POSITION_WORD[sp.state] && (!sp.status || sp.status === 'ok');
+    if (!sigs.length && !sp && !sh.error) return null;
+
+    function stateChip(s) {
+      if (!(s.state === 0 || s.state === 1)) return null;
+      return h('span', { 'class': 'shadow__state', title: 'Двоичный сигнал: включён или выключен' }, [
+        h('span', { 'class': 'shadow__dot' + (s.state === 1 ? ' shadow__dot--on' : '') }),
+        h('span', { text: s.state === 1 ? 'включён' : 'выключен' })
+      ]);
+    }
+    var cards = sigs.filter(function (s) { return s && typeof s === 'object'; }).map(function (s) {
+      var body = [];
+      var bad = s.status && s.status !== 'ok';
+      if (bad) {
+        body.push(h('div', { 'class': 'tile__headline', text: SHADOW_STATUS[s.status] || String(s.status) }));
+      } else if (isNum(s.value)) {
+        // Единица приходит с сигналом: z, п.п., доля, % — без неё «+0,10» у
+        // репрайсинга и «+0,87» у теневой ноги читались бы как одно и то же.
+        var unit = s.unit === 'z' ? ' z' : (s.unit === 'доля' ? '' : (s.unit ? ' ' + s.unit : ''));
+        body.push(h('div', { 'class': 'tile__num', text: (s.unit === 'доля' ? fmtNum(s.value * 100, 0, false) + '%' : fmtNum(s.value, 2, true) + unit) }));
+      } else {
+        body.push(h('div', { 'class': 'tile__headline', text: 'нет данных' }));
+      }
+      if (s.state_month_end === 0 || s.state_month_end === 1) {
+        body.push(h('div', { 'class': 'tile__sub', text: 'на конце месяца: ' + (s.state_month_end === 1 ? 'включён' : 'выключен') + ' — так бит читается в теневой позиции' }));
+      }
+      if (s.note) body.push(h('p', { 'class': 'tile__sub', text: ruText(s.note) }));
+      if (Array.isArray(s.history) && s.history.length > 1) {
+        body.push(C.miniSeries(s.history, { digits: 2, zero: true, label: 'значение', color: tok('--ink-3'),
+          aria: 'История теневого сигнала «' + (s.label || s.id) + '»' }));
+      }
+      return h('article', { 'class': 'card tile tile--shadow' }, [
+        h('div', { 'class': 'tile__head' }, [
+          h('h3', { 'class': 'tile__title', text: s.label || s.id }),
+          h('span', { 'class': 'tile__head-r' }, [stateChip(s)])
+        ])
+      ].concat(body, [
+        h('div', { 'class': 'tile__foot' }, [
+          h('span', { text: s.asof ? 'данные: ' + fmtDay(s.asof) : 'нет данных' }),
+          s.group ? h('span', { text: SHADOW_GROUP[s.group] || String(s.group) }) : null
+        ])
+      ]));
+    });
+    if (spOk) {
+      var spWhy = sp.reason_text || REASON_WORD[sp.reason] || '';
+      cards.unshift(h('article', { 'class': 'card tile tile--shadow' }, [
+        h('div', { 'class': 'tile__head' }, [h('h3', { 'class': 'tile__title', text: 'Если бы бит репрайсинга был в решении' })]),
+        h('div', { 'class': 'tile__num', text: POSITION_WORD[sp.state] }),
+        h('div', { 'class': 'tile__sub', text: (sp.since ? 'с ' + fmtDay(sp.since) : '') + (spWhy ? (sp.since ? ' · ' : '') + ruText(spWhy) : '') }),
+        (sp.differs_from_main === true || sp.differs_from_main === false) ? h('div', { 'class': 'tile__sub', text:
+          (sp.differs_from_main ? 'расходится с позицией в шапке' : 'совпадает с позицией в шапке') +
+          (isNum(sp.diff_days_5y) ? '; за пять лет расходились ' + sp.diff_days_5y + ' дн.' : '') +
+          (isNum(sp.switches_per_year) ? '; смен в год ' + fmtNum(sp.switches_per_year, 1, false) : '') }) : null,
+        h('p', { 'class': 'tile__sub', text: ruText(sp.note || 'Теневая позиция по правилу «пакет + бит репрайсинга ожиданий, читаемый на конце месяца». В решение не входит.') }),
+        Array.isArray(sp.history) && sp.history.length ? C.positionRibbon(sp.history, { height: 44, end: sh.asof || d.asof_trading_day, aria: 'Теневая позиция с 2004 года' }) : null,
+        h('div', { 'class': 'tile__foot' }, [h('span', { text: 'тень · наблюдение 12 месяцев' })])
+      ]));
+    } else if (sp) {
+      cards.unshift(h('article', { 'class': 'card tile tile--shadow' }, [
+        h('div', { 'class': 'tile__head' }, [h('h3', { 'class': 'tile__title', text: 'Если бы бит репрайсинга был в решении' })]),
+        h('div', { 'class': 'tile__headline', text: 'теневая позиция ' + (SHADOW_STATUS[sp.status] || 'не посчиталась') + (sp.reason ? ': ' + ruText(sp.reason) : '') }),
+        h('div', { 'class': 'tile__foot' }, [h('span', { text: 'тень' })])
+      ]));
+    }
+    return section('Тень', 'считается, копит историю, на позицию не влияет', [
+      sh.note ? h('p', { 'class': 'section__note', text: ruText(sh.note) }) : null,
+      sh.error ? h('p', { 'class': 'empty', text: 'Тень не посчиталась: ' + String(sh.error) }) : null,
+      cards.length ? h('div', { 'class': 'tiles' }, cards) : null
+    ]);
+  }
+
   /* ──────────────────────────────────────────────────────── журнал */
 
   function renderEvents(d) {
@@ -891,28 +1231,49 @@
   /* ───────────────────────────────────────────── таблица (доступность) */
 
   function renderTable(d) {
-    var core = d.core || {}, st = d.states || {};
+    var core = d.core || {}, st = d.states || {}, v = d.verdict || {};
+    var p = v.position && POSITION_WORD[v.position.state] ? v.position : null;
     var rows = [];
     var series = core.series || [];
-    var stMap = {};
+    var stMap = {}, gateMap = {};
     (st.series || []).forEach(function (r) { stMap[r[0]] = r[1]; });
+    (st.series_gate || []).forEach(function (r) { gateMap[r[0]] = r[1]; });
+    var hasGate = Array.isArray(st.series_gate) && st.series_gate.length > 0;
+    var hist = p && Array.isArray(p.history) ? p.history : [];
+    // Позиция на дату — последний RLE-отрезок, начавшийся не позже этой даты:
+    // конвейер отдаёт только смены, а таблица помесячная.
+    function posAt(day) {
+      var out = null;
+      for (var k = 0; k < hist.length; k++) {
+        if (String(hist[k][0]) <= day) out = +hist[k][1]; else break;
+      }
+      return out === 1 ? 'акции' : (out === 0 ? 'деньги' : '—');
+    }
     for (var i = Math.max(0, series.length - 36); i < series.length; i++) {
-      rows.push([series[i][0], series[i][1], stMap[series[i][0]] || '—']);
+      var day = series[i][0];
+      var r = [day, series[i][1], stMap[day] || '—'];
+      if (hasGate) r.push(gateMap[day] || '—');
+      if (hist.length) r.push(posAt(day));
+      rows.push(r);
     }
     rows.reverse();
+    var head = [
+      h('th', { scope: 'col', text: 'Месяц' }),
+      h('th', { scope: 'col', text: 'Композит' }),
+      h('th', { scope: 'col', text: 'Ячейка' }),
+      hasGate ? h('th', { scope: 'col', text: 'Ворота (с гистерезисом)' }) : null,
+      hist.length ? h('th', { scope: 'col', text: 'Позиция' }) : null
+    ];
     var table = h('table', { 'class': 'data' }, [
-      h('caption', { text: 'Композит ядра и ячейка состояния помесячно, последние 36 месяцев. Полная история — в history/daily.json.' }),
-      h('thead', null, [h('tr', null, [
-        h('th', { scope: 'col', text: 'Месяц' }),
-        h('th', { scope: 'col', text: 'Композит' }),
-        h('th', { scope: 'col', text: 'Ячейка' })
-      ])]),
+      h('caption', { text: 'Композит ядра, ячейка состояния' + (hasGate ? ', ворота с гистерезисом' : '') +
+        (hist.length ? ' и позиция' : '') + ' помесячно, последние 36 месяцев. Полная история — в history/daily.json.' }),
+      h('thead', null, [h('tr', null, head)]),
       h('tbody', null, rows.map(function (r) {
         return h('tr', null, [
           h('th', { scope: 'row', text: fmtMon(r[0]) }),
           h('td', { text: fmtNum(+r[1], 2, true) }),
-          h('td', { text: String(r[2]).split('|').join(' · ') })
-        ]);
+          h('td', { text: r[2] === '—' ? '—' : cellWords(r[2]) })
+        ].concat(r.slice(3).map(function (x) { return h('td', { text: x === '—' ? '—' : cellWords(x) }); })));
       }))
     ]);
     var comps = (core.components || []).map(function (c) {
@@ -931,9 +1292,55 @@
       ])]),
       h('tbody', null, comps)
     ]);
+
+    // Позиция и ворота — то же, что в шапке, но словами и числами в строках:
+    // без цвета, без иконок, для проверки.
+    var posRows = [];
+    if (p) {
+      posRows.push(['Позиция', POSITION_WORD[p.state] + (p.since ? ' с ' + fmtDay(p.since) : ''),
+        ruText(p.reason_text || REASON_WORD[p.reason] || '')]);
+      var prev = v.position_prev_rule;
+      if (prev && POSITION_WORD[prev.state]) {
+        posRows.push(['Позиция по прежнему правилу', POSITION_WORD[prev.state] + (prev.since ? ' с ' + fmtDay(prev.since) : ''),
+          'знак закрытого месяца, ворота без гистерезиса']);
+      }
+      if (isNum(p.comp_state)) {
+        posRows.push(['Знак решения', COMP_STATE_WORD[String(p.comp_state)] || '—',
+          'порог ±' + fmtNum(isNum(p.comp_threshold) ? p.comp_threshold : 0.2, 1, false) +
+          (isNum(p.comp_daily) ? '; дневной наклон ' + fmtNum(p.comp_daily, 2, true) : '') +
+          (p.decision_day ? ' на ' + fmtDay(p.decision_day) : '')]);
+      }
+      if (p.next_decision) posRows.push(['Следующее решение по наклону', fmtDay(p.next_decision), weekdayOf(p.next_decision)]);
+      if (isNum(p.cash_rate)) posRows.push(['Ставка денег', fmtNum(p.cash_rate, 2, false) + '% годовых',
+        'вклады топ-10' + (p.cash_rate_asof ? ' на ' + fmtDay(p.cash_rate_asof) : '')]);
+      if (isNum(p.switches_per_year)) posRows.push(['Смен позиции в год', fmtNum(p.switches_per_year, 1, false), 'в среднем за пять лет']);
+    }
+    var gate = st.gate && typeof st.gate === 'object' ? st.gate : null;
+    if (gate) {
+      posRows.push(['Ворота', gate.open === true ? 'открыты' : (gate.open === false ? 'закрыты' : '—'),
+        ((v.regime || st.regime || {}).label || '') + (gate.cell_code ? ' · ' + cellWords(gate.cell_code) : '')]);
+      ['trend', 'vol', 'bond'].forEach(function (k) {
+        var b = gate[k];
+        if (!(b === 0 || b === 1 || b === true || b === false)) return;
+        var on = b === 1 || b === true;
+        posRows.push([BIT_LABEL[k].k + ' (с гистерезисом)', on ? BIT_LABEL[k].on : BIT_LABEL[k].off,
+          (gate.since || {})[k] ? 'с ' + fmtDay(gate.since[k]) : '']);
+      });
+    }
+    var posTable = posRows.length ? h('table', { 'class': 'data' }, [
+      h('caption', { text: 'Позиция и ворота на текущую дату.' }),
+      h('thead', null, [h('tr', null, [
+        h('th', { scope: 'col', text: 'Что' }), h('th', { scope: 'col', text: 'Значение' }), h('th', { scope: 'col', text: 'Пояснение' })
+      ])]),
+      h('tbody', null, posRows.map(function (r) {
+        return h('tr', null, [h('th', { scope: 'row', text: r[0] }), h('td', { text: r[1] }), h('td', { text: r[2] || '' })]);
+      }))
+    ]) : null;
+
     return section('Таблица', 'те же ряды числами — для чтения без цвета и для проверки', [
       h('article', { 'class': 'card' }, [
-        h('div', { 'class': 'tablewrap' }, [compTable]),
+        posTable ? h('div', { 'class': 'tablewrap' }, [posTable]) : null,
+        h('div', { 'class': 'tablewrap', style: posTable ? 'margin-top:20px' : null }, [compTable]),
         h('div', { 'class': 'tablewrap', style: 'margin-top:20px' }, [table])
       ])
     ]);
@@ -1144,6 +1551,8 @@
     app.appendChild(renderCore(d));
     app.appendChild(renderStates(d));
     app.appendChild(renderMonitors(d));
+    var shd = renderShadow(d);
+    if (shd) app.appendChild(shd);
     var ev = renderEvents(d);
     if (ev) app.appendChild(ev);
     if (tableOn) app.appendChild(renderTable(d));

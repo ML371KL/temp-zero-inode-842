@@ -27,17 +27,38 @@ __all__ = ["compute_health"]
 SERIES_START = "2004-01-01"
 
 
-def _status(ic, n):
-    """ok / warn / dead по constants.HEALTH_THRESHOLDS."""
+def _status(ic, n, streak=0):
+    """ok / warn / review — по constants.HEALTH_THRESHOLDS и HEALTH_REVIEW_MONTHS.
+
+    Статуса «dead» больше нет (аудит 02.09.2026): при окне 24 месяца IC ниже нуля
+    неотличим от нуля (se≈0,21), и слово «мертва» на карточке было приговором без
+    улик. «review» выдаётся ТОЛЬКО когда ряд IC держится ниже нуля 12 месяцев подряд
+    (критерий ×12: на истории рабочей модели таких серий не было), и значит он одно:
+    плановая ревалидация состава — реколибровка, а не сокращение позиции.
+    """
     if ic is None:
         return "warn"
     if n < constants.HEALTH_IC_WINDOW_MONTHS // 2:
         return "warn"  # окно ещё не набралось — судить не о чем
     if ic >= constants.HEALTH_THRESHOLDS["ok"]:
         return "ok"
+    if streak >= constants.HEALTH_REVIEW_MONTHS:
+        return "review"
+    return "warn"
+
+
+def status_text(status, ic=None, n=0, covers_zero=False):
+    """Одна фраза под статусом — то, что читатель видит вместо слова ok/warn/review."""
+    if status == "ok":
+        return "связь видна"
+    if status == "review":
+        return "двенадцать месяцев подряд ниже нуля — плановая ревалидация состава"
+    if ic is None or n < constants.HEALTH_IC_WINDOW_MONTHS // 2:
+        return "данных для оценки ещё мало"
     if ic >= constants.HEALTH_THRESHOLDS["warn"]:
-        return "warn"
-    return "dead"
+        return "связь слабая; интервал широкий"
+    return ("связи на этом окне не видно"
+            + ("; интервал накрывает ноль" if covers_zero else ""))
 
 
 def ic_ci95(ic, n):
@@ -146,11 +167,14 @@ def compute_health(panel, mf=None, sign_since=None):
     # интервал всё равно шириной ±0,41.
     ic_shown = round(ic, 3) if ic is not None else None
     ci_lo, ci_hi = ic_ci95(ic_shown, n)
+    status = _status(ic, n, streak)
+    covers_zero = bool(ci_lo is not None and ci_lo < 0 < ci_hi)
     out = {
         "ic_24m": ic_shown,
         "ic_ci95": [ci_lo, ci_hi] if ci_lo is not None else None,
         "n": n,
-        "status": _status(ic, n),
+        "status": status,
+        "status_text": status_text(status, ic, n, covers_zero),
         "window_months": win,
         "coverage": coverage,
         "months_total": len(pairs),
@@ -180,7 +204,10 @@ def _note(h):
         span = (f"{ci[0]:+.2f}".replace("-", "−") + "; " + f"{ci[1]:+.2f}".replace("-", "−"))
         txt += f" (95% интервал [{span}])"
     covers_zero = bool(ci and ci[0] is not None and ci[0] < 0 < ci[1])
-    if h["status"] == "dead":
+    if h["status"] == "review":
+        txt += (" — двенадцать месяцев подряд ниже нуля: плановая ревалидация "
+                "состава (реколибровка, не сокращение позиции)")
+    elif h["status"] == "warn" and h["ic_24m"] < constants.HEALTH_THRESHOLDS["warn"]:
         # «Не работает» — утверждение, которого данные не выдерживают: при n=24
         # интервал шире самого числа втрое. Говорим то, что есть: связи на этом
         # окне НЕ ВИДНО, и это не то же самое, что «связи нет».

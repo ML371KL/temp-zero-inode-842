@@ -45,8 +45,11 @@ EVENT_FIELDS = ("key", "ts", "kind", "severity", "text", "comment",
 # владелец перестаёт открывать журнал, и вместе с ними мимо проходит смена ячейки.
 # Ровно это и случилось: в журнале из четырёх записей три были про источники.
 OPS_KINDS = frozenset({
-    "source_stale", "health_dead", "health_review_due", "lease_lost", "payload_oversize",
-    "core_missing",
+    "source_stale", "health_review", "lease_lost", "payload_oversize", "core_missing",
+    # Прежние имена (до 02.09.2026): новых событий с ними не бывает, но в очереди
+    # повторов старого alerts_state.json они ещё могут лежать — и обязаны уйти в
+    # ops-канал, а не в ленту рынка.
+    "health_dead", "health_review_due",
 })
 
 
@@ -141,11 +144,15 @@ def snapshot(payload, now=None):
     core = payload.get("core") or {}
     cur = (payload.get("states") or {}).get("current") or {}
     mons = _mons(payload)
+    position = (payload.get("verdict") or {}).get("position") or {}
     return {
         "asof": payload.get("asof_trading_day"),
         "core_value": core.get("value"),
         "core_sign": core.get("sign"),
         "cell": (payload.get("verdict") or {}).get("cell_code"),
+        # Позиция «акции/деньги» — слой поверх ядра и ячейки, у него своё событие.
+        "position": position.get("state"),
+        "position_since": position.get("since"),
         "trend": cur.get("trend"), "vol": cur.get("vol"), "bond": cur.get("bond"),
         "health": (core.get("health") or {}).get("status"),
         "health_review_due": bool((core.get("health") or {}).get("review_due")),
@@ -212,6 +219,36 @@ def _core_flip(payload, prev, state, now):
                 meaning="Шкала — от −3 до +3: чем дальше от нуля, тем увереннее "
                         "перевес в эту сторону. Это оценка направления на месяц, "
                         "а не обещание доходности.")]
+
+
+def _position_change(payload, prev, now):
+    """Смена позиции «акции ↔ деньги» между прогонами (слой решения, 02.09.2026).
+
+    Первый прогон молчит, как core_flip: снимок без позиции (старая версия панели)
+    переходом не считается. Слово «позиция» здесь — итог ворот и наклона, а не
+    совет: панель говорит, где она стоит по своему правилу, и почему.
+    """
+    pos = (payload.get("verdict") or {}).get("position") or {}
+    new, old = pos.get("state"), prev.get("position")
+    if new not in ("long", "flat") or old not in ("long", "flat") or new == old:
+        return []
+    rate = pos.get("cash_rate")
+    money = "деньги" + (f" (ставка {_pct(rate, 1)})" if isinstance(rate, (int, float)) else "")
+    word = {"long": "акции", "flat": money}
+    reason = wording.sentence(wording.ru_decimals(pos.get("reason_text") or ""))
+    since = pos.get("since")
+    detail = ((reason + " ") if reason else "") + (
+        f"Решение от {wording.ru_day(since)}, " if since else "") + "исполнять на следующем закрытии."
+    return [_ev(f"position:{payload.get('asof_trading_day')}:{new}", "position_change",
+                f"Позиция: {'акции' if old == 'long' else 'деньги'} → "
+                f"{'акции' if new == 'long' else 'деньги'}",
+                "warn" if new == "flat" else "info", now,
+                before=word[old], after=word[new],
+                detail=detail[0].upper() + detail[1:],
+                meaning="Позиция — итог двух условий: ворота (три признака состояния "
+                        "рынка, читаются ежедневно) и оценка рынка на неделю вперёд "
+                        "(решается по пятницам). Акции держим, только когда ворота "
+                        "открыты и оценка в плюсе.")]
 
 
 def _cell_change(payload, prev, now):
@@ -493,63 +530,39 @@ def _sources(payload, prev, now):
 
 
 def _health(payload, prev, now):
-    health = ((payload.get("core") or {}).get("health") or {})
-    st = health.get("status")
-    if st != "dead" or prev.get("health") == "dead":
-        return []
-    # ТЕКСТ КАЛИБРУЕТСЯ ПО ИНТЕРВАЛУ. Прежний заголовок «модель перестала работать»
-    # и «доверять знаку нельзя» — утверждения, которых данные не выдерживают: при
-    # окне 24 месяца интервал шириной ±0,41, и значение −0,08 накрывает ноль втрое.
-    # Оплачено 01.09.2026: владелец получил приговор модели там, где честный
-    # диагноз — «на этом окне информации нет», а регламент требует шести месяцев
-    # подряд и насчитал один. Отчёт реколибровки при этом уже год пишет ровно так.
-    ci = health.get("ic_ci95") or []
-    covers_zero = len(ci) == 2 and ci[0] is not None and ci[0] < 0 < ci[1]
-    span = (f" (95% интервал от {_num(ci[0], 2, True)} до {_num(ci[1], 2, True)})"
-            if len(ci) == 2 and ci[0] is not None else "")
-    streak, need = health.get("below_zero_months") or 0, health.get("review_months")
-    return [_ev(f"health_dead:{payload.get('asof_trading_day')}", "health_dead",
-                "связь оценки с рынком ушла в минус на свежем окне", "warn", now,
-                fact=f"Связь оценки с последующим движением рынка за последние "
-                     f"{health.get('n')} {wording.plural(health.get('n'), 'месяц', 'месяца', 'месяцев')}"
-                     f" — {_num(health.get('ic_24m'), 2, True)}{span}."
-                     + (" Интервал накрывает ноль: отличить модель от монетки на "
-                        "этом окне нечем." if covers_zero else "")
-                     + (f" Ниже нуля {streak} мес подряд, порог регламента — {need}."
-                        if need else ""),
-                meaning="Это не поломка и не разрешение действовать, а отсутствие "
-                        "информации на коротком окне: оценка продолжает считаться и "
-                        "выглядит исправной. Регламент §7 меняет состав модели "
-                        "только после шести месяцев подряд ниже нуля И при наличии "
-                        "проверенного кандидата на замену — одного месяца мало.",
-                where="Смотреть: карточку «Здоровье модели» на панели и "
-                      "docs/ARCHITECTURE.md §7.")]
+    """Регламентный порог плановой ревалидации: IC ниже нуля 12 месяцев подряд.
 
+    Одно событие вместо двух прежних (health_dead + health_review_due, аудит
+    02.09.2026). health_dead срабатывал на ПЕРВЫЙ месяц ниже нуля — при окне 24 месяца
+    интервал шириной ±0,41, и значение −0,08 накрывает ноль втрое; владелец получал
+    приговор модели там, где честный диагноз — «на этом окне информации нет»
+    (оплачено 01.09.2026). Теперь тревога одна и приходит в момент, который что-то
+    значит: статус review = порог ×12 = review_due, и это один переход, а не два.
 
-def _health_review(payload, prev, now):
-    """Регламентный порог пересмотра состава: IC ниже нуля два квартала подряд.
-
-    ПОЧЕМУ ОТДЕЛЬНО ОТ health_dead: тот срабатывает на ПЕРВЫЙ месяц ниже нуля и
-    больше не возвращается, а регламент (docs/ARCHITECTURE.md §7) требует шести
-    месяцев подряд. Между этими двумя моментами полгода, и без своего события
-    порог наступал молча — ровно то, ради чего регламент и писали.
-
-    Сообщение не говорит «меняй состав»: вторая половина условия (механизм у
-    кандидата) человеческая, панель её не измеряет.
+    Сообщение не говорит «меняй состав» и не говорит «сокращай позицию»: протокол по
+    порогу — реколибровка, а вторая половина условия (механизм у кандидата) —
+    работа человека, панель её не измеряет.
     """
     health = ((payload.get("core") or {}).get("health") or {})
-    if not health.get("review_due") or prev.get("health_review_due"):
+    st = health.get("status")
+    if st != "review" or prev.get("health") == "review":
         return []
-    months = health.get("below_zero_months")
-    return [_ev(f"health_review_due:{health.get('below_since')}", "health_review_due",
+    ci = health.get("ic_ci95") or []
+    span = (f" (95% интервал от {_num(ci[0], 2, True)} до {_num(ci[1], 2, True)})"
+            if len(ci) == 2 and ci[0] is not None else "")
+    months = health.get("below_zero_months") or 0
+    since = health.get("below_since")
+    return [_ev(f"health_review:{since or payload.get('asof_trading_day')}", "health_review",
                 "достигнут порог пересмотра модели", "warn", now,
                 fact=f"Связь оценки с рынком держится ниже нуля {months} "
-                     f"{wording.plural(months, 'месяц', 'месяца', 'месяцев')} подряд "
-                     f"(с {wording.ru_month(health.get('below_since'))}), сейчас "
-                     f"{_num(health.get('ic_24m'), 2, True)}.",
-                meaning="Регламент требует пересмотра состава модели — но это работа "
-                        "человека: второе условие, наличие механизма у кандидата, "
-                        "панель проверить не может.",
+                     f"{wording.plural(months, 'месяц', 'месяца', 'месяцев')} подряд"
+                     + (f" (с {wording.ru_month(since)})" if since else "")
+                     + f", сейчас {_num(health.get('ic_24m'), 2, True)}{span}.",
+                meaning="Это плановая ревалидация состава по регламенту §7 — "
+                        "реколибровка, а не сокращение позиции: оценка продолжает "
+                        "считаться, позиция ведётся по прежнему правилу. Второе условие "
+                        "регламента, наличие механизма у кандидата, панель проверить "
+                        "не может — это работа человека.",
                 where="Смотреть: отчёт реколибровки в state/recalibration/ "
                       "и docs/ARCHITECTURE.md §7.")]
 
@@ -600,7 +613,9 @@ def _core_missing(payload, prev, now):
 #
 # core_flip СЮДА НЕ ВХОДИТ и не должен: наклон и ворота — разные слои модели
 # («сначала ворота, потом наклон», docs/ARCHITECTURE.md). Они меняются независимо, и
-# слияние спрятало бы одно за другим.
+# слияние спрятало бы одно за другим. position_change — тоже отдельно: позиция есть
+# ИТОГ ворот и наклона, и смена режима без смены позиции (или наоборот) — две разные
+# новости.
 REGIME_FAMILY = ("buy_window_open", "bond_flag_on", "bond_flag_off", "state_cell_change")
 
 SEVERITY_RANK = {"info": 0, "warn": 1}
@@ -687,6 +702,7 @@ def detect(payload, state, now=None, merge=True):
         # пайплайна начинается с пачки «событий» о том, что случилось до него:
         # проваленный на прошлой неделе аукцион и протухший с вечера источник.
         return events
+    events += _position_change(payload, prev, now)
     events += _cell_change(payload, prev, now)
     events += _bond_flag(payload, prev, now)
     events += _buy_window(payload, prev, now)
@@ -696,7 +712,6 @@ def detect(payload, state, now=None, merge=True):
     events += _deposit(payload, prev, state, now)
     events += _sources(payload, prev, now)
     events += _health(payload, prev, now)
-    events += _health_review(payload, prev, now)
     events += _core_missing(payload, prev, now)
     return merge_regime(events) if merge else events
 
@@ -857,8 +872,9 @@ def seed_from_payload(state, payload, now=None):
 # держится та же серия. Ops-канал по умолчанию не настроен (ops/env.example оставляет
 # ERROR_* пустыми), так что путь этот не гипотетический.
 #
-# Поле-защёлка у каждого своё: у health_review_due — одноимённый флаг, у health_dead —
-# строка статуса, у core_missing — пара «оценка + режим» (правило сравнивает обе).
+# Поле-защёлка у каждого своё: у health_review — строка статуса (и флаг review_due
+# рядом: это один и тот же порог), у core_missing — пара «оценка + режим» (правило
+# сравнивает обе).
 # До 18.08.2026 защёлка покрывала только два health-вида, и это было хуже, чем
 # казалось: незащищённые source_stale и core_missing при недоставке умирали в
 # pending по TTL 24 ч и больше не рождались НИКОГДА — снимок уже зафиксировал
@@ -867,8 +883,7 @@ def seed_from_payload(state, payload, now=None):
 # Last-Modified и молчит, владелец не узнаёт об аварии вовсе.
 # lease_lost и payload_oversize защищены отдельно (after_publish, lease_ok).
 LATCH_FIELDS = {
-    "health_review_due": ("health_review_due",),
-    "health_dead": ("health",),
+    "health_review": ("health", "health_review_due"),
     "core_missing": ("core_value", "cell"),
 }
 

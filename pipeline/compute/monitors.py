@@ -13,6 +13,7 @@ TIER_NOTES, а не вес в модели.
 """
 
 import math
+from bisect import bisect_right
 from datetime import date, datetime, timedelta, timezone
 
 from pipeline.lib import calc, registry, schedule
@@ -25,12 +26,24 @@ from pipeline.lib.constants import (
     TIER_NOTES,
 )
 
+try:
+    # Порог репрайсинга живёт у тени: там он ТЕСТИРУЕТСЯ как бит (P3m аудита
+    # 02.09.2026), здесь только подписывается. Две копии числа разошлись бы.
+    from pipeline.compute.shadow import REPRICING_PP
+except ImportError:  # тень пишется параллельно — тайл не должен от неё зависеть
+    REPRICING_PP = 0.25
+
 TITLES = {
     "orfr": "Потоки ОРФР",
     "lqdt": "Фонды денежного рынка",
     "deposit_spread": "Вклады против дивидендов",
     "dividends": "Дивидендный календарь",
     "cb_meeting": "Заседание ЦБ",
+    "expectations": "Цена ожиданий по ставке",
+    # cpi_weekly с витрины снят (аудит 02.09.2026): недельный ИПЦ как предиктор
+    # акций опровергнут, а как вход ожиданий ставки он теперь строка в cb_meeting.
+    # Заголовок и функция _t_cpi_weekly оставлены — вернуть тайл стоит одну строку
+    # в BUILDERS.
     "cpi_weekly": "Недельная инфляция",
     "ofz_auctions": "Аукционы ОФЗ",
     # Именно «соглашения»: рынки с формулировкой «ceasefire» разрешались YES по
@@ -412,6 +425,21 @@ def _month_ru(dstr):
     return f"{MONTHS_RU_NOM[d.month - 1]} {d.year}" if d else "н/д"
 
 
+def _step(pts):
+    """Функция «значение на дату»: последняя точка ряда не позже дня (ступенька).
+
+    Ключевая ставка живёт событиями, кривая ОФЗ — торговыми днями; разность двух
+    рядов имеет смысл только на ставке, ДЕЙСТВОВАВШЕЙ в день среза кривой.
+    """
+    keys = [d for d, _ in pts]
+    vals = [v for _, v in pts]
+
+    def at(day):
+        k = bisect_right(keys, day) - 1
+        return vals[k] if k >= 0 else None
+    return at
+
+
 # ------------------------------------------------------------------- тайлы
 
 def _t_orfr(store, now):
@@ -625,8 +653,11 @@ def _t_deposit_spread(store, now):
         headline = (f"Дивдоходность {_n(dy, 1)}% выше вкладов {_n(dep, 1)}% "
                     f"на {_n(spread, 1)} п.п.{first}")
     else:
+        # Без «в пользу/не в пользу акций»: спред — не вердикт, а число; как
+        # сигнал он работает только в одной фазе, и это сказано тут же.
         headline = (f"Вклады {_n(dep, 1)}% против дивидендов {_n(dy, 1)}%: "
-                    f"спред {_n(spread, 1)} п.п. не в пользу акций")
+                    f"спред {_n(spread, 1)} п.п.; как сигнал работает только в фазе "
+                    f"смягчения (карточка второго ряда)")
     return _tile("deposit_spread", status, dep_asof or dy_asof, headline, payload,
                  "Как сигнал спред работает только в фазе смягчения ставки (IC +0,26); "
                  "устойчивого «спред > 0» на истории не наступало ни разу.",
@@ -774,6 +805,17 @@ def _t_cb_meeting(store, now):
         "priced_text": priced,
         "calendar": CB_MEETINGS_2026,
     }
+    # Недельный ИПЦ — вход в ожидания ставки, а не предиктор акций (тайл снят
+    # аудитом 02.09.2026): одной строкой здесь, где он и читается — перед заседанием.
+    cpi_pts, _cpi_meta = _ser(store, "cpi_weekly")
+    if cpi_pts:
+        last4 = cpi_pts[-4:]
+        total = sum(v for _, v in last4)
+        payload["cpi_weekly_prints"] = [[d, _r(v, 2)] for d, v in last4]
+        payload["cpi_weekly_4w"] = (
+            f"недельная инфляция за {len(last4)} нед.: "
+            + ", ".join(f"{_n(v, 2, True)}%" for _, v in last4)
+            + f" (сумма {_n(total, 2, True)}%, последняя неделя {_ddmm(last4[-1][0])})")
     status = _st("key_rate", key_pts, key_meta, now)
     if nxt is None:
         status = _worst(status, "stale")
@@ -801,11 +843,90 @@ def _t_cb_meeting(store, now):
                  key_meta.get("fetched_at") or rus_meta.get("fetched_at"))
 
 
+def _t_expectations(store, now):
+    """Цена ожиданий по ставке: сколько смягчения или ужесточения рынок уже заложил.
+
+    Четыре числа — один и тот же спред с разных концов: год ОФЗ минус ключ
+    (уровень), его изменение за 21 торговый день, RUSFAR 3M минус ключ и полгода
+    ОФЗ минус ключ. Как УРОВЕНЬ спред направление акций не предсказывает (аудит
+    02.09.2026), поэтому тайл вердикта не выносит — только называет, что в цене.
+    Единственный живой остаток — РОСТ спреда больше +0,25 п.п. за 21 день как
+    детектор турбулентности; он живёт тенью (compute/shadow.py::repricing), а тут
+    лишь подписывается, чтобы читатель знал, откуда взялось число.
+
+    Ставка берётся ДЕЙСТВОВАВШАЯ в день среза кривой (_step), а не последняя:
+    иначе в неделю после заседания спред за 21 день целиком состоял бы из шага
+    ЦБ, а не из движения кривой.
+    """
+    y1_pts, y1_meta = _sub(store, ("zcyc_y1", "zcyc"), ("y1.0", "y1", "1.0"))
+    y05_pts, _y05_meta = _sub(store, ("zcyc_y0_5", "zcyc"), ("y0.5", "y0_5", "0.5"))
+    key_pts, key_meta = _ser(store, "key_rate")
+    rus_pts, rus_meta = _ser(store, "rusfar3m")
+    src_note = "Источники: КБД МосБиржи (1Y, 0.5Y), ключевая ставка ЦБ, RUSFAR 3M."
+    if not y1_pts or not key_pts:
+        return _empty("expectations", src_note)
+    key_at = _step(key_pts)
+    spread = [(d, y - key_at(d)) for d, y in y1_pts if key_at(d) is not None]
+    if not spread:
+        return _empty("expectations", src_note)
+    asof, s_last = spread[-1]
+    chg21 = (spread[-1][1] - spread[-22][1]) if len(spread) > 21 else None
+    key_now = key_at(asof)
+    y1_now = dict(y1_pts)[asof]
+    y05_now = _step(y05_pts)(asof) if y05_pts else None
+    rus_asof, rus = _last(rus_pts)
+    rus_key = key_at(rus_asof) if rus_asof else None
+    rus_spread = (rus - rus_key) if (rus is not None and rus_key is not None) else None
+
+    status = _worst(_st("zcyc_y1", y1_pts, y1_meta, now), _st("key_rate", key_pts, key_meta, now))
+    if rus_pts:
+        status = _worst(status, _st("rusfar3m", rus_pts, rus_meta, now))
+    repricing = None if chg21 is None else bool(chg21 > REPRICING_PP)
+    payload = {
+        "y1_pct": _r(y1_now, 2),
+        "y05_pct": _r(y05_now, 2),
+        "key_rate_pct": _r(key_now, 2),
+        "key_rate_asof": key_pts[-1][0],
+        "rusfar3m_pct": _r(rus, 2),
+        "rusfar_asof": rus_asof,
+        "spread_y1_key_pp": _r(s_last, 2),
+        "spread_y05_key_pp": _r((y05_now - key_now) if y05_now is not None else None, 2),
+        "spread_rusfar_key_pp": _r(rus_spread, 2),
+        "chg_21d_pp": _r(chg21, 2),
+        "repricing_threshold_pp": REPRICING_PP,
+        "repricing": repricing,
+        "series": [[d, _r(v, 2)] for d, v in spread[-120:]],
+    }
+    if s_last < -0.05:
+        priced = f"в цене {_n(abs(s_last), 2)} п.п. смягчения"
+    elif s_last > 0.05:
+        priced = f"в цене {_n(s_last, 2)} п.п. ужесточения"
+    else:
+        priced = "у ключа, смягчение не в цене"
+    chg_txt = (f"за 21 день спред {_n(chg21, 2, True)} п.п." if chg21 is not None
+               else "истории меньше 21 дня")
+    headline = f"Год ОФЗ {_n(y1_now, 2)}% против ключа {_n(key_now, 2)}%: {priced}; {chg_txt}"
+    if repricing:
+        headline += " — репрайсинг ожиданий (тень)"
+    return _tile("expectations", status, asof, headline, payload,
+                 "Как уровень направление не предсказывает; рост спреда "
+                 f"больше +{_n(REPRICING_PP, 2)} п.п. за 21 день — детектор турбулентности "
+                 "(тень, на позицию не влияет).",
+                 y1_meta.get("fetched_at") or key_meta.get("fetched_at"))
+
+
 def _t_cpi_weekly(store, now):
-    pts, meta = _ser(store, "cpi_weekly")
+    """Оставлен как функция, из BUILDERS убран (аудит 02.09.2026): для акций
+    недельный ИПЦ опровергнут, а как вход ожиданий он — строка в cb_meeting.
+
+    id тайла — в переменной, а не литералом: поиск по исходнику `_tile("cpi_weekly"`
+    не должен находить снятый тайл как живой (так однажды считал test_guide).
+    """
+    tid = "cpi_weekly"
+    pts, meta = _ser(store, tid)
     if not pts:
-        return _empty("cpi_weekly")
-    status = _st("cpi_weekly", pts, meta, now)
+        return _empty(tid)
+    status = _st(tid, pts, meta, now)
     asof, last = pts[-1]
 
     def _saar(weekly_pct_list):
@@ -834,7 +955,7 @@ def _t_cpi_weekly(store, now):
     headline = (f"Неделя {_ddmm(asof)}: {_n(last, 2, True)}% "
                 f"(в годовом выражении по 4 неделям {_n(_saar(last4), 1)}%, "
                 f"без сезонной корректировки)")
-    return _tile("cpi_weekly", status, asof, headline, payload,
+    return _tile(tid, status, asof, headline, payload,
                  "Пост-публикационный эффект для акций — ноль (знаменитый пре-дрейф оказался "
                  "артефактом остановки торгов в марте 2022); держим как вход в ожидания ставки.",
                  meta.get("fetched_at"))
@@ -997,21 +1118,23 @@ def _t_futoi(store, now):
         "series": [[d, _r(v, 4)] for d, v in used[-120:]],
         "norm": "z-120 по нетто/брутто" if ratio else "z-120 по нетто-позиции",
     }
-    # ПОЧЕМУ вердикт сформулирован относительно нормы, а не «перегружены лонгом/шортом»:
+    # ПОЧЕМУ сформулировано относительно нормы, а не «перегружены лонгом/шортом»:
     # z-120 мерит ОТКЛОНЕНИЕ доли от 120-дневной нормы, а не сам уровень. Уровень с 2025
     # структурно положительный, поэтому z=−2,93 стоял рядом с нетто-ЛОНГОМ +18 493
     # контракта в том же payload — заголовок «физики перегружены шортом» опровергался
-    # числами тайла. Уровень теперь назван прямо, вердикт остаётся на z.
+    # числами тайла. Уровень назван прямо, отклонение — числом.
+    # ПОЧЕМУ без «контрариан за/против роста» (аудит 02.09.2026): знак сигнала
+    # сменился в 2024–2026, и вердикт по нему был бы монетой. Заголовок — факты.
     if z is None:
         verdict = "z(120д) не посчитан — истории мало"
     else:
         if z >= 1.0:
-            rel = "выше своей 120-дневной нормы — контрариан против роста"
+            rel = "выше своей 120-дневной нормы"
         elif z <= -1.0:
-            rel = "ниже своей 120-дневной нормы — контрариан за рост"
+            rel = "ниже своей 120-дневной нормы"
         else:
             rel = "у своей 120-дневной нормы"
-        verdict = f"z(120д) {_n(z, 2, True)}: позиция {rel}"
+        verdict = f"z(120д) {_n(z, 2, True)}: доля {rel}"
     holders = ""
     if hl.get(asof) or hs.get(asof):
         holders = f"; держателей лонга {_n(hl.get(asof), 0)}, шорта {_n(hs.get(asof), 0)}"
@@ -1023,8 +1146,9 @@ def _t_futoi(store, now):
         level = "Нетто-позиция физлиц нулевая"
     headline = f"{level}, {verdict}{holders}"
     return _tile("futoi", status, asof, headline, payload,
-                 "Работает только в спокойном быке (IC −0,24); в медведе знак неустойчив. "
-                 "Нормировка перцентилем-252 сломана структурным сдвигом — используем z-120.",
+                 "В решение не входит: знак сигнала сменился в 2024–2026 (аудит "
+                 "02.09.2026). Нормировка перцентилем-252 сломана структурным сдвигом — "
+                 "используем z-120.",
                  meta.get("fetched_at"))
 
 
@@ -1208,8 +1332,9 @@ def _t_breadth(store, now):
     tail = f" ({_n(chg, 0, True)} п.п. за месяц)" if chg is not None else ""
     headline = f"Выше 200-дневной {_n(v * scale, 0)}% бумаг{tail}"
     return _tile("breadth", status, asof, headline, payload,
-                 "В режиме 2025–26 ширина работает КОНТРАРИАН (узкая = перепроданность), "
-                 "но выборка молодая — 19 месяцев.",
+                 "Знак сигнала зависит от эры: подтверждение до 2022, контрариан в "
+                 "2025–2026 (выборка молодая — 19 месяцев); в решение не входит. "
+                 "Ранний бит ворот «<40 % бумаг» живёт тенью.",
                  meta.get("fetched_at"))
 
 
@@ -1412,13 +1537,16 @@ def _by_issuer(rows):
     return sorted(total.items(), key=lambda kv: -kv[1])
 
 
+# Порядок — порядок на витрине (аудит 02.09.2026): первыми то, что читается перед
+# решением по ставке (цена ожиданий и заседание), дальше потоки и цены, описательные
+# тайлы (малые каппы, розница) — последними. cpi_weekly снят — см. TITLES.
 BUILDERS = [
-    ("orfr", _t_orfr), ("lqdt", _t_lqdt), ("deposit_spread", _t_deposit_spread),
-    ("dividends", _t_dividends), ("cb_meeting", _t_cb_meeting), ("cpi_weekly", _t_cpi_weekly),
-    ("ofz_auctions", _t_ofz_auctions), ("polymarket", _t_polymarket), ("futoi", _t_futoi),
-    ("rvi", _t_rvi), ("rub_barrel", _t_rub_barrel), ("sep_node", _t_sep_node),
-    ("breadth", _t_breadth), ("mcxsm", _t_mcxsm), ("hy_spread", _t_hy_spread),
-    ("retail", _t_retail),
+    ("expectations", _t_expectations), ("cb_meeting", _t_cb_meeting), ("orfr", _t_orfr),
+    ("futoi", _t_futoi), ("hy_spread", _t_hy_spread), ("rub_barrel", _t_rub_barrel),
+    ("deposit_spread", _t_deposit_spread), ("dividends", _t_dividends),
+    ("ofz_auctions", _t_ofz_auctions), ("rvi", _t_rvi), ("breadth", _t_breadth),
+    ("polymarket", _t_polymarket), ("sep_node", _t_sep_node), ("lqdt", _t_lqdt),
+    ("mcxsm", _t_mcxsm), ("retail", _t_retail),
 ]
 
 

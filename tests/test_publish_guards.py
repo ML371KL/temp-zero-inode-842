@@ -444,5 +444,44 @@ class TestOversizeIsLoud(PublishCase):
         self.assertFalse(res["oversize"])
 
 
+class TestVerdictWithPosition(PublishCase):
+    """Вердикт с позицией (02.09.2026): суточный прогон собирает его из решения,
+    интрадей берёт готовым — иначе позиция пропадала бы с витрины на торговый день."""
+
+    def test_готовый_вердикт_не_пересобирается(self):
+        ready = {"cell_code": "bear|stress|stress", "core_value": 0.68,
+                 "position": {"state": "flat", "since": "2026-08-07"}}
+        payload = self.publish.build_payload(core={"value": 0.68}, states={"current": {}},
+                                             mode="intraday", asof=ASOF, verdict=ready,
+                                             shadow={"note": "тень"})
+        self.assertIs(payload["verdict"], ready)
+        self.assertEqual(payload["shadow"], {"note": "тень"})
+
+    def test_решение_попадает_в_вердикт(self):
+        decision = {"position": {"state": "long", "since": "2026-08-07"},
+                    "position_prev_rule": {"state": "flat", "since": "2026-08-01"}}
+        payload = self.payload(decision=decision)
+        self.assertEqual(payload["verdict"]["position"]["state"], "long")
+        self.assertEqual(payload["verdict"]["position_prev_rule"]["state"], "flat")
+        # прежние поля на месте: фронт обязан работать и со старым payload
+        self.assertEqual(payload["verdict"]["cell_code"], "bear|stress|stress")
+
+    def test_без_решения_вердикт_прежний_а_тень_пустая(self):
+        payload = self.payload()
+        self.assertNotIn("position", payload["verdict"])
+        self.assertIn("regime", payload["verdict"])
+        self.assertEqual(payload["shadow"], {})
+
+    def test_лента_ворот_режется_вместе_с_лентой_ячеек(self):
+        # Дневная лента: прореживание оставляет по точке на месяц в старой части.
+        rows = [[(date(2000, 1, 1) + timedelta(days=i)).isoformat(), "bull|calm|ok"]
+                for i in range(500)]
+        payload = self.payload(states={"current": {"trend": 0, "vol": 1, "bond": 1},
+                                       "series": list(rows), "series_gate": list(rows)})
+        self.assertTrue(self.publish._thin_states_series(payload))
+        self.assertLess(len(payload["states"]["series_gate"]), 500)
+        self.assertLess(len(payload["states"]["series"]), 500)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -135,15 +135,26 @@ class TestRender(WordingCase):
 
     def test_санитарное_в_формате_общего_мостика(self):
         """Тот же вид, что шлёт /usr/local/sbin/dash-notify для 837, 838 и 839."""
-        got = self.w.render_ops({"kind": "health_dead", "title": "модель не работает",
-                                 "fact": "Связь оценки с рынком −0,02.",
-                                 "meaning": "Знаку доверять нельзя.",
+        got = self.w.render_ops({"kind": "core_missing", "title": "панель потеряла оценку",
+                                 "fact": "Вчера было +0,66, сегодня «нет данных».",
+                                 "meaning": "Похоже на неполный набор рядов.",
                                  "where": "Смотреть: карточку «Здоровье модели»."})
         lines = got.split("\n")
-        self.assertEqual(lines[0], "🔴 <b>842 · модель не работает</b>")
+        self.assertEqual(lines[0], "🔴 <b>842 · панель потеряла оценку</b>")
         self.assertEqual(len(lines), 4, "факт, следствие и «куда смотреть» — три строки")
         self.assertTrue(lines[-1].startswith("Смотреть:"),
                         "сообщение о поломке без адреса поломки заставляет искать заново")
+
+    def test_порог_здоровья_жёлтый_а_не_красный(self):
+        # health_review — достигнутый порог плановой ревалидации, а не поломка:
+        # красный значок читался бы как «панель сломалась» (аудит 02.09.2026).
+        got = self.w.render_ops({"kind": "health_review", "title": "достигнут порог",
+                                 "fact": "12 месяцев подряд.", "where": "Смотреть: §7."})
+        self.assertTrue(got.startswith("🟡 "))
+        self.assertNotIn("health_dead", self.w.OPS_KIND)
+
+    def test_у_смены_позиции_свой_вид(self):
+        self.assertEqual(self.w.KIND["position_change"]["emoji"], "🧭")
 
     def test_длинное_сообщение_режется_под_предел_телеграма(self):
         got = self.w.render_market(self.event(detail="я" * 6000))
@@ -166,7 +177,9 @@ class TestJargonGate(unittest.TestCase):
 
     JARGON = re.compile(
         r"\bячейк|\bядро\b|\bядра\b|композит|\bлиз\b|hit\s|\bn=|dd<|"
-        r"\bdead\b|\bstale\b|\bwarn\b|bull\||bear\||\|stress|\|calm|\|ok\b",
+        r"\bdead\b|\bstale\b|\bwarn\b|bull\||bear\||\|stress|\|calm|\|ok\b|"
+        # слой решения (02.09.2026): устройство ворот наружу не выпускаем
+        r"гистерезис|\bбит\b|\bбита\b|\bбиты\b|\bбитов\b|\breview\b",
         re.I)
 
     def setUp(self):

@@ -274,7 +274,9 @@ class TestHealth(CoreCase):
         health = out["health"]
         for key in ("ic_24m", "n", "status", "series", "coverage"):
             self.assertIn(key, health)
-        self.assertIn(health["status"], ("ok", "warn", "dead"))
+        # Статуса dead нет с 02.09.2026: IC<0 на окне 24 месяца неотличим от нуля.
+        self.assertIn(health["status"], ("ok", "warn", "review"))
+        self.assertTrue(health["status_text"])
         # IC считается только по ЗАВЕРШЁННЫМ месяцам: последняя пара «сигнал →
         # форвард» смотрела бы в будущее (health.py, правило 1).
         # мутация: включить последние два месяца -> n вырастет на 2, а IC станет
@@ -285,9 +287,9 @@ class TestHealth(CoreCase):
 class TestHealthReviewStreak(unittest.TestCase):
     """Длительность «ниже нуля» — величина, на которую ссылается регламент §7.
 
-    До этого условие «health<0 два квартала подряд» было записано словами и не
-    измерялось ничем: алерт срабатывал на ПЕРВЫЙ месяц статуса dead и молчал
-    дальше, а порог наступал через полгода — молча.
+    До этого условие «health<0 несколько месяцев подряд» было записано словами и не
+    измерялось ничем: алерт срабатывал на ПЕРВЫЙ месяц ниже нуля и молчал дальше,
+    а порог наступал позже — молча. С 02.09.2026 порог — 12 месяцев (×12).
     """
 
     def setUp(self):
@@ -314,11 +316,38 @@ class TestHealthReviewStreak(unittest.TestCase):
         self.assertEqual(self.build([-0.3, -0.2, 0.01])[0], 0)
 
     def test_zero_is_not_below_zero(self):
-        # Порог статуса dead — строго ниже нуля (HEALTH_THRESHOLDS["warn"] = 0.0).
+        # Серия «ниже нуля» — строго ниже (HEALTH_THRESHOLDS["warn"] = 0.0).
         self.assertEqual(self.build([-0.3, 0.0])[0], 0)
 
-    def test_review_threshold_is_two_quarters(self):
-        self.assertEqual(self.constants.HEALTH_REVIEW_MONTHS, 6)
+    def test_review_threshold_is_twelve_months(self):
+        # Критерий ×12 (аудит 02.09.2026): на истории рабочей модели серий ниже нуля
+        # длиной 6–9 месяцев хватало, а ложная тревога дороже опоздания.
+        # мутация: вернуть 6 -> регламент срабатывал бы на шуме.
+        self.assertEqual(self.constants.HEALTH_REVIEW_MONTHS, 12)
+
+    def test_статус_review_только_на_двенадцати_месяцах_подряд(self):
+        # Статус считается по серии, а не по одному IC: −0,3 при серии 11 — warn,
+        # при серии 12 — review. Ноль серии — warn независимо от знака IC.
+        st = self.health._status
+        self.assertEqual(st(-0.3, 24, 11), "warn")
+        self.assertEqual(st(-0.3, 24, 12), "review")
+        self.assertEqual(st(-0.3, 24, 0), "warn")
+        self.assertEqual(st(0.02, 24, 0), "warn")
+        self.assertEqual(st(0.05, 24, 0), "ok")
+        self.assertEqual(st(None, 24, 30), "warn")
+        self.assertEqual(st(-0.3, 5, 30), "warn", "окно не набралось — судить не о чем")
+
+    def test_подпись_статуса_словами(self):
+        txt = self.health.status_text
+        self.assertEqual(txt("ok"), "связь видна")
+        self.assertIn("не видно", txt("warn", -0.08, 24, covers_zero=True))
+        self.assertIn("накрывает ноль", txt("warn", -0.08, 24, covers_zero=True))
+        self.assertNotIn("накрывает ноль", txt("warn", -0.55, 24, covers_zero=False))
+        self.assertIn("двенадцать месяцев", txt("review"))
+        self.assertIn("ревалидация", txt("review"))
+        for word in ("не работает", "сломан", "мертв"):
+            for status in ("warn", "review"):
+                self.assertNotIn(word, txt(status, -0.3, 24, True))
 
     def test_none_breaks_the_streak(self):
         # Дыра в ряду — не «ниже нуля»: считать её продолжением серии значит
@@ -433,14 +462,25 @@ class TestHealthInterval(unittest.TestCase):
 
     def test_записка_не_объявляет_модель_сломанной(self):
         # мутация: вернуть «ядро не работает, доверять знаку нельзя» -> красный.
-        note = self.health._note({"ic_24m": -0.08, "n": 24, "status": "dead",
+        note = self.health._note({"ic_24m": -0.08, "n": 24, "status": "warn",
                                   "ic_ci95": [-0.49, 0.33], "coverage": 1.0,
                                   "below_zero_months": 1, "below_since": "2026-07-31",
-                                  "review_months": 6, "review_due": False})
+                                  "review_months": 12, "review_due": False})
         self.assertIn("не видно", note)
         self.assertIn("накрывает ноль", note)
         self.assertNotIn("не работает", note)
-        self.assertIn("порог регламента — 6", note)
+        self.assertIn("порог регламента — 12", note)
+
+    def test_записка_review_называет_реколибровку_а_не_позицию(self):
+        # Протокол по порогу ×12 — «реколибровка, не сокращение позиции».
+        note = self.health._note({"ic_24m": -0.12, "n": 24, "status": "review",
+                                  "ic_ci95": [-0.53, 0.29], "coverage": 1.0,
+                                  "below_zero_months": 12, "below_since": "2025-09-30",
+                                  "review_months": 12, "review_due": True})
+        self.assertIn("ревалидация", note)
+        self.assertIn("реколибровка", note)
+        self.assertIn("не сокращение позиции", note)
+        self.assertNotIn("не работает", note)
 
 
 if __name__ == "__main__":

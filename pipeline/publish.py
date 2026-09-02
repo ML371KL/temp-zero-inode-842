@@ -72,7 +72,15 @@ def _cell_code(cur):
     return "|".join(parts)
 
 
-def build_verdict(core, states):
+def build_verdict(core, states, decision=None):
+    """Вердикт витрины: ячейка и ядро (как раньше) + позиция и режим (02.09.2026).
+
+    `position` — первая строка панели: «акции»/«деньги», с какого дня, почему, что
+    сменит позицию (compute/decision.py). `position_prev_rule` — та же позиция по
+    прежнему правилу, для сравнения в первые месяцы. `regime` — один из трёх режимов
+    поверх восьми ячеек (states.regime). Все прежние поля остаются: фронт обязан
+    работать и со старым payload, и с новым.
+    """
     core = core or {}
     cur = (states or {}).get("current") or {}
     key = tuple(cur.get(a) for a in ("trend", "vol", "bond"))
@@ -93,7 +101,13 @@ def build_verdict(core, states):
             key, "Ячейка без исторической статистики: правила дня нет, смотреть на ядро."),
         "core_value": value,
         "core_label": core_label(value),
+        "regime": (states or {}).get("regime"),
     }
+    dec = decision if isinstance(decision, dict) else {}
+    if dec.get("position"):
+        verdict["position"] = dec["position"]
+    if dec.get("position_prev_rule"):
+        verdict["position_prev_rule"] = dec["position_prev_rule"]
     return verdict
 
 
@@ -114,7 +128,12 @@ def _next_publish():
 
 
 def build_payload(core=None, states=None, monitors=None, sources=None, events=None,
-                  mode="daily", asof=None, generated_at=None, quotes=None):
+                  mode="daily", asof=None, generated_at=None, quotes=None,
+                  decision=None, shadow=None, verdict=None):
+    """Сборка data.json. `decision` — выход compute/decision.py, `shadow` — блок тени
+    (compute/shadow.py); `verdict` — ГОТОВЫЙ вердикт прошлого прогона для интрадей-
+    такта, который ядро и состояния не пересчитывает и позицию тоже берёт из прошлого
+    data.json (иначе позиция пропадала бы с витрины на весь торговый день)."""
     payload = {
         "schema": constants.SCHEMA_VERSION,
         "generated_at": generated_at or _iso(),
@@ -131,12 +150,16 @@ def build_payload(core=None, states=None, monitors=None, sources=None, events=No
         # обещания не выпустит, и старое протухнет само.
         "next_publish_at": _next_publish(),
         "stale_grace_minutes": constants.STALE_GRACE_MINUTES,
-        "verdict": build_verdict(core, states),
+        "verdict": (verdict if isinstance(verdict, dict) and verdict
+                    else build_verdict(core, states, decision)),
         "core": core or {},
         "states": states or {},
         "monitors": monitors or [],
         "sources": sources or {},
         "events": events or [],
+        # Тень: сигналы, которые считаются и копят историю, но на позицию не влияют
+        # (constants.SHADOW_NOTE). Пустой словарь — тень не считалась.
+        "shadow": shadow if isinstance(shadow, dict) else {},
     }
     if quotes:
         # Живые котировки для интрадей-витрины: ядро и состояния внутри дня не
@@ -191,11 +214,15 @@ def _thin_core_series(payload):
 
 def _thin_states_series(payload):
     st = payload.get("states") or {}
-    before = st.get("series") or []
-    if len(before) <= 400:
-        return False
-    st["series"] = _thin_pairs(before, keep_last=240)
-    return True
+    hit = False
+    # Лента ячеек и лента ворот — одной ступенью: они одного размера и одной цены.
+    for key in ("series", "series_gate"):
+        before = st.get(key) or []
+        if len(before) <= 400:
+            continue
+        st[key] = _thin_pairs(before, keep_last=240)
+        hit = True
+    return hit
 
 
 def _cut_events(payload):
