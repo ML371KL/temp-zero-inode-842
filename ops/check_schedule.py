@@ -129,7 +129,10 @@ def main(argv=None):
         if mode in NON_PIPELINE_MODES:
             continue
         covered |= {sid for sid, _ in registry.series_for_mode(mode)}
-    orphans = sorted(set(registry.SERIES) - covered)
+    # Теневые ряды (role="shadow", фетчера нет) не опрашиваются никем по определению:
+    # их кладёт сам суточный расчёт (compute/shadow.py). Требовать для них таймер —
+    # значит требовать источник у величины, которая считается из панели.
+    orphans = sorted(set(registry.fetchable()) - covered)
     if orphans:
         problems.append("рядов без расписания: %d — %s" % (len(orphans), ", ".join(orphans)))
 
@@ -137,7 +140,8 @@ def main(argv=None):
     problems += start_limit_problems(ops_dir)
 
     print(f"режимы с юнитами: {', '.join(sorted(scheduled)) or '—'}")
-    print(f"рядов покрыто: {len(covered)} из {len(registry.SERIES)}")
+    print(f"рядов покрыто: {len(covered)} из {len(registry.fetchable())} опрашиваемых "
+          f"(теневых, считаемых прогоном: {len(registry.SERIES) - len(registry.fetchable())})")
     if problems:
         print("", file=sys.stderr)
         for line in problems:
