@@ -107,6 +107,42 @@ class TestSourceFamilyRanking(RunCase):
         self.assertTrue(self.run._worse("error", "что-то новое"))
 
 
+class TestPollAgeNeverGoesNegative(unittest.TestCase):
+    """Возраст последнего опроса не имеет права быть отрицательным.
+
+    `now` берётся ОДИН раз в начале прогона — снимок обязан быть внутренне
+    согласован, — а `fetched_at` каждый ряд ставит в момент своего запроса. Обычный
+    прогон идёт 6–9 секунд, и разница незаметна. Но когда источник отваливается,
+    начинаются повторы (три попытки на ряд), прогон растягивается до 73–77 секунд, и
+    ряд, опрошенный на второй минуте, получает метку ПОЗЖЕ, чем `now`.
+
+    Промах не случаен: он приходится ровно на те прогоны, где источник сбоит, — то
+    есть попадает именно в текст тревоги о нём. 8 сентября 2026 владелец получил
+    «источник iss (imoex) не отвечает. Последний удачный опрос -1 мин назад» и
+    справедливо не понял, что это значит.
+
+    мутация: убрать max(0.0, ...) -> минус возвращается ровно в этот текст.
+    """
+
+    def setUp(self):
+        self.run = need(self, "pipeline.run", "_age_min")
+
+    def test_stamp_after_run_start_reads_as_just_now(self):
+        now = datetime(2026, 9, 8, 14, 40, 20, tzinfo=UTC)
+        self.assertEqual(self.run._age_min("2026-09-08T14:41:32Z", now), 0.0)
+
+    def test_ordinary_age_is_untouched(self):
+        now = datetime(2026, 9, 8, 14, 40, 0, tzinfo=UTC)
+        self.assertEqual(self.run._age_min("2026-09-08T14:10:00Z", now), 30.0)
+
+    def test_unusable_stamp_stays_none(self):
+        # None и ноль — разные вещи: «не знаем, когда опрашивали» против «только что».
+        now = datetime(2026, 9, 8, 14, 40, 0, tzinfo=UTC)
+        self.assertIsNone(self.run._age_min("", now))
+        self.assertIsNone(self.run._age_min("не дата", now))
+        self.assertIsNone(self.run._age_min(None, now))
+
+
 class TestFetchReportTellsTheTruth(RunCase):
     def test_meta_status_error_is_a_failure(self):
         # мутация: считать провалом только исключение -> «[fetch] fnb ok точек=0»,
