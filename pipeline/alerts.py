@@ -45,7 +45,8 @@ EVENT_FIELDS = ("key", "ts", "kind", "severity", "text", "comment",
 # владелец перестаёт открывать журнал, и вместе с ними мимо проходит смена ячейки.
 # Ровно это и случилось: в журнале из четырёх записей три были про источники.
 OPS_KINDS = frozenset({
-    "source_stale", "health_review", "lease_lost", "payload_oversize", "core_missing",
+    "source_stale", "source_ok", "health_review", "lease_lost", "payload_oversize",
+    "core_missing",
     # Прежние имена (до 02.09.2026): новых событий с ними не бывает, но в очереди
     # повторов старого alerts_state.json они ещё могут лежать — и обязаны уйти в
     # ops-канал, а не в ленту рынка.
@@ -491,9 +492,36 @@ def _sources(payload, prev, now):
         if not isinstance(meta, dict):
             continue
         st = meta.get("status")
+        was_bad = old.get(name) in ("stale", "error")
+        series = meta.get("series")
+        who = f"{name} ({series})" if series and series != name else name
+        day = wording.ru_day(meta.get("asof") or payload.get("asof_trading_day"))
         if st not in ("stale", "error"):
+            # ОТБИВКА О ВЫЗДОРОВЛЕНИИ. Её здесь не было, и молчание после тревоги
+            # оказывалось двусмысленным: «уже починилось» и «до сих пор лежит»
+            # выглядят одинаково — никак. Оплачено 08.09.2026: ISS отвалился на
+            # десять минут, в 15:00 следующий прогон прошёл начисто, а владелец
+            # ещё через семнадцать часов считал источник лежащим и написал
+            # «раньше никогда так надолго не отваливалось».
+            #
+            # Тревога при этом НЕ была обезоружена: старое состояние переписывается
+            # на «ok», и следующий отказ сообщит о себе снова. Молчал не сторож —
+            # молчал конец истории.
+            #
+            # Тот же урок уже оплачен в стороже панелей (dash-watch, репо 839,
+            # ключ quotes-agent, август 2026): ключ без ветки выздоровления
+            # превращает канал в источник тревоги без разрядки.
+            if was_bad:
+                out.append(_ev(f"source_ok:{name}:{payload.get('asof_trading_day')}",
+                               "source_ok", f"источник {who} снова отвечает",
+                               "info", now,
+                               fact=(f"Ряд {series}: данные от " if series and series != name
+                                     else "Данные в панели от ") + f"{day}.",
+                               meaning="Жёлтая точка с тайлов этого источника снята — "
+                                       "панель снова считает по свежим числам.",
+                               where="Смотреть: раздел «Источники» на панели."))
             continue
-        if old.get(name) in ("stale", "error"):
+        if was_bad:
             continue  # уже сообщали, повторять каждый прогон нельзя
         age = meta.get("lag_min")
         age_txt = (f" Последний удачный опрос {wording.hours_minutes(age)} назад."
@@ -514,13 +542,12 @@ def _sources(payload, prev, now):
         # той же причине принадлежит РЯДУ, а не источнику (оплачено 20.08.2026:
         # ISS сломал расчёт доходности ВДО, панель сказала «данные от 13.08», а
         # индекс был свежий).
-        series = meta.get("series")
-        who = f"{name} ({series})" if series and series != name else name
+        # (series/who/day посчитаны выше — их же использует отбивка о выздоровлении.)
         out.append(_ev(f"source_stale:{name}:{payload.get('asof_trading_day')}",
                        "source_stale", f"источник {who} {word}", "warn", now,
                        fact=(f"Ряд {series}: данные от " if series and series != name
                              else "Данные в панели от ")
-                            + f"{wording.ru_day(meta.get('asof') or payload.get('asof_trading_day'))}."
+                            + f"{day}."
                             + age_txt,
                        meaning="Панель считает по последним удачным числам и выглядит "
                                "рабочей — тайлы этого источника помечены жёлтой точкой.",

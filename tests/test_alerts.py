@@ -593,7 +593,10 @@ class TestTexts(AlertsCase):
         prev = {"cell": "bull|calm|ok", "core_value": 0.66, "core_sign": 1, "trend": 1,
                 "vol": 0, "bond": 1, "health": "ok", "key_rate": 15.0, "deposit": 16.0,
                 "orfr_asof": "2026-06-30", "auction_date": "2026-07-29",
-                "position": "long", "sources": {"iss": "ok"}}
+                # cbr лежал на прошлом прогоне и в этом ожил: сценарий обязан
+                # порождать и тревогу (iss), и отбивку (cbr), иначе отбивка
+                # ускользает от инвариантов ниже — числа, запятой и минуса.
+                "position": "long", "sources": {"iss": "ok", "cbr": "error"}}
         state = {"last": prev, "core_sign_alerted": 1, "core_value_alerted": 0.66,
                  # Якорь депозитной ставки — уровень, о котором СООБЩАЛИ (не
                  # вчерашний снимок): рост меряется от него.
@@ -613,7 +616,8 @@ class TestTexts(AlertsCase):
                       health="review", review_due=True, streak=12, position="flat",
                       monitors=mons,
                       sources={"iss": {"status": "stale", "lag_min": 4300,
-                                       "asof": "2026-08-05"}})
+                                       "asof": "2026-08-05"},
+                               "cbr": {"status": "ok", "asof": ASOF}})
         # merge=False — СЫРОЙ выход правил. После слияния семейства режима часть
         # видов в одном прогоне не появляется по построению (заголовком становится
         # один, остальные уходят подпунктами), и «вид недостижим» стало бы
@@ -636,7 +640,8 @@ class TestTexts(AlertsCase):
         kinds = {e["kind"] for e in self.all_kinds()}
         for kind in ("core_flip", "state_cell_change", "bond_flag_off", "bond_flag_on",
                      "buy_window_open", "cb_reminder", "cb_decision", "orfr_published",
-                     "auction_failed", "deposit_uptick", "source_stale", "health_review",
+                     "auction_failed", "deposit_uptick", "source_stale", "source_ok",
+                     "health_review",
                      "core_missing", "lease_lost", "payload_oversize", "position_change"):
             self.assertIn(kind, kinds)
 
@@ -858,6 +863,60 @@ class TestSourceStaleNamesSeries(AlertsCase):
     def test_ряд_совпал_с_именем_семьи_не_дублируется(self):
         ev = self.fire(series="iss")
         self.assertNotIn("iss (iss)", ev["title"])
+
+
+class TestSourceRecovery(AlertsCase):
+    """Отбивка о том, что источник ожил.
+
+    Её здесь не было, и молчание после тревоги оказывалось двусмысленным: «уже
+    починилось» и «до сих пор лежит» выглядят одинаково — никак. Оплачено
+    08.09.2026: ISS отвалился на десять минут, следующий прогон в 15:00 прошёл
+    начисто, а владелец ещё через семнадцать часов считал источник лежащим и
+    написал «раньше никогда так надолго не отваливалось».
+
+    мутация: убрать ветку выздоровления -> канал снова умеет только пугать.
+    """
+
+    def test_возврат_в_строй_сообщается(self):
+        self.seed(payload(sources={"iss": {"status": "error", "lag_min": 90,
+                                           "asof": "2026-08-05"}}))
+        evs = self.alerts.run(payload(sources={"iss": {"status": "ok", "asof": ASOF}}),
+                              dry_run=False, now=NOW)
+        ev = next(e for e in evs if e["kind"] == "source_ok")
+        self.assertIn("iss", ev["title"])
+        self.assertIn("снова", ev["title"])
+        self.assertEqual(ev["severity"], "info")
+        self.assertIn("11.08.2026", ev["fact"])
+
+    def test_отбивка_санитарная(self):
+        # Тревога уходит в ops-канал — отбивке место там же, иначе она осядет в
+        # ленте рынка, которой отказ обвязки ничего не сообщает.
+        self.assertIn("source_ok", self.alerts.OPS_KINDS)
+
+    def test_здоровый_источник_молчит(self):
+        # Без предшествующей тревоги отбивки быть не должно, иначе каждый прогон
+        # рапортовал бы о каждом живом источнике.
+        self.seed(payload(sources={"iss": {"status": "ok", "asof": ASOF}}))
+        evs = self.alerts.run(payload(sources={"iss": {"status": "ok", "asof": ASOF}}),
+                              dry_run=False, now=NOW)
+        self.assertFalse([e for e in evs if e["kind"] == "source_ok"])
+
+    def test_после_отбивки_тревога_снова_звучит(self):
+        """Отбивка не глушит сторож — это главное её свойство.
+
+        Состояние переписывается на «ok», поэтому следующий отказ обязан сообщить
+        о себе. Иначе разрядка превратилась бы в глушилку, а это ровно та беда,
+        от которой в стороже панелей завели проверку пар «тревога/выздоровление».
+        """
+        self.seed(payload(sources={"iss": {"status": "error", "asof": "2026-08-05"}}))
+        self.alerts.run(payload(sources={"iss": {"status": "ok", "asof": ASOF}}),
+                        dry_run=False, now=NOW)
+        later = "2026-08-12"
+        evs = self.alerts.run(payload(asof=later,
+                                      sources={"iss": {"status": "error", "lag_min": 30,
+                                                       "asof": later}}),
+                              dry_run=False, now=NOW + timedelta(days=1))
+        self.assertTrue([e for e in evs if e["kind"] == "source_stale"])
 
 
 class TestOpsLatchAllKinds(AlertsCase):
