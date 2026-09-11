@@ -755,11 +755,22 @@ def main(argv=None):
     except Exception as exc:  # noqa: BLE001
         journal.warn("alerts", f"лента событий не собралась: {type(exc).__name__}: {exc}")
         payload["events"] = []
+    # «Доставлено» раньше считало и ПОВТОР, погашенный дедупом телеграма (DUP).
+    # Правила-состояния (cb_reminder) рождают событие на каждом такте накануне
+    # заседания, и 09–10.09.2026 журнал насчитал «доставлено 1» сто семьдесят шесть
+    # раз подряд — при том что в канал ушло ровно одно сообщение (маркер дедупа один,
+    # хаб схлопывает по eventId). Читающий журнал видел спам, которого не было.
     delivered = sum(1 for e in events if e.get("delivered"))
+    sent = sum(1 for e in events if e.get("outcome") == telegram.SENT)
+    dup = sum(1 for e in events if e.get("outcome") == telegram.DUP)
     commented = sum(1 for e in events if (e.get("comment") or "").strip())
     ops = sum(1 for e in events if alerts.is_ops(e))
     journal.line("alerts", f"событий {len(events)} (санитарных {ops} — в ops-канал), "
-                           f"доставлено {delivered}, с комментарием {commented}" +
+                           f"отправлено {sent}"
+                           + (f", повторов погашено дедупом {dup}" if dup else "")
+                           + (f", не доставлено {len(events) - delivered}"
+                              if delivered < len(events) else "")
+                           + f", с комментарием {commented}" +
                  ("" if not events else ": " + "; ".join(e["kind"] for e in events)))
 
     res = publish_mod.publish(payload, args.mode, store=store, dry_run=args.dry_run)
