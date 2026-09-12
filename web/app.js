@@ -372,12 +372,30 @@
       h('span', { 'class': 'legend__i' }, [sw(null, 'var(--mid)'), h('span', { text: 'деньги' })])
     ]);
 
+    /* Причина в reason — это причина ПОСЛЕДНЕЙ СМЕНЫ, и со временем она перестаёт
+       описывать сегодняшний день. 12.09.2026 строка читалась «деньги с 22.05 ·
+       оценка рынка ушла ниже −0,2», тогда как оценка к тому дню была +0,59 уже два
+       месяца, а позицию держали закрытые ворота. Рядом, в той же карточке, стояло
+       «Знак решения: + (за акции)» — читатель видел противоречие.
+       Поэтому к причине смены добавляется то, что держит позицию СЕЙЧАС, и только
+       когда это не одно и то же. */
+    var holds = '';
+    if (!long) {
+      if (p.gate_open === false && p.comp_state === 1) holds = 'сейчас держат закрытые ворота';
+      else if (p.gate_open === true && p.comp_state === -1) holds = 'сейчас держит оценка рынка';
+      else if (p.gate_open === false && p.comp_state === -1) holds = 'сейчас держат и ворота, и оценка';
+    } else if (p.gate_open === true && p.comp_state === 1) {
+      holds = 'ворота открыты, оценка за акции';
+    }
+    var since = p.since ? 'с ' + fmtDay(p.since) : '';
+    var why = reason ? (since ? ' · ' : '') + ruText(reason) : '';
+    var now = holds ? ((since || why) ? ' · ' : '') + holds : '';
+
     return h('div', { 'class': 'position position--' + p.state }, [
       h('div', { 'class': 'kicker', text: 'Позиция · итог ворот и наклона' }),
       h('div', { 'class': 'position__row' }, [
         h('span', { 'class': 'position__name', text: 'Позиция: ' + POSITION_WORD[p.state] }),
-        h('span', { 'class': 'position__meta', text: (p.since ? 'с ' + fmtDay(p.since) : '') +
-          (reason ? (p.since ? ' · ' : '') + ruText(reason) : '') })
+        h('span', { 'class': 'position__meta', text: since + why + now })
       ]),
       h('div', { 'class': 'position__grid' }, [
         h('div', null, [
