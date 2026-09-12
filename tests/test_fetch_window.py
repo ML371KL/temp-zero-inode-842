@@ -168,12 +168,24 @@ class TestYieldSanity(IssCase):
         self.assertIn("2850.29", str(ctx.exception), "не названо последнее значение")
 
     def test_нормальные_значения_проходят_без_помех(self):
-        self.serve(lambda _u: self.rows([15.7, 15.9, 26.09, 99.9, 1.0]))
+        # Ряд РЕАЛИСТИЧНЫЙ: соседние дни у индекса из полутора сотен бумаг ходят
+        # десятыми долями. Прежняя фикстура [15,7 · 15,9 · 26,09 · 99,9 · 1,0]
+        # проверяла коридор скачками по его краям, а такой ряд и есть мусор —
+        # с 11.09.2026 его законно ловит правило соседей (_drop_local_outliers).
+        self.serve(lambda _u: self.rows([15.7, 15.9, 16.0, 16.1, 15.8]))
         _sid, points, meta = self.iss.index_yield(sec="RUCBCPNS", start="2026-08-11",
                                                   end="2026-08-19")
         self.assertEqual(len(points), 5, "коридор съел здоровые значения")
         self.assertEqual(meta["status"], "ok")
         self.assertIsNone(meta.get("dropped_insane"))
+        self.assertIsNone(meta.get("dropped_outliers"))
+
+    def test_края_коридора_сами_по_себе_не_режутся(self):
+        # Двух точек мало для суждения о соседях — коридор обязан пропустить обе.
+        self.serve(lambda _u: self.rows([99.9, 1.0]))
+        _sid, points, _meta = self.iss.index_yield(sec="RUCBCPNS", start="2026-08-11",
+                                                   end="2026-08-19")
+        self.assertEqual(sorted(points.values()), [1.0, 99.9])
 
     def test_ноль_по_прежнему_заглушка(self):
         self.serve(lambda _u: self.rows([0.0, 26.5]))
@@ -305,18 +317,95 @@ class TestYieldFromConstituents(IssCase):
     def test_здоровый_источник_резерв_не_трогает(self):
         # мутация «считать всегда» -> лишние 10 запросов на каждый прогон и
         # подмена биржевого числа собственной оценкой без повода.
+        # Индекс взят ИСПРАВНЫЙ (RUCBCPNS): у ВДО поле биржи врёт и внутри
+        # коридора, поэтому его последний день сверяется с составом всегда —
+        # см. YIELD_XCHECK_SECS и тест ниже.
         asked = []
         def responder(url):
             asked.append(url)
-            return _history([["2026-08-11", 78.0, 1e9, 26.5],
-                             ["2026-08-12", 78.0, 1e9, 26.9]])
+            return _history([["2026-08-11", 78.0, 1e9, 16.5],
+                             ["2026-08-12", 78.0, 1e9, 16.6]])
         self.serve(responder)
-        _sid, points, meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
+        _sid, points, meta = self.iss.index_yield(sec="RUCBCPNS", start="2026-08-11",
                                                   end="2026-08-19")
-        self.assertEqual(sorted(points.values()), [26.5, 26.9])
+        self.assertEqual(sorted(points.values()), [16.5, 16.6])
         self.assertNotIn("method", meta)
         self.assertFalse([u for u in asked if "analytics" in u or "bonds" in u],
                          "за составом ходили при исправном источнике")
+
+    def test_мусор_внутри_коридора_ловится_соседями(self):
+        """88,75% при соседях 32,8 — реальный день 09.09.2026.
+
+        Коридор 1..100 такую точку пропускает: она «в разумных пределах». Спорит
+        с ней только окружение — соседи с ОБЕИХ сторон.
+        мутация: убрать _drop_local_outliers -> мусор остаётся в ряду, а тайл
+        пишет «100-й перцентиль за год» по нему.
+        """
+        self.serve_all([32.5, 32.8, 88.75, 32.6, 32.9],
+                       {"BOND-A": 60.0, "BOND-B": 40.0},
+                       {"BOND-A": 33.0, "BOND-B": 32.0})
+        _sid, points, meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
+                                                  end="2026-08-19")
+        self.assertNotIn(88.75, points.values(), "мусор внутри коридора уехал в ряд")
+        self.assertTrue(meta.get("dropped_outliers"))
+        self.assertEqual(meta["dropped_outliers"][0][1], 88.75)
+
+    def test_умеренный_мусор_тоже_ловится(self):
+        """43,78 при соседях 32,7 — реальные дни 31.08 и 08.09.2026.
+
+        Отклонение всего +34%, и порогом «в разы» такая точка не ловится. Именно
+        она и опаснее грубой: на графике выглядит как всплеск рынка, а не как сбой.
+        мутация: ослабить YIELD_JUMP_TOL до 0,9 -> точка остаётся в ряду.
+        """
+        self.serve_all([32.5, 32.8, 43.78, 32.6, 32.9],
+                       {"BOND-A": 60.0, "BOND-B": 40.0},
+                       {"BOND-A": 33.0, "BOND-B": 32.0})
+        _sid, points, meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
+                                                  end="2026-08-19")
+        self.assertNotIn(43.78, points.values())
+        self.assertEqual(meta["dropped_outliers"][0][1], 43.78)
+
+    def test_настоящий_сдвиг_уровня_не_режется(self):
+        """Кризисный скачок подтверждается следующими днями и обязан пройти.
+
+        Односторонний фильтр заморозил бы ряд ровно в кризис (24.02.2022
+        инвестгрейд прыгнул на +26% за день). Двусторонняя проверка принимает
+        новый уровень, как только он держится.
+        """
+        self.serve_all([20.0, 20.2, 26.0, 26.4, 26.2],
+                       {"BOND-A": 60.0, "BOND-B": 40.0},
+                       {"BOND-A": 27.0, "BOND-B": 25.0})
+        _sid, points, meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
+                                                  end="2026-08-19")
+        self.assertIn(26.0, points.values(), "настоящий сдвиг уровня отброшен")
+        self.assertFalse(meta.get("dropped_outliers"))
+
+    def test_последний_день_сверяется_с_составом(self):
+        # Соседей справа у него нет, поэтому спорит с ним состав: 60,0 против
+        # оценки 32,6 — в ряд идёт оценка.
+        self.serve_all([32.5, 32.8, 32.6, 32.9, 60.0],
+                       {"BOND-A": 60.0, "BOND-B": 40.0},
+                       {"BOND-A": 33.0, "BOND-B": 32.0})
+        _sid, points, meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
+                                                  end="2026-08-19")
+        self.assertEqual(meta["method"], "constituents")
+        self.assertNotIn(60.0, points.values(), "опровергнутое число осталось в ряду")
+        # 0,6*33 + 0,4*32 = 32,6 — считаем руками, не тем же кодом.
+        self.assertAlmostEqual(points[max(points)], 32.6, places=2)
+
+    def test_согласие_с_составом_оставляет_биржевое_число(self):
+        # Расхождение в пределах допуска — официальное число индекса главнее
+        # собственной оценки, и подменять его без повода нельзя.
+        self.serve_all([32.5, 32.8, 32.6, 32.9, 33.1],
+                       {"BOND-A": 60.0, "BOND-B": 40.0},
+                       {"BOND-A": 33.0, "BOND-B": 32.0})
+        _sid, points, meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
+                                                  end="2026-08-19")
+        # Биржевой хвост сохранён целиком, оценка в ряд не добавлена.
+        self.assertEqual(sorted(points.values()), [32.5, 32.6, 32.8, 32.9, 33.1])
+        self.assertNotIn("method", meta)
+        self.assertEqual(meta["xcheck_constituents"], 32.6)
+        self.assertAlmostEqual(meta["xcheck_diff_pp"], 0.5, places=2)
 
     def test_огрызок_корзины_не_превращается_в_число(self):
         # Выпавшие бумаги — обычно самые неликвидные, то есть самые доходные:

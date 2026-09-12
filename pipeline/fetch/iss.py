@@ -172,6 +172,29 @@ YIELD_SANE = (1.0, 100.0)
 # без дефолта, а поле биржи отдаёт там четырёхзначные числа.
 BOND_YIELD_SANE = (0.0, 100.0)
 
+# Мусор в поле YIELD у ИНДЕКСА попадает и ВНУТРЬ коридора 1..100, поэтому одного
+# коридора мало. Разбор всей истории RUCBHYCP (901 точка, замер 11.09.2026) нашёл
+# 11 точек, расходящихся с медианой соседей больше чем на 25%, и пять из них —
+# заведомый мусор с расхождением вдвое и больше: 22–23.01.2025 (75,8 и 78,8% при
+# соседях 34,5), 03 и 05.11.2025 (85,9 и 81,6 при 36,7), 09.09.2026 (88,75 при
+# 32,8). Ещё две — 31.08 и 08.09.2026 (по 43,8 при соседях 33) — опровергаются
+# составом индекса. Три таких точки сидели в годовом окне, и тайл писал «100-й
+# перцентиль за год» по мусору.
+#
+# ДВЕ ПРОВЕРКИ, потому что у дней разное окружение:
+#   * у дня ВНУТРИ ретро-окна есть соседи с обеих сторон — сравниваем с их
+#     медианой. Двусторонность принципиальна: односторонний фильтр в настоящий
+#     кризис (24.02.2022 инвестгрейд прыгнул на +26% за день) заморозил бы ряд
+#     ровно тогда, когда он нужен, а при двусторонней проверке новый уровень
+#     подтверждается следующими днями и принимается;
+#   * у ПОСЛЕДНЕГО дня соседей справа нет, и его сверяем с оценкой по составу:
+#     полторы сотни бумаг двигаются вместе с рынком и кризис не отбросят.
+YIELD_JUMP_TOL = 0.25          # доля отклонения от медианы соседей
+YIELD_XCHECK_PP = 3.0          # расхождение с составом, п.п. (здоровые дни: до 0,41)
+# Индексы, чьё поле доходности биржа считает неверно и чей последний день поэтому
+# сверяется с составом на КАЖДОМ прогоне, а не только при явной поломке.
+YIELD_XCHECK_SECS = frozenset({"RUCBHYCP"})
+
 
 def _index_series(sec, field, series_id, unit, default_start, drop_zero=False,
                   sane=None, start=None, end=None, bootstrap=False):
@@ -373,6 +396,46 @@ def index_yield_estimate(sec, min_weight=90.0):
             round(covered, 1), dropped)
 
 
+def _median(values):
+    vals = sorted(v for v in values if isinstance(v, (int, float)))
+    if not vals:
+        return None
+    mid = len(vals) // 2
+    return vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2.0
+
+
+def _drop_local_outliers(series_id, points, tol=YIELD_JUMP_TOL, span=5):
+    """Убрать точки, противоречащие соседям С ОБЕИХ сторон. -> (точки, отброшенное).
+
+    Последний день ряда соседей справа не имеет и остаётся нетронутым: его
+    проверяет сверка с составом (см. index_yield).
+    """
+    if not points:
+        return points, []
+    try:
+        stored = ((store.load_series(series_id) or {}).get("points") or {})
+    except (OSError, ValueError):
+        stored = {}
+    merged = dict(stored)
+    merged.update(points)
+    days = sorted(merged)
+    pos = {d: i for i, d in enumerate(days)}
+    kept, dropped = {}, []
+    for day, value in points.items():
+        i = pos[day]
+        left = [merged[days[j]] for j in range(max(0, i - span), i)]
+        right = [merged[days[j]] for j in range(i + 1, min(len(days), i + span + 1))]
+        med = _median(left + right)
+        if not left or not right or med is None or med <= 0 or len(left + right) < 4:
+            kept[day] = value          # краёв ряда правило не касается
+            continue
+        if abs(value / med - 1) > tol:
+            dropped.append((day, value, round(med, 2)))
+        else:
+            kept[day] = value
+    return kept, dropped
+
+
 def index_yield(sec="RUCBHYCP", series_id=None, start=None, end=None, bootstrap=False):
     """Доходность облигационного индекса, % годовых (registry: *_yield).
 
@@ -391,7 +454,24 @@ def index_yield(sec="RUCBHYCP", series_id=None, start=None, end=None, bootstrap=
         if "коридор" not in str(exc):
             raise                       # обычный отказ HTTP — не наш случай
         broken, points, meta = exc, {}, {}
-    if broken is None and not meta.get("dropped_insane"):
+
+    # Мусор ВНУТРИ коридора: точка, спорящая с соседями по обе стороны, в ряд не
+    # идёт. Без этого 09.09.2026 в ряду осталось бы 88,75% при соседях 32,8.
+    outliers = []
+    if points:
+        points, outliers = _drop_local_outliers(sid, points)
+        if outliers:
+            meta = dict(meta or {}, dropped_outliers=[list(o) for o in outliers])
+            http.LOG(f"{sid}: {len(outliers)} точек спорят с соседями и отброшены "
+                     f"(первая {outliers[0][0]}={outliers[0][1]} при медиане {outliers[0][2]})")
+
+    # Последний день сверяем с составом: соседей справа у него нет. Для индексов с
+    # заведомо сломанным полем — на каждом прогоне, для остальных — только когда
+    # основной путь уже дал сбой.
+    last_day = max(points) if points else None
+    need_xcheck = bool(broken) or bool(meta.get("dropped_insane")) or bool(outliers) \
+        or (sec.upper() in YIELD_XCHECK_SECS and last_day is not None)
+    if not need_xcheck:
         return sid, points, meta        # источник здоров — резерв не трогаем
 
     try:
@@ -401,10 +481,39 @@ def index_yield(sec="RUCBHYCP", series_id=None, start=None, end=None, bootstrap=
         if broken is not None:
             raise broken                # нечем заменить: отказ остаётся отказом
         return sid, points, meta
+
+    # Сверяем ПОСЛЕДНЕЕ биржевое значение, а не значение за дату состава: состав
+    # индекса биржа публикует на день вперёд относительно истории котировок
+    # (11.09.2026 состав был на 10.09, а последняя точка истории — на 09.09), и
+    # сравнение «по одинаковой дате» почти всегда не находило бы пары.
+    exchange_day = max(points) if points else None
+    exchange = points.get(exchange_day)
+    # Сверять можно только ЧИСТОЕ окно. Если коридор или соседи уже что-то
+    # выбросили, последнее уцелевшее биржевое значение — это СТАРЫЙ день, и
+    # «согласуется с сегодняшней оценкой» означало бы заморозить ряд на нём.
+    contaminated = bool(broken) or bool(meta.get("dropped_insane")) or bool(outliers)
+    if (exchange is not None and not contaminated
+            and abs(exchange - value) <= YIELD_XCHECK_PP):
+        # Согласуется — оставляем биржевое: оно и есть ОФИЦИАЛЬНОЕ значение
+        # индекса, а оценка нужна там, где официального нет или оно опровергнуто.
+        meta = dict(meta or {}, xcheck_constituents=round(value, 2),
+                    xcheck_diff_pp=round(exchange - value, 2))
+        return sid, points, meta
+
     points = dict(points)
+    if exchange is not None and not contaminated:
+        # Сравнение состоялось и разошлось: опровергнутое биржевое значение в ряду
+        # не оставляем — иначе оно останется последним «официальным» днём и уедет
+        # в перцентиль тайла. При ЗАГРЯЗНЁННОМ окне так делать нельзя: там
+        # уцелевшая точка — старый ЗДОРОВЫЙ день, прошедший оба фильтра.
+        http.LOG(f"{sid}: биржевое {exchange}% за {exchange_day} расходится с составом "
+                 f"{value}% на {abs(exchange - value):.1f} п.п. — беру состав")
+        if exchange_day != day:
+            points.pop(exchange_day, None)
     points[day] = value
-    note = (f"доходность биржи вне коридора — значение за {day} посчитано ИЗ СОСТАВА "
-            f"индекса (покрытие {covered}% веса); это оценка, не число биржи")
+    note = (f"доходность биржи не подтверждается составом — значение за {day} "
+            f"посчитано ИЗ СОСТАВА индекса (покрытие {covered}% веса); это оценка, "
+            f"не число биржи")
     if dropped.get("count"):
         note += (f"; отброшено {dropped['count']} бумаг с битой доходностью "
                  f"(вес {dropped['weight_pct']}%, порог {dropped['fence_pct']}%)")
