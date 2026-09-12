@@ -775,6 +775,14 @@ def _t_cb_meeting(store, now):
     last_meeting = past[-1] if past else None
     last_fresh = bool(last_meeting and (today - _d(last_meeting)).days <= CB_DECISION_FRESH_DAYS)
     last_cons = cons_map.get(last_meeting) if last_fresh else None
+    # Ставка НА ДЕНЬ заседания и возраст решения — для события о СОХРАНЕНИИ ставки
+    # (alerts._cb). Без них «сохранил» отличить от «ещё не дошло до данных» нечем:
+    # решение попадает в ряд key_rate только на следующий рабочий день.
+    rate_at_meeting = None
+    if last_fresh and last_meeting:
+        upto = [v for d, v in key_pts if d <= last_meeting and v is not None]
+        rate_at_meeting = upto[-1] if upto else None
+    days_since = (today - _d(last_meeting)).days if (last_fresh and last_meeting) else None
     rus_asof, rusfar = _last(rus_pts)
     spread = (rusfar - key_rate) if (rusfar is not None and key_rate is not None) else None
     days = (_d(nxt) - today).days if nxt else None
@@ -799,6 +807,8 @@ def _t_cb_meeting(store, now):
         "consensus_source": cons_meta.get("source") or cons_meta.get("note"),
         "last_meeting": last_meeting if last_fresh else None,
         "last_consensus": _r(last_cons, 2),
+        "rate_at_last_meeting": _r(rate_at_meeting, 2),
+        "days_since_last_meeting": days_since,
         "rusfar3m": _r(rusfar, 2),
         "rusfar_asof": rus_asof,
         "spread_pp": _r(spread, 2),

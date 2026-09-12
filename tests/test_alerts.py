@@ -356,6 +356,84 @@ class TestSeedFromPublishedPayload(AlertsCase):
                          ["old:1", "old:2"])
 
 
+class TestCbHold(AlertsCase):
+    """Сохранение ставки — тоже решение, и о нём надо сказать.
+
+    ОПЛАЧЕНО ЗАСЕДАНИЕМ 11.09.2026: ЦБ сохранил 14,00%, панель промолчала совсем.
+    Владелец получил «Завтра заседание Банка России» и тишину — неотличимую от
+    «ничего не произошло». cb_decision срабатывает только на ИЗМЕНЕНИЕ ряда
+    key_rate, а при сохранении ряд не меняется никогда.
+
+    Ключевая тонкость — КОГДА можно так сказать. Решение попадает в ряд ЦБ на
+    следующий рабочий день (замер по всем пяти сменам 2026 года: ровно +1 торговый
+    день). В день заседания «ставка не изменилась» означает лишь «ещё не дошло».
+    """
+
+    def tile(self, since=4, key_rate=14.0, was=14.0, cons=14.0, meeting="2026-09-11"):
+        return {"id": "cb_meeting", "status": "ok", "asof": ASOF,
+                "headline": "До заседания 41 дн.",
+                "payload": {"days_left": 41, "next_meeting": "2026-10-23",
+                            "key_rate": key_rate, "consensus": None,
+                            "last_meeting": meeting, "last_consensus": cons,
+                            "rate_at_last_meeting": was,
+                            "days_since_last_meeting": since,
+                            "priced_text": "RUSFAR 3M у ключа"}}
+
+    def fire(self, **kw):
+        self.seed(payload())
+        evs = self.alerts.run(payload(monitors=[self.tile(**kw)]), dry_run=False, now=NOW)
+        return [e for e in evs if e["kind"] == "cb_hold"]
+
+    def test_сохранение_сообщается_после_подтверждения(self):
+        ev = self.fire()[0]
+        self.assertIn("сохранил", ev["title"])
+        self.assertIn("14,00%", ev["detail"])
+        self.assertIn("11.09.2026", ev["detail"])
+        # «было → стало» у сохранения одинаковы и в сообщение не идут.
+        self.assertFalse(ev.get("before"))
+        self.assertFalse(ev.get("after"))
+
+    def test_в_день_заседания_молчим(self):
+        """«Ставка не изменилась» в день заседания — это «ещё не дошло».
+
+        мутация: снять порог CB_HOLD_CONFIRM_DAYS -> панель объявит сохранением
+        любое заседание в тот же вечер, включая то, где ставку снизили.
+        """
+        self.assertEqual(self.fire(since=0), [])
+        self.assertEqual(self.fire(since=3), [])
+
+    def test_при_изменении_ставки_события_нет(self):
+        # Ставка на день заседания 14,25, сейчас 14,00 — это работа cb_decision.
+        self.assertEqual(self.fire(was=14.25, key_rate=14.0), [])
+
+    def test_совпадение_с_консенсусом_названо(self):
+        ev = self.fire(cons=14.0)[0]
+        self.assertIn("совпало", ev["meaning"])
+        self.assertEqual(ev["severity"], "info")
+
+    def test_расхождение_с_консенсусом_это_сюрприз(self):
+        ev = self.fire(cons=13.75)[0]
+        self.assertIn("25", ev["meaning"])
+        self.assertIn("выше", ev["meaning"])
+        self.assertEqual(ev["severity"], "warn")
+
+    def test_без_консенсуса_не_выдумываем_сюрприз(self):
+        ev = self.fire(cons=None)[0]
+        self.assertIn("не внесён", ev["meaning"])
+
+    def test_без_заседания_в_окне_молчим(self):
+        # last_meeting гаснет через неделю (тайл), и событие не должно оживать.
+        self.assertEqual(self.fire(meeting=None), [])
+
+    def test_второй_прогон_не_повторяет(self):
+        self.seed(payload())
+        first = self.alerts.run(payload(monitors=[self.tile()]), dry_run=False, now=NOW)
+        self.assertTrue([e for e in first if e["kind"] == "cb_hold"])
+        sent_before = len(self.sent)
+        self.alerts.run(payload(monitors=[self.tile()]), dry_run=False, now=NOW)
+        self.assertEqual(len(self.sent), sent_before, "сохранение ушло в канал дважды")
+
+
 class TestCbDecision(AlertsCase):
     """Сюрприз решения ЦБ меряется от консенсуса ПРОШЕДШЕГО заседания.
 

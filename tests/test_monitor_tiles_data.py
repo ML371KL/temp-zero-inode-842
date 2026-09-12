@@ -369,6 +369,46 @@ class TestТайлыНаЖивыхДанных(TileCase):
         self.assertIn("0.60", p["priced_text"])
         self.assertNotIn("cpi_weekly_4w", p)   # ИПЦ не сидирован — строки нет, не «н/д»
 
+    def test_cb_meeting_ставка_на_день_заседания_и_возраст(self):
+        """Поля для события о СОХРАНЕНИИ ставки (alerts._cb).
+
+        Решение попадает в ряд ЦБ на следующий рабочий день, поэтому «сохранил» от
+        «ещё не дошло» отличается только сравнением с тем, что было В ДЕНЬ
+        заседания. Здесь ставку СНИЗИЛИ: 14,25 на 24.07 и 14,00 с 27.07 — правило
+        обязано увидеть разницу и промолчать.
+
+        мутация: не считать rate_at_last_meeting -> поле None, и правило о
+        сохранении не сработает никогда (или сработает на изменении).
+        """
+        self.put("key_rate", {"2026-07-23": 14.25, "2026-07-24": 14.25,
+                              "2026-07-27": 14.0, "2026-07-28": 14.0})
+        self.put("cb_consensus", {"2026-07-24": 14.25})
+        self.put("rusfar3m", {"2026-07-28": 13.9})
+        t = self.tile("cb_meeting", now=datetime(2026, 7, 28, 12, 0, 0, tzinfo=UTC))
+        p = t["payload"]
+        self.assertEqual(p["last_meeting"], "2026-07-24")
+        self.assertEqual(p["rate_at_last_meeting"], 14.25, "взята не ставка дня заседания")
+        self.assertEqual(p["days_since_last_meeting"], 4)   # 28 − 24 = 4, считаем руками
+        self.assertEqual(p["key_rate"], 14.0)
+
+    def test_cb_meeting_сохранение_ставки_видно_по_полям(self):
+        # Ставка не менялась: та же 14,00 и в день заседания, и сейчас.
+        self.put("key_rate", {"2026-07-23": 14.0, "2026-07-24": 14.0,
+                              "2026-07-27": 14.0, "2026-07-28": 14.0})
+        self.put("cb_consensus", {"2026-07-24": 14.0})
+        self.put("rusfar3m", {"2026-07-28": 13.9})
+        p = self.tile("cb_meeting", now=datetime(2026, 7, 28, 12, 0, 0, tzinfo=UTC))["payload"]
+        self.assertEqual(p["rate_at_last_meeting"], p["key_rate"])
+        self.assertEqual(p["last_consensus"], 14.0)
+
+    def test_cb_meeting_старое_заседание_полей_не_даёт(self):
+        # Через неделю last_meeting гаснет — вместе с ним и поля решения.
+        self.seed_cb()
+        p = self.tile("cb_meeting")["payload"]       # NOW = 17.08, заседание 24.07
+        self.assertIsNone(p["last_meeting"])
+        self.assertIsNone(p["rate_at_last_meeting"])
+        self.assertIsNone(p["days_since_last_meeting"])
+
     def test_cb_meeting_строка_недельной_инфляции(self):
         """Недельный ИПЦ снят с витрины отдельным тайлом (аудит 02.09.2026) и живёт
         одной строкой здесь, где читается — перед заседанием. Руками: последние
