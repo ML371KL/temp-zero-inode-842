@@ -340,6 +340,70 @@ class TestHistoryMonotonic(PayloadCase):
         self.assertTrue(all(day <= self.expect["last_date"] for day, _code in series))
 
 
+class TestRuleLayer(unittest.TestCase):
+    """Правило дня стоит на воротах, ячейка — на сырых битах (CONTRACT §3).
+
+    Слои разошлись намеренно: сырые биты зажигаются и гаснут по одному порогу,
+    флаги ворот гаснут по другому, дальнему. 15.09.2026 они разошлись вживую —
+    сырая вола ушла на 0,3 п.п. ниже своего порога, а ворота держат стресс до
+    p60, — и карточка ворот назвала сочетание «медведь · стресс · стресс», тут же
+    посоветовав «приоритет — ОФЗ-флаг, он снимается первым»: правило ячейки, в
+    которой ворота не стоят, да ещё и спорящее с правилом токсичной («исторически
+    первой успокаивается волатильность»). Правило — предписание, оно печатается
+    ВНУТРИ карточки ворот и обязано описывать названное там сочетание.
+    """
+
+    RAW = (0, 0, 1)      # медведь · спокойно · стресс — сырые биты
+    GATE = (0, 1, 1)     # медведь · стресс · стресс — ворота с гистерезисом
+
+    def setUp(self):
+        self.publish = need(self, "pipeline.publish", "build_verdict")
+        self.constants = need(self, "pipeline.lib.constants", "CELL_RULES", "CELL_STATS")
+
+    def states(self, raw, gate=None):
+        out = {"current": dict(zip(("trend", "vol", "bond"), raw))}
+        if gate is not None:
+            out["gate"] = dict(zip(("trend", "vol", "bond"), gate))
+        return out
+
+    def test_правило_берётся_от_ворот_а_не_от_сырой_ячейки(self):
+        """мутация: ключ правила обратно на сырые биты -> панель снова советует
+        снимать ОФЗ-флаг под заголовком «ворота закрыты · медведь · стресс · стресс».
+        """
+        v = self.publish.build_verdict({"value": 0.54}, self.states(self.RAW, self.GATE))
+        self.assertEqual(v["rule"], self.constants.CELL_RULES[self.GATE])
+        self.assertNotEqual(v["rule"], self.constants.CELL_RULES[self.RAW],
+                            "правило осталось на сырой ячейке")
+
+    def test_ячейка_и_её_статистика_остаются_сырыми(self):
+        # Обратная сторона той же правки: CELL_STATS замораживались на сырых битах,
+        # и увести на ворота ЯЧЕЙКУ значило бы показывать выборку от другой модели.
+        v = self.publish.build_verdict({"value": 0.54}, self.states(self.RAW, self.GATE))
+        self.assertEqual(v["cell_code"], "bear|calm|stress")
+        self.assertEqual(v["cell_label"], self.constants.CELL_STATS[self.RAW]["label"])
+        self.assertEqual(v["cell_stats"]["median_fwd1m_pct"],
+                         self.constants.CELL_STATS[self.RAW]["median_fwd1m_pct"])
+
+    def test_без_ворот_правило_от_сырых_битов(self):
+        # Старый payload и фикстуры тестов приходят без states.gate: правило обязано
+        # остаться прежним, а не выродиться в заглушку «правила дня нет».
+        v = self.publish.build_verdict({"value": 0.54}, self.states(self.RAW))
+        self.assertEqual(v["rule"], self.constants.CELL_RULES[self.RAW])
+
+    def test_неполные_ворота_откатываются_на_сырые_биты(self):
+        # Флаг ворот бывает None до старта гистерезиса (нет сырья на первых днях).
+        v = self.publish.build_verdict({"value": 0.54}, self.states(self.RAW, (0, None, 1)))
+        self.assertEqual(v["rule"], self.constants.CELL_RULES[self.RAW])
+
+    def test_у_каждого_сочетания_ворот_есть_своё_правило(self):
+        # Ворота ходят по тем же восьми сочетаниям, что и ячейка, — заглушке
+        # «правила дня нет» взяться неоткуда ни при каком состоянии ворот.
+        for gate in self.constants.CELL_STATS:
+            with self.subTest(gate=gate):
+                v = self.publish.build_verdict({"value": 0.0}, self.states(self.RAW, gate))
+                self.assertEqual(v["rule"], self.constants.CELL_RULES[gate])
+
+
 class TestMonitorRegistry(unittest.TestCase):
     def test_coverage_selfcheck_is_clean(self):
         # Модуль сам сверяет тайлы с реестром тиров (run.py --mode selftest).

@@ -86,6 +86,20 @@ def build_verdict(core, states, decision=None):
     key = tuple(cur.get(a) for a in ("trend", "vol", "bond"))
     stats = constants.CELL_STATS.get(key)
     value = core.get("value")
+    # Правило дня — ПРЕДПИСАНИЕ («что делать»), а не описание ячейки, и витрина
+    # печатает его ВНУТРИ карточки ворот, прямо под сочетанием с гистерезисом.
+    # Значит и ключ у него обязан быть от ворот. Пока ключ брался из сырых битов,
+    # карточка 15.09.2026 говорила «сочетание: медведь · стресс · стресс» и тут же
+    # советовала «приоритет — ОФЗ-флаг, он снимается первым» — правило ячейки, в
+    # которой ворота НЕ СТОЯТ: сырая вола ушла на 0,3 п.п. ниже p80, а ворота
+    # держат стресс до p60. Два предписания о входе на одной карточке, и они
+    # спорят друг с другом («первым снимается ОФЗ» против «исторически первой
+    # успокаивается волатильность»). Ячейка, CELL_STATS и второй ряд остаются на
+    # сырых битах (CONTRACT §3) — переезжает только правило.
+    gate = (states or {}).get("gate") or {}
+    rule_key = tuple(gate.get(a) for a in ("trend", "vol", "bond"))
+    if None in rule_key:
+        rule_key = key
     verdict = {
         "cell_code": _cell_code(cur),
         "cell_label": (stats or {}).get("label"),
@@ -98,7 +112,7 @@ def build_verdict(core, states, decision=None):
                         ("mean_fwd1m_pct", "hit", "n", "n_closed", "median_fwd1m_pct",
                          "worst_pct", "best_pct") if k in stats} if stats else None),
         "rule": constants.CELL_RULES.get(
-            key, "Ячейка без исторической статистики: правила дня нет, смотреть на ядро."),
+            rule_key, "Ячейка без исторической статистики: правила дня нет, смотреть на ядро."),
         "core_value": value,
         "core_label": core_label(value),
         "regime": (states or {}).get("regime"),

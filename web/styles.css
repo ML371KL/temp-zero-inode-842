@@ -368,6 +368,10 @@ button { font: inherit; color: inherit; }
  * ширина страницы (1180px, около 145 знаков) — сознательный размен: короткий
  * широкий блок против узкого высокого. */
 .rule__t { font-size: 15px; line-height: 1.55; max-width: 100%; }
+/* Подпись под правилом живёт в том же широком блоке — и потолок в 68 знаков от
+ * .hero__fine вешал под широкой строкой узкий высокий хвост. Ширину держит тот же
+ * блок, что и само правило. */
+.rule__fine { font-size: 13px; color: var(--ink-3); margin-top: 8px; line-height: 1.45; text-wrap: pretty; }
 
 .gaugeval { display: flex; align-items: baseline; gap: 10px; margin-bottom: 2px; }
 .gaugeval__n { font-size: clamp(26px, 5.2vw, 46px); font-weight: 700; letter-spacing: -.03em; line-height: 1; }
