@@ -133,7 +133,7 @@ KIND = {
     # в семейство режима не сливается (alerts.REGIME_FAMILY).
     "position_change":   {"emoji": "🧭", "label": "смена позиции"},
     "core_flip":         {"emoji": "🎯", "label": "смена оценки рынка"},
-    "state_cell_change": {"emoji": "🔀", "label": "смена режима рынка"},
+    "state_cell_change": {"emoji": "🔀", "label": "смена признаков рынка"},
     "bond_flag_on":      {"emoji": "⚠️", "label": "сигнал риска"},
     "bond_flag_off":     {"emoji": "✅", "label": "сигнал риска снят"},
     "buy_window_open":   {"emoji": "🎯", "label": "окно входа"},

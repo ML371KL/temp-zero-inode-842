@@ -48,8 +48,12 @@ def position_block(state):
 
 def payload(core=0.68, trend=0, vol=1, bond=1, asof=ASOF, health="ok",
             cell="bear|stress|stress", monitors=None, sources=None,
-            review_due=False, streak=0, position=None):
-    """Витрина в объёме, который читают правила алертов."""
+            review_due=False, streak=0, position=None, gate=None):
+    """Витрина в объёме, который читают правила алертов.
+
+    `gate` — блок ворот с гистерезисом, `{"cell_code": …, "open": …}`. По умолчанию
+    его нет: так выглядит и старый payload, и почти все фикстуры здесь.
+    """
     return {
         "asof_trading_day": asof,
         "core": {"value": core, "sign": (0 if core is None else (1 if core > 0 else -1)),
@@ -58,7 +62,8 @@ def payload(core=0.68, trend=0, vol=1, bond=1, asof=ASOF, health="ok",
                             "below_since": "2025-09-30" if streak else None,
                             "review_months": 12}},
         "states": {"current": {"trend": trend, "vol": vol, "bond": bond},
-                   "distances": [{"id": "bond", "text": "просадка RGBI −1,2% от максимума"}]},
+                   "distances": [{"id": "bond", "text": "просадка RGBI −1,2% от максимума"}],
+                   **({"gate": gate} if gate else {})},
         "verdict": {"cell_code": cell, "cell_label": "токсичная",
                     "core_label": "умеренный лонг",
                     "cell_stats": {"mean_fwd1m_pct": -0.55, "hit": 0.4, "n": 12},
@@ -1198,14 +1203,14 @@ class TestRegimeMerge(AlertsCase):
         self.assertEqual(len(self.sent), 1, "в телеграм ушло больше одного сообщения")
 
     def test_заголовком_становится_самое_предметное(self):
-        """«Долговой рынок вошёл в стресс» конкретнее, чем «Режим рынка сменился».
+        """«Долговой рынок вошёл в стресс» конкретнее, чем «Признаки рынка сменились».
 
         Обратный порядок давал заголовки, из которых нельзя понять, ЧТО произошло.
         """
         evs = self.turn(dict(vol=0, bond=0, cell="bull|calm|ok"),
                         dict(vol=0, bond=1, cell="bull|calm|stress"))
         self.assertEqual([e["kind"] for e in evs], ["bond_flag_on"])
-        self.assertIn("Режим рынка сменился", " ".join(evs[0]["causes"]))
+        self.assertIn("Признаки рынка сменились", " ".join(evs[0]["causes"]))
 
     def test_свёрнутое_не_теряется_а_становится_подпунктом(self):
         evs = self.turn(dict(vol=1, bond=1, cell="bear|stress|stress"),
@@ -1264,6 +1269,81 @@ class TestRegimeMerge(AlertsCase):
         evs = self.turn(dict(vol=0, bond=0, cell="bull|calm|ok"),
                         dict(vol=0, bond=1, cell="bull|calm|stress"))
         self.assertEqual(evs[0]["severity"], "warn")
+
+
+class TestCellChangeNamesItsLayer(AlertsCase):
+    """Сменились СЫРЫЕ признаки — сообщение обязано это сказать.
+
+    ОПЛАЧЕНО ПРОГОНОМ 15.09.2026: сырая вола ушла на 0,3 п.п. ниже своего порога,
+    ворота держат стресс до p60 — и в канал уехало «Режим рынка сменился» с
+    ободряющей статистикой ячейки (типичный месяц +1,5%, в плюс 64%), пока панель
+    показывала закрытые ворота, токсичный режим и позицию «деньги». Два дефекта в
+    одной строке: слово «режим» с 02.09.2026 занято РЕЖИМОМ ИЗ ТРЁХ поверх ворот,
+    а он не менялся; и ничто в сообщении не говорило, что ворота стоят на месте.
+    """
+
+    GATE = {"cell_code": "bear|stress|stress", "open": False}
+
+    def turn(self, before, after, gate=None):
+        self.seed(payload(**before))
+        return self.alerts.run(payload(gate=gate, **after), dry_run=False, now=NOW)
+
+    def test_заголовок_не_называет_это_сменой_режима(self):
+        """мутация: вернуть «Режим рынка сменился» -> заголовок снова обещает
+        смену того слоя, по которому стоит позиция, хотя менялись сырые признаки.
+        """
+        evs = self.turn(dict(trend=1, vol=0, bond=0, cell="bull|calm|ok"),
+                        dict(trend=0, vol=0, bond=0, cell="bear|calm|ok"))
+        self.assertEqual([e["kind"] for e in evs], ["state_cell_change"])
+        title = evs[0]["title"]
+        self.assertIn("Признаки рынка сменились", title)
+        self.assertNotIn("Режим", title)
+
+    def test_когда_ворота_стоят_на_месте_сообщение_это_говорит(self):
+        """мутация: не класть detail -> читатель снова получает статистику новой
+        ячейки без единого слова о том, что ворота остались закрытыми.
+        """
+        evs = self.turn(dict(trend=0, vol=1, bond=1, cell="bear|stress|stress"),
+                        dict(trend=0, vol=0, bond=1, cell="bear|calm|stress"),
+                        gate=self.GATE)
+        self.assertEqual([e["kind"] for e in evs], ["state_cell_change"])
+        detail = evs[0].get("detail") or ""
+        self.assertIn("сырые признаки", detail)
+        self.assertIn("закрыты", detail)
+        self.assertIn(detail, self.alerts.render(evs[0]),
+                      "строка про ворота не дошла до сообщения")
+        # Ворота отстают по построению, поэтому их сочетание почти всегда совпадает
+        # с тем, что стояло ДО перехода. Назвать его словами значит напечатать
+        # строку «было → стало» второй раз.
+        self.assertNotIn(evs[0]["before"], detail, "подпись повторяет строку движения")
+
+    def test_третье_сочетание_у_ворот_называется_словами(self):
+        """мутация: всегда писать «ворота этого ещё не читают» -> читатель не узнает,
+        на каком сочетании они стоят, когда оно не совпадает ни с «было», ни с «стало».
+        """
+        evs = self.turn(dict(trend=1, vol=0, bond=0, cell="bull|calm|ok"),
+                        dict(trend=0, vol=0, bond=0, cell="bear|calm|ok"),
+                        gate=self.GATE)
+        self.assertIn("нервная торговля", evs[0]["detail"])
+
+    def test_открытые_ворота_названы_открытыми(self):
+        evs = self.turn(dict(trend=1, vol=0, bond=0, cell="bull|calm|ok"),
+                        dict(trend=0, vol=0, bond=0, cell="bear|calm|ok"),
+                        gate={"cell_code": "bull|calm|ok", "open": True})
+        self.assertIn("открыты", evs[0]["detail"])
+
+    def test_когда_ворота_читают_то_же_сочетание_лишней_строки_нет(self):
+        # Слои сошлись — оговорка стала бы шумом в каждом сообщении.
+        evs = self.turn(dict(trend=1, vol=0, bond=0, cell="bull|calm|ok"),
+                        dict(trend=0, vol=0, bond=0, cell="bear|calm|ok"),
+                        gate={"cell_code": "bear|calm|ok", "open": True})
+        self.assertIsNone(evs[0].get("detail"))
+
+    def test_без_блока_ворот_ничего_не_придумывается(self):
+        # Старый payload: ворот в нём нет, и утверждать про них нечего.
+        evs = self.turn(dict(trend=1, vol=0, bond=0, cell="bull|calm|ok"),
+                        dict(trend=0, vol=0, bond=0, cell="bear|calm|ok"))
+        self.assertIsNone(evs[0].get("detail"))
 
 
 class TestNexusMirror(AlertsCase):
