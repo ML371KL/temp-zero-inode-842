@@ -291,6 +291,25 @@ def _cell_change(payload, prev, now):
                 meaning=wording.cell_plain(stats))]
 
 
+def _gate_still_holds(payload, flag):
+    """Сырой флаг снят, а у ворот тот же флаг стоит — вернуть оговорку, иначе None.
+
+    Зажигаются оба в одной точке, гаснут в разных: сырой — на своём пороге, флаг
+    ворот — на дальнем (вола p60 вместо p80, RGBI −3 % вместо −3,9 %, тренд −2 % от
+    MA200). В этой полосе событие машины состояний уже говорит «отпустило», а
+    позиция по-прежнему стоит на закрытых воротах: на месячной сетке 11 месяцев по
+    облигациям и 20 по воле. Правило ВКЛЮЧЕНИЯ оговорки не просит — там пороги
+    совпадают, и слои зажигаются вместе. Слой событие не меняет (CONTRACT §3), оно
+    его называет.
+    """
+    states = payload.get("states") or {}
+    gate, cur = states.get("gate") or {}, states.get("current") or {}
+    if gate.get(flag) is None or cur.get(flag) is None or gate[flag] == cur[flag]:
+        return None
+    return ("Ворота этого ещё не читают: их флаг снимается дальше, и ворота "
+            + ("открыты." if gate.get("open") else "закрыты."))
+
+
 def _bond_flag(payload, prev, now):
     cur = (payload.get("states") or {}).get("current") or {}
     new, old = cur.get("bond"), prev.get("bond")
@@ -311,10 +330,11 @@ def _bond_flag(payload, prev, now):
                             "годового максимума. Пока так, покупка просадок в акциях "
                             "не работает: на истории в такие месяцы она приносила "
                             "убыток, а не прибыль.")]
+    lag = _gate_still_holds(payload, "bond")
     return [_ev(f"bond_off:{asof}", "bond_flag_off",
                 "Долговой рынок вышел из стресса", "info", now,
                 before="ОФЗ под давлением", after="ОФЗ спокойны",
-                detail=dist,
+                detail=" ".join(x for x in (dist, lag) if x) or None,
                 meaning="Гособлигации отыграли просадку. Покупка просадок в акциях "
                         "снова имеет смысл: на спокойном долге такие месяцы в "
                         "среднем закрывались в плюс примерно в двух случаях из трёх.")]
@@ -341,8 +361,10 @@ def _buy_window(payload, prev, now):
                 "Окно входа: паника в акциях при спокойном долге", "info", now,
                 before=wording.cell_words(prev_code), after=wording.cell_words(
                     f"{'bull' if trend == 1 else 'bear'}|stress|ok"),
-                detail="Акции трясёт, а гособлигации держатся — редкое сочетание: "
-                       "продают из-за страха, а не из-за проблем с деньгами в системе.",
+                detail=" ".join(x for x in (
+                    "Акции трясёт, а гособлигации держатся — редкое сочетание: "
+                    "продают из-за страха, а не из-за проблем с деньгами в системе.",
+                    _gate_still_holds(payload, "bond")) if x),
                 meaning=wording.cell_plain(stats))]
 
 

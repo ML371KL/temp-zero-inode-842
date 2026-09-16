@@ -1346,6 +1346,81 @@ class TestCellChangeNamesItsLayer(AlertsCase):
         self.assertIsNone(evs[0].get("detail"))
 
 
+class TestGateLagInFlagEvents(AlertsCase):
+    """«Отпустило» по сырому флагу при воротах, которые ещё держат.
+
+    Пороги ВКЛЮЧЕНИЯ у сырого флага и у флага ворот совпадают, пороги СНЯТИЯ —
+    нет: вола p60 вместо p80, RGBI −3 % вместо −3,9 %, тренд −2 % от MA200. В этой
+    полосе «Долговой рынок вышел из стресса» и «Окно входа» уходят в канал, пока
+    позиция стоит на закрытых воротах. На месячной сетке 2004–2026 полоса по
+    облигациям занимает 11 месяцев, окно входа попадало в неё дважды.
+    """
+
+    def turn(self, before, after, gate=None):
+        self.seed(payload(**before))
+        return self.alerts.run(payload(gate=gate, **after), dry_run=False, now=NOW)
+
+    # Вола НУЛЕВАЯ: при vol=1 тот же поворот рождает «Окно входа», оно становится
+    # заголовком, а «ОФЗ вышли из стресса» уходит подпунктом — и проверка молча
+    # начинает смотреть на другое событие. Первая редакция этого теста именно так
+    # и прошла мимо: мутация «убрать оговорку из bond_off» осталась зелёной.
+    BOND_OFF_BEFORE = dict(trend=0, vol=0, bond=1, cell="bear|calm|stress")
+    BOND_OFF_AFTER = dict(trend=0, vol=0, bond=0, cell="bear|calm|ok")
+
+    def test_снятый_флаг_офз_при_стоящих_воротах_оговорён(self):
+        """мутация: убрать оговорку -> «покупка просадок снова имеет смысл» уходит
+        в канал ровно тогда, когда ворота ещё держат флаг и позиция не менялась.
+        """
+        evs = self.turn(self.BOND_OFF_BEFORE, self.BOND_OFF_AFTER,
+                        gate={"cell_code": "bear|calm|stress", "open": False,
+                              "trend": 0, "vol": 0, "bond": 1})
+        ev = next(e for e in evs if e["kind"] == "bond_flag_off")
+        detail = ev.get("detail") or ""
+        self.assertIn("Ворота этого ещё не читают", detail)
+        self.assertIn("закрыты", detail)
+        self.assertIn(detail, self.alerts.render(ev), "оговорка не дошла до сообщения")
+
+    def test_окно_входа_при_стоящем_флаге_ворот_оговорено(self):
+        """Единственное событие панели, зовущее ДОБАВИТЬ риск. На месячной сетке
+        оно дважды приходилось на месяцы, где ворота стояли закрытыми.
+
+        мутация: не звать _gate_still_holds из окна входа -> приглашение войти
+        уходит без единого слова о том, что ворота его не читают.
+        """
+        evs = self.turn(dict(trend=0, vol=1, bond=1, cell="bear|stress|stress"),
+                        dict(trend=0, vol=1, bond=0, cell="bear|stress|ok"),
+                        gate={"cell_code": "bear|stress|stress", "open": False,
+                              "trend": 0, "vol": 1, "bond": 1})
+        ev = next(e for e in evs if e["kind"] == "buy_window_open")
+        self.assertIn("Ворота этого ещё не читают", ev.get("detail") or "")
+
+    def test_когда_ворота_сняли_флаг_вместе_с_сырым_оговорки_нет(self):
+        evs = self.turn(self.BOND_OFF_BEFORE, self.BOND_OFF_AFTER,
+                        gate={"cell_code": "bear|calm|ok", "open": True,
+                              "trend": 0, "vol": 0, "bond": 0})
+        ev = next(e for e in evs if e["kind"] == "bond_flag_off")
+        self.assertNotIn("Ворота этого ещё не читают", ev.get("detail") or "")
+
+    def test_вход_в_стресс_оговорки_не_требует(self):
+        """Пороги включения совпадают: ворота зажигают флаг тем же днём, что и
+        сырые признаки, — оговорка тут была бы неправдой.
+
+        мутация: звать _gate_still_holds и на включении -> тест красный, если
+        оговорка появится (сравнение флагов её и так не даст, но правило явное).
+        """
+        evs = self.turn(dict(trend=0, vol=0, bond=0, cell="bear|calm|ok"),
+                        dict(trend=0, vol=0, bond=1, cell="bear|calm|stress"),
+                        gate={"cell_code": "bear|calm|stress", "open": True,
+                              "trend": 0, "vol": 0, "bond": 1})
+        ev = next(e for e in evs if e["kind"] == "bond_flag_on")
+        self.assertNotIn("Ворота этого ещё не читают", ev.get("detail") or "")
+
+    def test_без_блока_ворот_оговорки_не_бывает(self):
+        evs = self.turn(self.BOND_OFF_BEFORE, self.BOND_OFF_AFTER)
+        ev = next(e for e in evs if e["kind"] == "bond_flag_off")
+        self.assertNotIn("Ворота", ev.get("detail") or "")
+
+
 class TestNexusMirror(AlertsCase):
     """Копия события в ленту хаба. Сам POST проверяется в test_nexus.py — здесь
     только сцепка с очередью повторов, которая живёт в alerts.dispatch."""
