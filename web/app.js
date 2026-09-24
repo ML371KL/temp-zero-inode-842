@@ -953,7 +953,13 @@
         break;
       case 'lqdt':
         out.push(num(p.aum, 0, ' млрд ₽'));
-        out.push(h('div', { 'class': 'tile__sub', text: p.rotation_started ? 'Ротация началась' : 'Большой ротации ещё не случалось' }));
+        // Просадка СЧА — отток из фонда, а не доказанная ротация в акции: куда ушли
+        // деньги, говорит поток физлиц по ОРФР (с налогом на доход внутри ПИФ отток
+        // может уйти во вклады).
+        out.push(h('div', { 'class': 'tile__sub', text: p.rotation_started
+          ? 'отток из фонда ≥10% от пика' + (isNum(p.retail_equity_flow_bln)
+              ? '; физлица в акции ' + fmtNum(p.retail_equity_flow_bln, 1, true) + ' млрд ₽ за месяц' : '')
+          : 'Большой ротации ещё не случалось' }));
         break;
       case 'deposit_spread':
         out.push(num(p.spread_pp, 1, ' п.п.', true));
@@ -1009,8 +1015,13 @@
         out.push(num(p.tax_barrel_rub, 0, ' ₽'));
         // Тире перед знаковым числом давало «5 440 ₽ — −13%»: пара «— −» читается
         // как двойное тире, а не как «столько-то ниже».
-        out.push(h('div', { 'class': 'tile__sub', text: 'налоговая бочка против бюджетных ' +
-          fmtNum(p.budget_barrel_rub, 0, false) + ' ₽, ' + fmtNum(p.gap_pct, 0, true) + '%' }));
+        // «База бюджетного правила», а не «бюджетная цена»: выше неё Минфин покупает
+        // валюту в ФНБ, ниже — продаёт; бюджет получает саму базу. Базы года нет —
+        // так и пишем, а не «против 0 ₽».
+        out.push(h('div', { 'class': 'tile__sub', text: isNum(p.budget_barrel_rub)
+          ? 'налоговая бочка против базы бюджетного правила ' + fmtNum(p.budget_barrel_rub, 0, false) +
+            ' ₽ (' + (p.budget_year || '') + '), ' + fmtNum(p.gap_pct, 0, true) + '%'
+          : 'параметров бюджета на этот год нет' }));
         break;
       case 'breadth':
         out.push(num(p.pct_above_ma200, 0, '%'));

@@ -681,9 +681,13 @@ class TestТайлыНаЖивыхДанных(TileCase):
         self.assertIn("на 12% ниже", t["headline"])
         self.assertIn(f"5{NBSP}440 ₽", t["headline"])
         self.assertIn(f"интрадей-оценка 4{NBSP}862 ₽", t["headline"])
-        # Ориентир бюджета назван ориентиром: это произведение двух
-        # допущений ($59 × 92 ₽), а не строка закона.
-        self.assertIn("ориентира бюджета", t["headline"])
+        # База названа БАЗОЙ ПРАВИЛА (отсечка × курс бюджета), а не «ориентиром
+        # бюджета»: выше неё Минфин покупает валюту, бюджет получает саму базу.
+        self.assertIn("базы бюджетного правила", t["headline"])
+        self.assertEqual(p["budget_year"], 2026)
+        self.assertEqual(p["budget_cutoff_usd"], 59.0)
+        self.assertEqual(p["budget_fx"], 92.2)
+        self.assertEqual(p["proxy_budget_barrel_rub"], 5440.0)
 
     def test_sep_node_дни_до_окна(self):
         """Календарный тайл: 17.08 → до 10.09 ровно 24 дня (руками: 14 + 10)."""
@@ -789,6 +793,120 @@ class TestТайлыНаЖивыхДанных(TileCase):
         self.assertIn("67% оборота акций", t["headline"])
         self.assertIn("активны 3.0 из 41.9 млн счетов (7%)", t["headline"])
         self.assertIn("доля Сбербанк 39%", t["headline"])
+
+
+
+class TestБюджет2027(TileCase):
+    """Правки по бюджетному пакету 24.09.2026: база правила по годам, приор узла
+    по данным, ротация только с подтверждением потоком физлиц."""
+
+    # Закрытия IMOEX последних торговых дней августа и сентября — из ISS, 24.09.2026.
+    IMOEX_ENDS = {
+        "2021-08-31": 3918.96, "2021-09-30": 4103.52,
+        "2022-08-31": 2400.08, "2022-09-30": 1957.31,
+        "2023-08-31": 3227.99, "2023-09-29": 3133.26,
+        "2024-08-30": 2650.32, "2024-09-30": 2857.56,
+        "2025-08-29": 2899.38, "2025-09-30": 2684.60,
+        "2026-08-31": 2178.87, "2026-09-23": 2312.27,
+    }
+
+    def _ret(self, a, b):
+        return math.log(self.IMOEX_ENDS[b] / self.IMOEX_ENDS[a]) * 100.0
+
+    def test_база_правила_2026_и_2027(self):
+        """5 440 = 59 × 92,2 (закон 2026); 4 370 = 50 × 87,4 (проект 2027) — руками."""
+        b26 = self.monitors._budget_base(2026)
+        b27 = self.monitors._budget_base(2027)
+        self.assertEqual(b26["barrel_rub"], 5440.0)
+        self.assertEqual(b27["barrel_rub"], 4370.0)
+        self.assertEqual(b27["cutoff_usd"], 50.0, "база 2027 — по отсечке, а не по прогнозу 53 $")
+        self.assertEqual(b27["status"], "проект")
+        self.assertIsNone(self.monitors._budget_base(2031))
+
+    def test_rub_barrel_база_года_месяца_и_текущего_года(self):
+        """В январе цена ещё декабрьская — её база 2026 года; интрадей-оценка про
+        сегодня — её база уже 2027 года. Руками: 60·80 = 4 800; (4800/5440 − 1)·100 =
+        −11,8; прокси 65·85·0,88 = 4 862; (4862/4370 − 1)·100 = +11,3."""
+        self.put("urals_tax", {"2026-11-30": 58.0, "2026-12-31": 60.0})
+        self.put("usd_cbr", {"2026-12-10": 79.0, "2026-12-20": 81.0,
+                             "2027-01-08": 84.0, "2027-01-09": 85.0})
+        self.put("brent_moex", {"2027-01-09": 65.0})
+        now = datetime(2027, 1, 10, 12, 0, 0, tzinfo=UTC)
+        t = self.tile("rub_barrel", now=now)
+        p = t["payload"]
+        self.assertEqual(p["budget_year"], 2026)
+        self.assertEqual(p["budget_barrel_rub"], 5440.0)
+        self.assertEqual(p["gap_pct"], -11.8)
+        self.assertEqual(p["proxy_budget_barrel_rub"], 4370.0)
+        self.assertEqual(p["proxy_gap_pct"], 11.3)
+        self.assertIn("базы бюджетного правила", t["headline"])
+        self.assertIn("Следующая база: 50 $ × 87,4 ₽", t["note"])
+
+    def test_rub_barrel_без_параметров_года_не_выдумывает_разрыв(self):
+        self.put("urals_tax", {"2031-05-31": 60.0})
+        self.put("usd_cbr", {"2031-05-10": 90.0})
+        t = self.tile("rub_barrel", now=datetime(2031, 6, 10, 12, 0, 0, tzinfo=UTC))
+        self.assertIsNone(t["payload"]["gap_pct"])
+        self.assertIsNone(t["payload"]["budget_barrel_rub"])
+        self.assertIn("параметров бюджета на 2031 год нет", t["headline"])
+
+    def test_sep_node_приор_считается_по_данным(self):
+        """Сентябри 2022–2025 воспроизводят числа валидации: в среднем −5,3% за
+        2022–24 и −7,7% за 2025; незакрытый сентябрь-2026 в среднее не идёт."""
+        self.put("imoex", self.IMOEX_ENDS)
+        now = datetime(2026, 9, 24, 12, 0, 0, tzinfo=UTC)
+        t = self.tile("sep_node", now=now)
+        self.vitals(t, "sep_node", today="2026-09-24")
+        p = t["payload"]
+        r = {2022: self._ret("2022-08-31", "2022-09-30"),
+             2023: self._ret("2023-08-31", "2023-09-29"),
+             2024: self._ret("2024-08-30", "2024-09-30"),
+             2025: self._ret("2025-08-29", "2025-09-30")}
+        self.assertEqual(p["septembers"], [[y, round(v, 2)] for y, v in r.items()])
+        self.assertAlmostEqual((r[2022] + r[2023] + r[2024]) / 3, -5.28, places=2)
+        self.assertAlmostEqual(r[2025], -7.70, places=2)
+        self.assertEqual(p["sept_n"], 4, "2021 год раньше порога — в приор не входит")
+        self.assertEqual(p["sept_mean_pct"], round(sum(r.values()) / 4, 2))
+        cur = p["sept_current"]
+        self.assertEqual(cur["year"], 2026)
+        self.assertFalse(cur["closed"])
+        self.assertEqual(cur["ret_pct"], round(self._ret("2026-08-31", "2026-09-23"), 2))
+        self.assertIn("Окно узла активно до 05.10", t["headline"])
+        self.assertIn("сентябрь 2026 пока +5.9%", t["headline"])
+
+    def test_sep_node_сентябрь_закрывается_первого_октября(self):
+        self.put("imoex", dict(self.IMOEX_ENDS, **{"2026-09-30": 2300.0}))
+        t = self.tile("sep_node", now=datetime(2026, 10, 2, 12, 0, 0, tzinfo=UTC))
+        p = t["payload"]
+        self.assertEqual(p["sept_n"], 5)
+        self.assertIsNone(p["sept_current"])
+        self.assertEqual(p["septembers"][-1][0], 2026)
+
+    def _lqdt_rotation(self):
+        span = days("2026-08-15", 80)
+        vals = [1300.0] * 70 + [1250.0, 1220.0, 1200.0, 1180.0, 1170.0, 1160.0, 1150.0,
+                                1140.0, 1135.0, 1130.0]
+        self.put("lqdt_aum", dict(zip(span, vals)))
+
+    def test_lqdt_ротацию_подтверждает_поток_физлиц(self):
+        """dd руками: (1130/1300 − 1)·100 = −13,1 — порог −10 пробит. Приток физлиц
+        в акции +21,7 млрд за июнь — «похоже на ротацию»."""
+        self._lqdt_rotation()
+        self.put("orfr_flows_fiz", {"2026-05-31": 7.0, "2026-06-30": 21.7})
+        t = self.tile("lqdt")
+        p = t["payload"]
+        self.assertTrue(p["rotation_started"])
+        self.assertEqual(p["retail_equity_flow_bln"], 21.7)
+        self.assertIn("отток из фонда", t["headline"])
+        self.assertIn("похоже на ротацию", t["headline"])
+        self.assertIn("внутри ПИФ", t["note"])
+
+    def test_lqdt_отток_без_покупок_акций_не_ротация(self):
+        self._lqdt_rotation()
+        self.put("orfr_flows_fiz", {"2026-06-30": -12.4})
+        t = self.tile("lqdt")
+        self.assertIn("деньги ушли не в акции", t["headline"])
+        self.assertNotIn("похоже на ротацию", t["headline"])
 
 
 class TestВсеТайлыРазом(TileCase):

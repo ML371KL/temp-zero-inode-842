@@ -28,7 +28,7 @@
 # четыре реальных события июля-августа из эталона исследования
 # (validation → seed/events_registry.csv), которые в ряд не попадали.
 
-updated: 2026-08-20
+updated: 2026-09-24
 items:
   - date: 2026-07-24
     type: other
@@ -55,3 +55,13 @@ items:
     title: "Сенат принял Graham Act 86-11: тарифы покупателям нефти РФ"
     expected_sign: -1
     url: "https://www.cnbc.com/2026/08/07/russia-sanctions-bill-lindsey-graham-senate.html"
+  - date: 2026-09-11
+    type: other
+    title: "Заседание ЦБ: ключевая ставка сохранена на 14%, первая пауза в цикле смягчения"
+    expected_sign: 0
+    url: "https://www.cbr.ru/press/pr/"
+  - date: 2026-09-24
+    type: tax
+    title: "Бюджетный пакет 2027-2029: налог 30% на доп. доход добытчиков (золото 20%), пассивные доходы в шкалу НДФЛ до 22%, налог внутри ПИФ 15%, отсечка 50 долларов"
+    expected_sign: -1
+    url: "https://t.me/minfin/9235"
