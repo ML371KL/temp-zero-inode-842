@@ -75,6 +75,14 @@
     return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(8, 10) + '.' + s.slice(5, 7) : s;
   }
 
+  // «34 месяца», «21 месяц», «25 месяцев» — существительное под число.
+  function plural(n, one, few, many) {
+    var a = Math.abs(n) % 100, b = a % 10;
+    if (a > 10 && a < 20) return many;
+    if (b === 1) return one;
+    return (b >= 2 && b <= 4) ? few : many;
+  }
+
   // Перцентили конвейер публикует уже в процентах: monitors._pct_last возвращает
   // 0..100, и headline тайла говорит «78-й перцентиль» из того же числа. Умножение
   // на сто давало на экране «7800-й перцентиль». Доли (hit, weight) — другая
@@ -311,6 +319,115 @@
   }
   function share(v) { return isNum(v) ? Math.round(v * 100) + '%' : '—'; }
 
+  /* «Что изменит позицию» — строками «показатель · что нужно · сейчас».
+   *
+   * Конвейер присылает то же одной фразой (position.conditions), и на витрине она
+   * занимала пять строк сплошного текста. Числа для таблицы уже лежат в витрине по
+   * отдельности: флаги ворот (position.flags), их пороги и текущие значения
+   * (states.distances), срок снятия флага волатильности и сдвиги показателей ядра
+   * (position.switch_distance). Здесь они только раскладываются по строкам —
+   * решение по-прежнему считает конвейер.
+   *
+   * Какой порог чей: ворота закрыты только при «медведь · стресс · стресс», поэтому
+   * открывает их снятие ЛЮБОГО флага, а закрывает — все три сразу. Тренд снимается
+   * выше on_threshold и ставится ниже off_threshold; волатильность и облигации
+   * ставятся по threshold и снимаются по off_threshold (гистерезис states.gate).
+   *
+   * -> {lead, rows: [{k, need, now, hint, met}]} | null. null — данных для таблицы
+   * нет (старая витрина, флаг без значения): тогда рисуется прежний список фраз. */
+  function switchRows(p, dists) {
+    if (!p || !p.flags || !Array.isArray(dists)) return null;
+    var by = {};
+    dists.forEach(function (x) { if (x && x.id) by[x.id] = x; });
+    var t = by.trend, vo = by.vol, b = by.bond, f = p.flags;
+    var bit = function (x) { return x === 0 || x === 1; };
+    if (!t || !vo || !b || !bit(f.trend) || !bit(f.vol) || !bit(f.bond)) return null;
+    if (![t.value, t.on_threshold, t.off_threshold, vo.value, vo.threshold, vo.off_threshold,
+          b.value, b.threshold, b.off_threshold].every(isNum)) return null;
+
+    var long = p.state === 'long';
+    var sd = p.switch_distance || {};
+    var thr = isNum(p.comp_threshold) ? p.comp_threshold : 0.2;
+    var pct = function (x) { return fmtNum(x, 1, true) + '%'; };
+    var band = function (x) { return fmtNum(Math.abs(x), Math.abs(x) % 1 ? 1 : 0, false) + '%'; };
+    var days = function (n) { return plural(n, 'торговый день', 'торговых дня', 'торговых дней'); };
+
+    function calm() {
+      var lo = sd.vol_calm_days_min, hi = sd.vol_calm_days_max;
+      if (sd.vol_calm_status === 'beyond') return 'не раньше чем через месяц';
+      if (sd.vol_calm_status === 'slow_beyond' && isNum(lo)) {
+        return 'через ' + lo + ' ' + days(lo) + ', если индекс замрёт; иначе — не раньше чем через месяц';
+      }
+      if (sd.vol_calm_status !== 'ok' || !isNum(lo) || !isNum(hi)) return null;
+      return 'через ' + (lo === hi ? lo : lo + '–' + hi) + ' ' + days(hi) + ' при спокойном рынке';
+    }
+    function comp(need) {
+      var legs = (sd.legs || []).map(function (l) { return l && l.text; }).filter(Boolean);
+      return { k: 'Оценка рынка',
+               need: need + ' в день решения' + (p.next_decision ? ' (' + ruDay(p.next_decision) + ')' : ''),
+               now: fmtNum(p.comp_daily, 2, true),
+               hint: legs.length ? 'хватило бы одного: ' + legs.join('; ') : null };
+    }
+
+    var rows = [], lead;
+    if (long) {
+      var up = function (k, need, now, met) {
+        return { k: k, need: need, now: now + (met ? ' · флаг стоит' : ''), met: met };
+      };
+      rows.push(up('Тренд', 'индекс ниже 200-дневной средней на ' + band(t.off_threshold), pct(t.value), f.trend === 0));
+      rows.push(up('Волатильность', 'выше ' + fmtNum(vo.threshold, 1, false) + '%', fmtNum(vo.value, 1, false) + '%', f.vol === 1));
+      rows.push(up('ОФЗ', 'просадка RGBI глубже ' + pct(b.threshold), pct(b.value), f.bond === 1));
+      rows.push(comp('ниже ' + fmtNum(-thr, 1, true)));
+      lead = 'Позиция сменится на деньги, если закроются ворота (нужны все три флага сразу) или оценка рынка уйдёт ниже порога.';
+    } else {
+      var gateClosed = p.gate_open === false, compOk = p.comp_state === 1;
+      if (gateClosed) {
+        if (f.trend === 0) rows.push({ k: 'Тренд', need: 'индекс выше 200-дневной средней на ' + band(t.on_threshold), now: pct(t.value) });
+        if (f.vol === 1) rows.push({ k: 'Волатильность', need: 'ниже ' + fmtNum(vo.off_threshold, 1, false) + '%',
+                                     now: fmtNum(vo.value, 1, false) + '%', hint: calm() });
+        if (f.bond === 1) rows.push({ k: 'ОФЗ', need: 'просадка RGBI мельче ' + pct(b.off_threshold), now: pct(b.value) });
+      }
+      if (!compOk) rows.push(comp('выше ' + fmtNum(thr, 1, true)));
+      lead = gateClosed
+        ? (compOk ? 'Ворота откроются, когда снимется любой из флагов.'
+                  : 'Нужно и то и другое: снимется любой из флагов ворот, а оценка рынка поднимется выше порога.')
+        : (compOk ? 'Условия входа выполнены — позиция сменится на следующем расчёте.'
+                  : 'Ворота открыты — не хватает оценки рынка выше порога.');
+    }
+    return { lead: lead, rows: rows };
+  }
+
+  function renderSwitch(p, st) {
+    var sw = switchRows(p, (st || {}).distances);
+    if (!sw) {
+      var conds = Array.isArray(p.conditions) ? p.conditions.filter(function (c) { return c; }) : [];
+      return conds.length ? h('div', null, [
+        h('div', { 'class': 'stat__k', text: 'Что изменит позицию' }),
+        h('ul', { 'class': 'position__cond' }, conds.map(function (c) { return h('li', { text: ruText(c) }); }))
+      ]) : null;
+    }
+    return h('div', { 'class': 'switch' }, [
+      h('div', { 'class': 'stat__k', text: 'Что изменит позицию' }),
+      h('p', { 'class': 'switch__lead', text: sw.lead }),
+      sw.rows.length ? h('table', { 'class': 'switch__t' }, [
+        h('thead', null, [h('tr', null, [
+          h('th', { scope: 'col', text: 'Показатель' }), h('th', { scope: 'col', text: 'Нужно' }),
+          h('th', { scope: 'col', text: 'Сейчас' })
+        ])]),
+        h('tbody', null, sw.rows.map(function (r) {
+          return h('tr', null, [
+            h('th', { scope: 'row', text: r.k }),
+            h('td', null, [
+              h('span', { text: r.need }),
+              r.hint ? h('span', { 'class': 'switch__hint', text: ruText(r.hint) }) : null
+            ]),
+            h('td', { 'class': 'switch__now', text: r.now })
+          ]);
+        }))
+      ]) : null
+    ]);
+  }
+
   /* Строка позиции — первая на панели и единственный её итог: ворота ∧ наклон.
    *
    * До аудита 02.09.2026 витрина держала три разных прочтения знака (закрытый
@@ -339,28 +456,24 @@
     }
     if (p.next_decision) {
       var wd = weekdayOf(p.next_decision);
-      facts.push(stat('Следующее решение по наклону', ruDay(p.next_decision) + (wd ? ' (' + wd + ')' : ''),
-        'порог ±' + fmtNum(thr, 1, false) + ' по дневному наклону'));
+      facts.push(stat('Следующее решение', ruDay(p.next_decision) + (wd ? ' (' + wd + ')' : ''),
+        'по наклону, порог ±' + fmtNum(thr, 1, false)));
     }
     if (p.gate_open === true || p.gate_open === false) {
-      facts.push(stat('Ворота', p.gate_open ? 'открыты' : 'закрыты',
-        [regimeLabel || null, p.gate_since ? 'с ' + ruDay(p.gate_since) : null].filter(Boolean).join(' · ') || null));
+      var gateWord = p.gate_open ? 'открыты' : 'закрыты';
+      // Режим «ворота закрыты» под словом «закрыты» — одно и то же дважды.
+      var gateRegime = regimeLabel && regimeLabel.toLowerCase() !== 'ворота ' + gateWord ? regimeLabel : null;
+      facts.push(stat('Ворота', gateWord,
+        [gateRegime, p.gate_since ? 'с ' + ruDay(p.gate_since) : null].filter(Boolean).join(' · ') || null));
     }
     if (isNum(p.comp_state)) {
       facts.push(stat('Знак решения', COMP_STATE_WORD[String(p.comp_state)] || '—',
-        [isNum(p.comp_daily) ? 'дневной наклон ' + fmtNum(p.comp_daily, 2, true) : null,
+        [isNum(p.comp_daily) ? 'наклон ' + fmtNum(p.comp_daily, 2, true) : null,
          p.comp_state_since ? 'с ' + ruDay(p.comp_state_since) : null].filter(Boolean).join(' · ') || null));
     }
     if (isNum(p.switches_per_year)) {
       facts.push(stat('Смен в год', fmtNum(p.switches_per_year, 1, false), 'в среднем за пять лет'));
     }
-
-    var conds = Array.isArray(p.conditions) ? p.conditions.filter(function (c) { return c; }) : [];
-    var prev = v.position_prev_rule;
-    var prevNote = (prev && POSITION_WORD[prev.state])
-      ? ' По прежнему правилу (' + ruText(prev.rule || 'знак закрытого месяца, ворота без гистерезиса') + '): ' +
-        POSITION_WORD[prev.state] + (prev.since ? ' с ' + fmtDay(prev.since) : '') + '.'
-      : '';
 
     function sw(cls, bg) {
       var s = h('span', { 'class': 'legend__sw' + (cls ? ' ' + cls : '') });
@@ -391,12 +504,14 @@
     var why = reason ? (since ? ' · ' : '') + ruText(reason) : '';
     var now = holds ? ((since || why) ? ' · ' : '') + holds : '';
 
-    /* Журнал правила (compute/track.py, аудит 03.10.2026): что позиция дала в деньгах
+    /* Что дало правило (compute/track.py, аудит 03.10.2026): позиция в деньгах
        против удержания индекса полной доходности и вкладов. Здоровье ядра меряет
        связь композита со следующим месяцем, а не деньги, и на 24 месяцах почти всегда
        неотличимо от нуля; на вопрос «работает ли правило» отвечает этот блок. Окно «с
        заморозки» первое: всё, что раньше, — бэктест на той же истории, по которой
-       правило выбирали. Годовой темп — только у окон от года. */
+       правило выбирали. Годовой темп — только у окон от года. Как считается (мера,
+       комиссия, исполнение) — в руководстве, раздел «Позиция»: на панели остаются
+       числа и одна строка о том, что в них сравнивается. */
     var jr = p.journal && Array.isArray(p.journal.windows) && p.journal.windows.length ? p.journal : null;
     var journal = null;
     if (jr) {
@@ -424,12 +539,16 @@
           }).join('; ') + '.'
         : 'Сделок с ' + fmtDay(jr.freeze) + ' не было.';
       journal = h('div', { 'class': 'position__journal' }, [
-        h('div', { 'class': 'stat__k', text: 'Журнал правила: позиция в деньгах' }),
+        h('div', { 'class': 'stat__k', text: 'Что дало правило' }),
         h('div', { 'class': 'tablewrap' }, [
           h('table', { 'class': 'data' }, [
-            h('caption', { text: (jr.basis ? ruText(jr.basis) + '; ' : '') + 'разница — правило минус вклады, в процентных пунктах. ' +
-              'Строка «с ' + fmtDay(jr.freeze) + '» — за всё время с заморозки правила; раньше — бэктест на той же ' +
-              'истории, по которой правило выбирали, честный счёт идёт с этой даты.' }),
+            // Вторая половина подписи — про колонку «Разница»; на самых узких экранах
+            // колонка скрыта (styles.css), и подпись о ней уходит вместе с ней.
+            h('caption', null, [
+              h('span', { text: 'Индекс — с дивидендами' }),
+              h('span', { 'class': 'journal__diff', text: '; разница — правило минус вклады, в процентных пунктах' }),
+              h('span', { text: '.' })
+            ]),
             h('thead', null, [h('tr', null, [
               h('th', { scope: 'col', text: 'Окно' }), h('th', { scope: 'col', text: 'Правило' }),
               h('th', { scope: 'col', text: 'Индекс' }), h('th', { scope: 'col', text: 'Вклады' }),
@@ -438,7 +557,10 @@
             h('tbody', null, jr.windows.map(jrRow))
           ])
         ]),
-        h('p', { 'class': 'position__note', text: tradeText })
+        h('p', { 'class': 'position__note' }, [
+          document.createTextNode(tradeText + ' До этой даты — расчёт на истории. '),
+          h('a', { href: 'guide.html#journal', text: 'Как считается' })
+        ])
       ]);
     }
 
@@ -450,14 +572,11 @@
       ]),
       h('div', { 'class': 'position__grid' }, [
         h('div', null, [
-          facts.length ? h('div', { 'class': 'stats' }, facts) : null,
-          h('p', { 'class': 'position__note', text: 'Исполнять ' + ruText(p.execute || 'на следующем закрытии') +
-            ' после дня решения. Ворота читаются каждый день, наклон решается по пятницам; позиция — не оценка рынка, а место, где стоят деньги.' + prevNote })
+          facts.length ? h('div', { 'class': 'stats stats--cols' }, facts) : null,
+          h('p', { 'class': 'position__note', text: 'Исполнение — ' + ruText(p.execute || 'на следующем закрытии') +
+            ' после дня решения.' })
         ]),
-        conds.length ? h('div', null, [
-          h('div', { 'class': 'stat__k', text: 'Что изменит позицию' }),
-          h('ul', { 'class': 'position__cond' }, conds.map(function (c) { return h('li', { text: ruText(c) }); }))
-        ]) : null
+        renderSwitch(p, st)
       ]),
       journal,
       Array.isArray(p.history) && p.history.length ? h('div', { 'class': 'position__ribbon' }, [
@@ -465,6 +584,38 @@
         C.positionRibbon(p.history, { end: p.decision_day || d.asof_trading_day, aria: 'Позиция по правилу панели с 2004 года' }),
         legend
       ]) : null
+    ]);
+  }
+
+  /* Статистика режима — одной таблицей: две меры стоят строками, медиана, среднее и
+   * доля плюсовых — колонками, и числа второй меры попадают точно под первые.
+   * Прежде это были два ряда карточек, каждый со своей шириной колонок: «среднее»
+   * второго ряда уезжало вправо от первого. Что такое каждая мера и почему у них
+   * разное число месяцев — в руководстве, раздел «Три режима». */
+  function regimeTable(rp, rx) {
+    function row(label, note, s) {
+      var n = isNum(s.n) ? s.n + ' ' + plural(s.n, 'месяц', 'месяца', 'месяцев') : null;
+      var sub = [note, n].filter(Boolean).join(' · ');
+      return h('tr', null, [
+        h('th', { scope: 'row' }, [
+          h('span', { text: label }),
+          sub ? h('span', { 'class': 'regstats__sub', text: sub }) : null
+        ]),
+        h('td', { 'class': toneOf(s.median_pct), text: pct2(s.median_pct) }),
+        h('td', { 'class': toneOf(s.mean_pct), text: pct2(s.mean_pct) }),
+        h('td', { text: share(s.hit) })
+      ]);
+    }
+    return h('table', { 'class': 'regstats' }, [
+      h('caption', { 'class': 'stat__k', text: 'Следующий месяц в этом режиме' }),
+      h('thead', null, [h('tr', null, [
+        h('td'), h('th', { scope: 'col', text: 'Медиана' }),
+        h('th', { scope: 'col', text: 'Среднее' }), h('th', { scope: 'col', text: 'В плюсе' })
+      ])]),
+      h('tbody', null, [
+        rp ? row('По цене индекса', null, rp) : null,
+        rx ? row('Сверх вкладов', 'с дивидендами', rx) : null
+      ])
     ]);
   }
 
@@ -557,20 +708,9 @@
         h('div', { 'class': 'bits' }, bits),
         h('div', { 'class': 'cellname' }, [rIco, h('span', { text: regime.label })]),
         h('div', { 'class': 'cellcode', text: 'режим из трёх' + (cellText ? ' · сочетание: ' + cellText : '') }),
-        rstats ? h('div', { 'class': 'stat__k', style: 'margin-bottom:8px', text: 'Следующий месяц по цене индекса' }) : null,
-        rp ? h('div', { 'class': 'stats' }, [
-          stat('Медиана', pct2(rp.median_pct), 'типичный исход', toneOf(rp.median_pct)),
-          stat('Среднее', pct2(rp.mean_pct), 'среднее тянут хвосты', toneOf(rp.mean_pct)),
-          stat('Доля плюсовых', share(rp.hit), 'из ' + (isNum(rp.n) ? rp.n : '—') + ' закрытых месяцев')
-        ]) : null,
-        rx ? h('div', { 'class': 'stat__k', style: 'margin:14px 0 8px', text: 'Над деньгами · индекс полной доходности минус ставка вкладов' }) : null,
-        rx ? h('div', { 'class': 'stats' }, [
-          stat('Медиана', pct2(rx.median_pct), 'в этой мере принимается решение', toneOf(rx.median_pct)),
-          stat('Среднее', pct2(rx.mean_pct), null, toneOf(rx.mean_pct)),
-          stat('Доля плюсовых', share(rx.hit), 'из ' + (isNum(rx.n) ? rx.n : '—') + ' месяцев со ставкой')
-        ]) : (rp ? null : h('p', { 'class': 'empty', text: 'Статистика режима ещё не рассчитана' })),
-        h('p', { 'class': 'hero__fine', text: (ci ? '95% интервал среднего по цене: ' + fmtNum(ci[0], 1, true) + '%…' + fmtNum(ci[1], 1, true) + '%. ' : '') +
-          'Распределение, а не прогноз: восемь сочетаний признаков статистически неразличимы, поэтому режимов три; их таблица — в разделе «Машина состояний».' })
+        (rp || rx) ? regimeTable(rp, rx) : h('p', { 'class': 'empty', text: 'Статистика режима ещё не рассчитана' }),
+        h('p', { 'class': 'hero__fine', text: 'Распределение прошлых месяцев, а не прогноз.' +
+          (ci ? ' 95% интервал среднего по цене: ' + fmtNum(ci[0], 1, true) + '…' + fmtNum(ci[1], 1, true) + '%.' : '') })
       ]);
     } else {
       var mean = (v.cell_stats || {}).mean_fwd1m_pct;
@@ -1284,6 +1424,21 @@
         ])
       ]));
     });
+    // Позиция по прежнему правилу — справка для сравнения, а не часть итога: в шапке
+    // она удлиняла подпись под позицией на две строки технического текста.
+    var verdict = d.verdict || {};
+    var prev = verdict.position_prev_rule;
+    if (prev && POSITION_WORD[prev.state]) {
+      var frozen = ((verdict.position || {}).journal || {}).freeze;
+      cards.unshift(h('article', { 'class': 'card tile tile--shadow' }, [
+        h('div', { 'class': 'tile__head' }, [h('h3', { 'class': 'tile__title', text: 'Позиция по прежнему правилу' })]),
+        h('div', { 'class': 'tile__num', text: POSITION_WORD[prev.state] }),
+        prev.since ? h('div', { 'class': 'tile__sub', text: 'с ' + fmtDay(prev.since) }) : null,
+        h('p', { 'class': 'tile__sub', text: (frozen ? 'Вело позицию до ' + fmtDay(frozen) + ': ' : 'Прежнее правило: ') +
+          ruText(prev.rule || 'знак закрытого месяца, ворота без гистерезиса') + '. Для сравнения, в решение не входит.' }),
+        h('div', { 'class': 'tile__foot' }, [h('span', { text: 'справочно' })])
+      ]));
+    }
     if (spOk) {
       var spWhy = sp.reason_text || REASON_WORD[sp.reason] || '';
       cards.unshift(h('article', { 'class': 'card tile tile--shadow' }, [
@@ -1314,6 +1469,40 @@
 
   /* ──────────────────────────────────────────────────────── журнал */
 
+  /* Журнал сворачивается целиком, разбор каждого события — отдельно.
+   *
+   * Что где живёт. Свёрнут ли журнал — выбор читателя, он переживает перезагрузку
+   * (localStorage). Сколько записей показано и какие разборы раскрыты — состояние
+   * чтения: оно обязано пережить перерисовку (панель пересобирает #app при каждой
+   * новой витрине, раз в пять минут в торговые часы — без этого раскрытый разбор
+   * схлопывался бы посреди фразы), но не перезагрузку: открыв панель заново,
+   * читатель видит десять свежих записей и свёрнутые разборы. */
+  var JOURNAL_KEY = 'moex-radar-journal';
+  var JOURNAL_STEP = 10;
+  var journalShown = JOURNAL_STEP;
+  var journalComments = {};
+  function journalIsOpen() {
+    try { return window.localStorage.getItem(JOURNAL_KEY) !== 'closed'; } catch (e) { return true; }
+  }
+  function journalRemember(open) {
+    try { window.localStorage.setItem(JOURNAL_KEY, open ? 'open' : 'closed'); } catch (e) { /* приватный режим */ }
+  }
+  function chevron(cls) {
+    var svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 16 16');
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '1.8');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('class', cls);
+    var p = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    p.setAttribute('d', 'M4 6.2l4 4 4-4');
+    svg.appendChild(p);
+    return svg;
+  }
+
   function renderEvents(d) {
     var evs = d.events || [];
     if (!evs.length) return null;
@@ -1321,24 +1510,75 @@
     // в витрине она идёт по возрастанию времени — и журнал показывал недельной
     // давности запись сверху, а сегодняшнюю смену знака внизу. Все остальные
     // списки панели идут от свежих к старым; сортируем здесь, а не полагаемся на
-    // порядок источника, заодно slice(0,40) начинает резать старое, а не свежее.
+    // порядок источника.
     var ordered = evs.slice().sort(function (a, b) { return String(b.ts).localeCompare(String(a.ts)); });
+    var total = ordered.length;
+    var shown = Math.min(Math.max(journalShown, JOURNAL_STEP), total);
     // Отказы обвязки («источник отдаёт 503») из ленты убраны и уходят в общий
     // телеграм-канал панелей: журнал читают как ленту рынка, и вперемешку с
     // санитарными записями она перестаёт читаться вовсе (alerts.py: OPS_KINDS).
-    return section('Журнал', 'события рынка и переходы состояний', [
-      h('article', { 'class': 'card' }, ordered.slice(0, 40).map(function (e) {
-        var body = [h('span', { 'class': 'evt__t', text: ruText(e.text) })];
-        if (e.comment) body.push(h('p', { 'class': 'evt__c', text: ruText(e.comment) }));
-        return h('div', { 'class': 'evt' }, [
-          // МСК и ДД.ММ, как во всей панели: сырой UTC относил событие закрывающего
-          // такта (00:00 МСК = 21:00 UTC) ко вчерашнему дню, а «08-11» читалось
-          // как 8 ноября.
-          h('span', { 'class': 'evt__ts', text: evtStamp(e.ts) }),
-          h('div', { 'class': 'evt__body' }, body)
+    var rows = ordered.slice(0, shown).map(function (e) {
+      var body = [h('span', { 'class': 'evt__t', text: ruText(e.text) })];
+      if (e.comment) {
+        var key = String(e.ts) + '|' + String(e.kind || '');
+        var more = h('details', { 'class': 'evt__more' }, [
+          h('summary', null, [h('span', { text: 'Комментарий' }), chevron('chev')]),
+          h('p', { 'class': 'evt__c', text: ruText(e.comment) })
         ]);
-      }))
+        if (journalComments[key]) more.open = true;
+        more.addEventListener('toggle', function () {
+          if (more.open) journalComments[key] = true; else delete journalComments[key];
+        });
+        body.push(more);
+      }
+      return h('div', { 'class': 'evt' }, [
+        // МСК и ДД.ММ, как во всей панели: сырой UTC относил событие закрывающего
+        // такта (00:00 МСК = 21:00 UTC) ко вчерашнему дню, а «08-11» читалось
+        // как 8 ноября.
+        h('span', { 'class': 'evt__ts', text: evtStamp(e.ts) }),
+        h('div', { 'class': 'evt__body' }, body)
+      ]);
+    });
+
+    var controls = [];
+    function pager(text, next) {
+      var btn = h('button', { 'class': 'pill', type: 'button', text: text });
+      btn.addEventListener('click', function () {
+        journalShown = next;
+        if (window.__lastPayload) render(window.__lastPayload, true);
+      });
+      return btn;
+    }
+    if (shown < total) {
+      var step = Math.min(JOURNAL_STEP, total - shown);
+      controls.push(pager('Показать ещё ' + step, shown + step));
+    }
+    if (shown > JOURNAL_STEP) controls.push(pager('Оставить ' + JOURNAL_STEP + ' последних', JOURNAL_STEP));
+    if (controls.length) {
+      controls.push(h('span', { 'class': 'journal__count', text: 'показано ' + shown + ' из ' + total }));
+      rows.push(h('div', { 'class': 'journal__more' }, controls));
+    }
+
+    var box = h('details', { 'class': 'section journal' }, [
+      // Строка заголовка — флексом ВНУТРИ summary: сам summary флексом делать нельзя,
+      // часть браузеров при этом теряет его поведение.
+      h('summary', { 'class': 'journal__head' }, [
+        h('div', { 'class': 'section__head' }, [
+          h('h2', { 'class': 'section__title', text: 'Журнал событий' }),
+          h('span', { 'class': 'section__sub', text: 'события рынка и переходы состояний · ' +
+            total + ' ' + plural(total, 'запись', 'записи', 'записей') }),
+          h('span', { 'class': 'journal__toggle' }, [
+            h('span', { 'class': 'journal__when-open', text: 'свернуть' }),
+            h('span', { 'class': 'journal__when-closed', text: 'развернуть' }),
+            chevron('chev')
+          ])
+        ])
+      ]),
+      h('article', { 'class': 'card journal__card' }, rows)
     ]);
+    box.open = journalIsOpen();
+    box.addEventListener('toggle', function () { journalRemember(box.open); });
+    return box;
   }
 
   /* ───────────────────────────────────────────── таблица (доступность) */

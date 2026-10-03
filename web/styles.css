@@ -203,7 +203,7 @@ button { font: inherit; color: inherit; }
 }
 .skip:focus { left: 0; }
 
-:where(a, button, [tabindex]):focus-visible {
+:where(a, button, summary, [tabindex]):focus-visible {
   outline: 2px solid var(--s1);
   outline-offset: 2px;
   border-radius: 4px;
@@ -349,6 +349,32 @@ button { font: inherit; color: inherit; }
 .stat__k { font-size: 11px; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3); }
 .stat__v { font-size: 21px; font-weight: 600; letter-spacing: -.015em; margin-top: 2px; }
 .stat__hint { font-size: 13px; color: var(--ink-3); }
+/* Карточки фактов по общей сетке: во второй строке числа встают под числами
+   первой, а не там, где кончился текст соседа. */
+.stats--cols { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 16px 24px; }
+
+/* Статистика режима: две меры строками, три числа колонками — одна таблица. */
+.regstats { border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.regstats caption { text-align: left; padding-bottom: 4px; }
+.regstats th, .regstats td { text-align: left; vertical-align: baseline; padding: 8px 32px 8px 0; }
+.regstats tr > :last-child { padding-right: 0; }
+.regstats thead th {
+  font-size: 11px; font-weight: 400; letter-spacing: .07em; text-transform: uppercase;
+  color: var(--ink-3); padding-bottom: 0; white-space: nowrap;
+}
+.regstats tbody th { font-size: 15px; font-weight: 400; line-height: 1.3; }
+.regstats__sub { display: block; font-size: 13px; color: var(--ink-3); }
+.regstats tbody td { font-size: 21px; font-weight: 600; letter-spacing: -.015em; white-space: nowrap; }
+.regstats tbody tr + tr > * { border-top: 1px solid var(--hair); }
+@media (max-width: 620px) {
+  /* На телефоне — две колонки: одна колонка из пяти карточек занимала экран целиком,
+     а «≈ 13,0% годовых» кеглем 21 в половину ширины не помещается. */
+  .stats--cols { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 16px; }
+  .stats--cols .stat__v { font-size: 15px; }
+  .regstats th, .regstats td { padding-right: 10px; }
+  .regstats tbody th { font-size: 13px; }
+  .regstats tbody td { font-size: 15px; }
+}
 
 .rule {
   padding: 18px 24px;
@@ -491,12 +517,45 @@ button { font: inherit; color: inherit; }
 .evt { display: flex; gap: 12px; padding: 12px 0; border-top: 1px solid var(--hair); font-size: 13px; }
 .evt:first-child { border-top: 0; }
 .evt__ts { color: var(--ink-3); font-variant-numeric: tabular-nums; white-space: nowrap; font-size: 13px; }
-.evt__t { line-height: 1.45; max-width: 78ch; }
-/* Разбор события. Отделён от факта отступом и полосой слева: читатель обязан
-   видеть, где кончается то, что случилось, и начинается то, что об этом думают. */
-.evt__body { display: flex; flex-direction: column; gap: 8px; }
-.evt__c { max-width: 78ch; padding-left: 12px; border-left: 2px solid var(--hair);
+/* Текст события и разбор занимают всю ширину карточки: потолок в 78 знаков
+   оставлял правую половину журнала пустой, а сам журнал вытягивал вниз. */
+.evt__t { line-height: 1.45; }
+.evt__body { display: flex; flex-direction: column; gap: 6px; flex: 1 1 auto; min-width: 0; }
+/* Разбор события. Свёрнут, пока его не раскроют: журнал — лента фактов, мнение о
+   факте читают по желанию. Отделён полосой слева: читатель обязан видеть, где
+   кончается то, что случилось, и начинается то, что об этом думают. */
+.evt__c { margin-top: 8px; padding-left: 12px; border-left: 2px solid var(--hair);
           color: var(--ink-2); line-height: 1.45; font-size: 13px; text-wrap: pretty; }
+.evt__more > summary { font-size: 13px; color: var(--ink-3); width: fit-content; }
+.evt__more > summary:hover { color: var(--ink); }
+.evt__more > summary > span { vertical-align: middle; }
+.evt__more > summary > .chev { margin-left: 4px; vertical-align: middle; }
+
+/* Сворачивание — на родных details/summary: клавиатура и скринридер работают без
+   скрипта. Родной треугольник убран, вместо него шеврон, одинаковый у журнала и
+   у разбора. */
+.journal__head, .evt__more > summary { list-style: none; cursor: pointer; }
+.journal__head::-webkit-details-marker, .evt__more > summary::-webkit-details-marker { display: none; }
+.chev { display: inline-block; width: 14px; height: 14px; flex: none; transition: transform .15s ease; }
+details[open] > summary .chev { transform: rotate(180deg); }
+.journal__head { display: block; }
+.journal:not([open]) .section__head { margin-bottom: 0; }
+.journal__toggle {
+  margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
+  font-size: 13px; color: var(--ink-3);
+}
+.journal__head:hover .journal__toggle { color: var(--ink); }
+.journal[open] .journal__when-closed, .journal:not([open]) .journal__when-open { display: none; }
+.journal__card { padding-top: 8px; padding-bottom: 8px; }
+.journal__more {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+  padding: 12px 0 8px; border-top: 1px solid var(--hair);
+}
+.journal__count { font-size: 13px; color: var(--ink-3); }
+/* На телефоне заголовок и «свернуть» остаются в одной строке, подзаголовок — под ними. */
+@media (max-width: 620px) {
+  .journal .section__sub { order: 3; flex-basis: 100%; }
+}
 
 /* ────────────────────────────────────────────────── таблица (a11y) */
 
@@ -527,6 +586,7 @@ table.data tbody tr:last-child td { border-bottom: 0; }
    помещаться без горизонтальной прокрутки (см. комментарий к .tablewrap). */
 @media (max-width: 389px) {
   .position__journal table.data th:nth-child(5), .position__journal table.data td:nth-child(5) { display: none; }
+  .position__journal .journal__diff { display: none; }
 }
 @media (max-width: 359px) {
   .position__journal table.data th, .position__journal table.data td { padding: 8px 2px; }
@@ -759,6 +819,27 @@ table.data.guide__table th[scope="col"] { white-space: nowrap; }
   content: ""; position: absolute; left: 2px; top: 8px;
   width: 5px; height: 5px; border-radius: 50%; background: var(--ink-3);
 }
+.position__note a { color: var(--s1); text-decoration: none; white-space: nowrap; }
+.position__note a:hover { text-decoration: underline; }
+/* «Что изменит позицию»: показатель · что нужно · сейчас. Фраза конвейера на пять
+   строк читалась как сноска; здесь каждое условие — своя строка с числом справа. */
+.switch__lead {
+  font-size: 13px; line-height: 1.45; color: var(--ink-2);
+  margin-top: 6px; max-width: 68ch; text-wrap: pretty;
+}
+.switch__t { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13px; line-height: 1.4; }
+.switch__t th, .switch__t td {
+  text-align: left; vertical-align: top; padding: 7px 16px 7px 0;
+  border-top: 1px solid var(--hair);
+}
+.switch__t thead th {
+  border-top: 0; padding-top: 0; padding-bottom: 5px;
+  font-size: 11px; font-weight: 400; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-3);
+}
+.switch__t tbody th { font-weight: 600; }
+.switch__t tr > :last-child { padding-right: 0; text-align: right; }
+.switch__now { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.switch__hint { display: block; color: var(--ink-3); margin-top: 2px; }
 .position__ribbon { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--hair); }
 .position__ribbon .stat__k { margin-bottom: 4px; }
 .position__journal { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--hair); }
