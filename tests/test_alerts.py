@@ -652,6 +652,50 @@ class TestDepositAnchor(AlertsCase):
         self.assertIn("меньше дивидендной доходности", text)
 
 
+class TestLegacyDepositSign(AlertsCase):
+    """Записи 14.09 и 22.09.2026 со знаком наоборот исправляются в ленте один раз.
+
+    Код события исправлен 03.10.2026, но лента витрины хранит старый текст — и
+    комментарий модели, построенный на неверном факте («дивидендный премиум 4,5 п.п.»).
+    """
+
+    OLD = ("Банки подняли ставки по вкладам 12,88% → 12,95%. Прибавка 0,07 процентного "
+           "пункта. Вклад теперь даёт на 4,5 процентного пункта меньше дивидендной "
+           "доходности акций. Чем выгоднее вклад, тем дольше деньги не пойдут с депозитов "
+           "на биржу.")
+
+    def write(self, feed):
+        import json
+        self.alerts.save_state({"feed": feed})
+        return json.loads(json.dumps(self.alerts.load_state()["feed"]))
+
+    def test_старая_запись_исправлена_и_без_комментария(self):
+        ev = {"key": "deposit_uptick:2026-09-11", "kind": "deposit_uptick", "severity": "info",
+              "ts": "2026-09-14T15:04:46Z", "text": self.OLD,
+              "meaning": "Вклад теперь даёт на 4,5 процентного пункта меньше дивидендной "
+                         "доходности акций.",
+              "comment": "При нынешнем дивидендном премиум в 4,5 п.п. …"}
+        got = self.write([ev])[0]
+        # мутация: не вызывать правку в load_state -> в ленте остаётся «меньше»
+        self.assertIn("на 4,5 процентного пункта больше дивидендной доходности", got["text"])
+        self.assertIn("больше дивидендной доходности", got["meaning"])
+        self.assertIn("Исправлено 03.10.2026", got["text"])
+        self.assertNotIn("comment", got)
+        # второй прогон не переворачивает обратно и не дописывает пометку дважды
+        again = self.write([got])[0]
+        self.assertEqual(again["text"], got["text"])
+        payload_text = self.alerts.payload_events([])[0]["text"]
+        self.assertIn("больше дивидендной доходности", payload_text)
+
+    def test_новые_записи_не_трогаются(self):
+        text = self.OLD.replace("меньше", "больше")
+        ev = {"key": "deposit_uptick:2026-10-12", "kind": "deposit_uptick", "severity": "info",
+              "ts": "2026-10-14T15:00:00Z", "text": text, "comment": "к"}
+        got = self.write([ev])[0]
+        self.assertEqual(got["text"], text)
+        self.assertEqual(got["comment"], "к")
+
+
 class TestOrfrBackdate(AlertsCase):
     """Смена asof назад — переезд источника, а не публикация.
 

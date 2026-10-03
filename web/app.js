@@ -335,6 +335,17 @@
    *
    * -> {lead, rows: [{k, need, now, hint, met}]} | null. null — данных для таблицы
    * нет (старая витрина, флаг без значения): тогда рисуется прежний список фраз. */
+  /* Что держит позицию СЕЙЧАС — общая строка для блока позиции и подписи под наклоном. */
+  function positionHolds(p) {
+    if (p.state !== 'long') {
+      if (p.gate_open === false && p.comp_state === 1) return 'сейчас держат закрытые ворота';
+      if (p.gate_open === true && p.comp_state === -1) return 'сейчас держит оценка рынка';
+      if (p.gate_open === false && p.comp_state === -1) return 'сейчас держат и ворота, и оценка';
+      return '';
+    }
+    return p.gate_open === true && p.comp_state === 1 ? 'ворота открыты, оценка за акции' : '';
+  }
+
   function switchRows(p, dists) {
     if (!p || !p.flags || !Array.isArray(dists)) return null;
     var by = {};
@@ -492,14 +503,7 @@
        «Знак решения: + (за акции)» — читатель видел противоречие.
        Поэтому к причине смены добавляется то, что держит позицию СЕЙЧАС, и только
        когда это не одно и то же. */
-    var holds = '';
-    if (!long) {
-      if (p.gate_open === false && p.comp_state === 1) holds = 'сейчас держат закрытые ворота';
-      else if (p.gate_open === true && p.comp_state === -1) holds = 'сейчас держит оценка рынка';
-      else if (p.gate_open === false && p.comp_state === -1) holds = 'сейчас держат и ворота, и оценка';
-    } else if (p.gate_open === true && p.comp_state === 1) {
-      holds = 'ворота открыты, оценка за акции';
-    }
+    var holds = positionHolds(p);
     var since = p.since ? 'с ' + fmtDay(p.since) : '';
     var why = reason ? (since ? ' · ' : '') + ruText(reason) : '';
     var now = holds ? ((since || why) ? ' · ' : '') + holds : '';
@@ -619,6 +623,21 @@
     ]);
   }
 
+  /* Строки режима — за РАЗНЫЕ годы: ставка вкладов в сторе есть с 07.2009, и в
+   * «сверх вкладов» нет 2008 года. Без оговорки −2,86% → −2,09% читалось как «с
+   * дивидендами и вкладами режим не так плох», хотя на тех же месяцах избыток хуже
+   * цены (вклад платил больше дивидендов). Поэтому — с какого месяца выборка и цена
+   * на тех же месяцах (states._regime_stats: since, price_same_mean_pct). */
+  function sampleNote(rp, rx) {
+    if (!rp || !rx || !isNum(rp.n) || !isNum(rx.n) || rx.n >= rp.n || !rx.since) return '';
+    var ym = String(rx.since);
+    var from = ym.length >= 7 ? ym.slice(5, 7) + '.' + ym.slice(0, 4) : ym;
+    return ' Строки за разные годы: «сверх вкладов» — только месяцы, где известна ставка вкладов (она есть с ' +
+      'середины 2009 года); в этом режиме первый такой — ' + from + (ym > '2008-12' ? ', 2008 года в выборке нет' : '') + '.' +
+      (isNum(rx.price_same_mean_pct) ? ' На тех же ' + rx.n + ' ' + plural(rx.n, 'месяце', 'месяцах', 'месяцах') +
+        ' среднее по цене ' + pct2(rx.price_same_mean_pct) + '.' : '');
+  }
+
   var REGIME_QUALITY = { toxic: 'crit', stress: 'warn', calm: 'good' };
   var QUALITY_COLOR = { crit: 'var(--crit)', warn: 'var(--warn)', good: 'var(--good)', flat: 'var(--ink-3)' };
 
@@ -710,7 +729,8 @@
         h('div', { 'class': 'cellcode', text: 'режим из трёх' + (cellText ? ' · сочетание: ' + cellText : '') }),
         (rp || rx) ? regimeTable(rp, rx) : h('p', { 'class': 'empty', text: 'Статистика режима ещё не рассчитана' }),
         h('p', { 'class': 'hero__fine', text: 'Распределение прошлых месяцев, а не прогноз.' +
-          (ci ? ' 95% интервал среднего по цене: ' + fmtNum(ci[0], 1, true) + '…' + fmtNum(ci[1], 1, true) + '%.' : '') })
+          (ci ? ' 95% интервал среднего по цене: ' + fmtNum(ci[0], 1, true) + '…' + fmtNum(ci[1], 1, true) + '%.' : '') +
+          sampleNote(rp, rx) })
       ]);
     } else {
       var mean = (v.cell_stats || {}).mean_fwd1m_pct;
@@ -754,9 +774,15 @@
     var p = v.position;
     var gateNote = null;
     if (p && POSITION_WORD[p.state]) {
+      /* Причина в reason — это причина ПОСЛЕДНЕЙ смены. Рядом с «+0,34» строка
+         «деньги: оценка рынка ушла ниже −0,2» читалась как противоречие: оценка
+         давно за акции, держат закрытые ворота. Поэтому — дата смены, её причина
+         и то, что держит позицию сейчас (та же логика, что в строке позиции). */
       var why = p.reason_text || REASON_WORD[p.reason] || '';
-      gateNote = 'Позиция — ' + POSITION_WORD[p.state] + (why ? ': ' + ruText(why) : '') +
-        '. Наклон читается в день решения, ворота — каждый день.';
+      var holdsNow = positionHolds(p);
+      gateNote = 'Позиция — ' + POSITION_WORD[p.state] + (p.since ? ' с ' + fmtDay(p.since) : '') +
+        (why ? (holdsNow ? ' (тогда ' + ruText(why) + ')' : ': ' + ruText(why)) : '') +
+        (holdsNow ? '; ' + holdsNow : '') + '. Наклон читается в день решения, ворота — каждый день.';
     }
     var me = core.month_end || {};
     var thr = p && isNum(p.comp_threshold) ? p.comp_threshold : 0.2;
@@ -997,7 +1023,7 @@
       ]),
       h('div', { 'class': 'tablewrap' }, [
         h('table', { 'class': 'data' }, [
-          h('caption', { text: 'Средний следующий месяц по цене индекса и доля плюсовых месяцев в каждом сочетании трёх признаков. «Сейчас» — сырые признаки, на которых посчитана эта таблица; «ворота» — флаги с гистерезисом, по которым стоит позиция. Строки расходятся, когда признак ушёл за порог включения, но не дошёл до дальнего порога снятия.' }),
+          h('caption', { text: 'Средний следующий месяц по цене индекса и доля плюсовых месяцев в каждом сочетании трёх признаков. «Сейчас» — сырые признаки, на которых посчитана эта таблица; «ворота» — флаги с гистерезисом, по которым стоит позиция. Строки расходятся, когда признак ушёл за порог включения, но не дошёл до дальнего порога снятия. Числа здесь — замороженная статистика исследования по сырым признакам; карточка режима вверху пересчитывает ту же ячейку по всей истории и по флагам ворот, поэтому у неё другие n и чуть другие средние.' }),
           h('thead', null, [h('tr', null, [
             h('th', { scope: 'col', text: 'Сочетание' }), h('th', { scope: 'col', text: 'Название' }),
             h('th', { scope: 'col', text: 'Средний месяц' }), h('th', { scope: 'col', text: 'Доля плюсовых' }),

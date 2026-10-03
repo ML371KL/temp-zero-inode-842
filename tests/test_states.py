@@ -466,6 +466,32 @@ class TestGate(StatesCase):
             checked += 1
         self.assertGreater(checked, 0, "ни в одном режиме нет месяцев со ставкой")
 
+    def test_избыток_знает_свою_выборку(self):
+        """Ставка вкладов начинается позже цены — избыток обязан сказать, с какого месяца
+        он считан, и дать цену на ТЕХ ЖЕ месяцах. Иначе −2,86% по цене (с 2008-м) и
+        −2,09% сверх вкладов (без него) читались как одна выборка и «режим не так плох».
+        """
+        from datetime import date, timedelta
+        dates, cur = [], date(2007, 1, 1)
+        while cur < date(2009, 7, 1):
+            if cur.weekday() < 5:
+                dates.append(cur.isoformat())
+            cur += timedelta(days=1)
+        n = len(dates)
+        px = [1000.0 * math.exp(0.002 * t + 0.03 * math.sin(t / 9.0)) for t in range(n)]
+        cut = dates.index(next(d for d in dates if d >= "2008-01-01"))
+        cols = {"imoex": px, "mcftr": list(px),
+                "deposit": [None] * cut + [12.0] * (n - cut)}
+        hyst = {"trend": [0] * n, "vol": [1] * n, "bond": [1] * n}   # всё время токсично
+        ex_px = self.states._regime_stats(dates, cols, hyst, "toxic")["toxic"]
+        px_s, ex = ex_px["price"], ex_px["excess"]
+        self.assertLess(ex["n"], px_s["n"])
+        # мутация: не отдавать since / цену на тех же месяцах -> оговорка на витрине пропадёт
+        self.assertEqual(ex["since"], "2008-01")       # первый конец месяца со ставкой
+        # MCFTR = цена, ставка постоянна: избыток ровно «цена тех же месяцев − log(1,01)»
+        self.assertAlmostEqual(ex["price_same_mean_pct"] - ex["mean_pct"],
+                               100 * math.log(1.01), delta=0.011)
+
     def test_лента_ворот_помесячно_и_по_известным_кодам(self):
         series = self.out["series_gate"]
         self.assertTrue(series)
