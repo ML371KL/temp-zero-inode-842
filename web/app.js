@@ -319,6 +319,17 @@
   }
   function share(v) { return isNum(v) ? Math.round(v * 100) + '%' : '—'; }
 
+  /* Что держит позицию СЕЙЧАС — общая строка для блока позиции и подписи под наклоном. */
+  function positionHolds(p) {
+    if (p.state !== 'long') {
+      if (p.gate_open === false && p.comp_state === 1) return 'сейчас держат закрытые ворота';
+      if (p.gate_open === true && p.comp_state === -1) return 'сейчас держит оценка рынка';
+      if (p.gate_open === false && p.comp_state === -1) return 'сейчас держат и ворота, и оценка';
+      return '';
+    }
+    return p.gate_open === true && p.comp_state === 1 ? 'ворота открыты, оценка за акции' : '';
+  }
+
   /* «Что изменит позицию» — строками «показатель · что нужно · сейчас».
    *
    * Конвейер присылает то же одной фразой (position.conditions), и на витрине она
@@ -335,17 +346,6 @@
    *
    * -> {lead, rows: [{k, need, now, hint, met}]} | null. null — данных для таблицы
    * нет (старая витрина, флаг без значения): тогда рисуется прежний список фраз. */
-  /* Что держит позицию СЕЙЧАС — общая строка для блока позиции и подписи под наклоном. */
-  function positionHolds(p) {
-    if (p.state !== 'long') {
-      if (p.gate_open === false && p.comp_state === 1) return 'сейчас держат закрытые ворота';
-      if (p.gate_open === true && p.comp_state === -1) return 'сейчас держит оценка рынка';
-      if (p.gate_open === false && p.comp_state === -1) return 'сейчас держат и ворота, и оценка';
-      return '';
-    }
-    return p.gate_open === true && p.comp_state === 1 ? 'ворота открыты, оценка за акции' : '';
-  }
-
   function switchRows(p, dists) {
     if (!p || !p.flags || !Array.isArray(dists)) return null;
     var by = {};
@@ -627,15 +627,17 @@
    * «сверх вкладов» нет 2008 года. Без оговорки −2,86% → −2,09% читалось как «с
    * дивидендами и вкладами режим не так плох», хотя на тех же месяцах избыток хуже
    * цены (вклад платил больше дивидендов). Поэтому — с какого месяца выборка и цена
-   * на тех же месяцах (states._regime_stats: since, price_same_mean_pct). */
+   * на тех же месяцах (states._regime_stats: since, price_same_mean_pct).
+   *
+   * На панели — одно короткое предложение с двумя числами; почему выборки разные и
+   * как читать пару «−1,73% против −2,09%», написано в руководстве (раздел «Три
+   * режима»): пять строк объяснения под таблицей читались бы вместо таблицы. */
   function sampleNote(rp, rx) {
     if (!rp || !rx || !isNum(rp.n) || !isNum(rx.n) || rx.n >= rp.n || !rx.since) return '';
     var ym = String(rx.since);
     var from = ym.length >= 7 ? ym.slice(5, 7) + '.' + ym.slice(0, 4) : ym;
-    return ' Строки за разные годы: «сверх вкладов» — только месяцы, где известна ставка вкладов (она есть с ' +
-      'середины 2009 года); в этом режиме первый такой — ' + from + (ym > '2008-12' ? ', 2008 года в выборке нет' : '') + '.' +
-      (isNum(rx.price_same_mean_pct) ? ' На тех же ' + rx.n + ' ' + plural(rx.n, 'месяце', 'месяцах', 'месяцах') +
-        ' среднее по цене ' + pct2(rx.price_same_mean_pct) + '.' : '');
+    return ' «Сверх вкладов» считается с ' + from +
+      (isNum(rx.price_same_mean_pct) ? '; по цене на тех же месяцах среднее ' + pct2(rx.price_same_mean_pct) : '') + '.';
   }
 
   var REGIME_QUALITY = { toxic: 'crit', stress: 'warn', calm: 'good' };
