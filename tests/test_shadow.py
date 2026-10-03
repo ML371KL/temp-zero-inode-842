@@ -110,7 +110,7 @@ class ShadowCase(unittest.TestCase):
         out = self.run_shadow()
         ids = [s["id"] for s in out["signals"]]
         self.assertEqual(ids, [sid for sid, *_ in self.shadow.SIGNALS])
-        self.assertEqual(set(ids), {"repricing", "usd_ma200", "brent_usd_gap", "hi2_nf21z",
+        self.assertEqual(set(ids), {"repricing_y1", "usd_ma200", "brent_usd_gap", "hi2_nf21z",
                                     "breadth_early", "volume_capitulation", "futoi_gross",
                                     "dividend_season", "rotation_trigger", "trades_contrarian"})
         self.assertEqual(out["asof"], LAST)
@@ -126,7 +126,7 @@ class ShadowCase(unittest.TestCase):
         окна уже 14.4 → Δ21 = 0 (бит 0). Закрытый месяц — июль, значит state = 1,
         state_daily = 0, а es для августа (читает июль) = 1."""
         out = self.run_shadow()
-        s = next(x for x in out["signals"] if x["id"] == "repricing")
+        s = next(x for x in out["signals"] if x["id"] == "repricing_y1")
         self.assertEqual(s["status"], "ok")
         self.assertEqual(s["asof"], LAST)
         self.assertEqual(s["value"], 0.0)
@@ -138,6 +138,20 @@ class ShadowCase(unittest.TestCase):
         self.assertEqual(s["threshold_pp"], 0.25)
         self.assertLessEqual(len(s["history"]), 24)
         self.assertEqual(s["history"][-2], ["2026-07-31", 0.4])
+
+    def test_repricing_не_загорается_от_снижения_ключа(self):
+        """Ключ снижен на 1 п.п. в день JUMP, год ОФЗ неподвижен (14.0). Прежний бит
+        Δ21(год − ключ) на 31.07 дал бы +1.0 и «репрайсинг»; бит по самой доходности —
+        ноль (аудит 03.10.2026, §2.4: так был получен «выигрыш» марта-2015).
+        Мутация: вернуть diff(spread) — state_month_end станет 1."""
+        self.put("zcyc_y1", {d: 14.0 for d in self.days})
+        self.put("key_rate", {FIRST: 14.0, JUMP: 13.0})
+        self.panel = self.panel_mod.build_panel(self.store)
+        self.states = self.states_mod.compute_states(self.panel)
+        s = next(x for x in self.run_shadow()["signals"] if x["id"] == "repricing_y1")
+        self.assertEqual(s["state_month_end"], 0)
+        self.assertEqual(s["history"][-2], ["2026-07-31", 0.0])
+        self.assertEqual(s["spread_pp"], 1.0)
 
     def test_breadth_early_бит_и_значение(self):
         s = next(x for x in self.run_shadow()["signals"] if x["id"] == "breadth_early")
@@ -201,15 +215,15 @@ class ShadowCase(unittest.TestCase):
         by = {s["id"]: s for s in out["signals"]}
         self.assertEqual(by["breadth_early"]["status"], "error")
         self.assertIn("RuntimeError: boom", by["breadth_early"]["error"])
-        self.assertEqual(by["repricing"]["status"], "ok")
+        self.assertEqual(by["repricing_y1"]["status"], "ok")
         self.assertEqual(by["futoi_gross"]["state"], 1)
         json.dumps(out, allow_nan=False)
 
     def test_история_пишется_в_стор_рядами_shadow(self):
         out = self.run_shadow()
         by = {s["id"]: s for s in out["signals"]}
-        self.assertTrue(by["repricing"]["history_saved"])
-        self.assertEqual(self.store.load_series("shadow_repricing")["points"], {LAST: 0.0})
+        self.assertTrue(by["repricing_y1"]["history_saved"])
+        self.assertEqual(self.store.load_series("shadow_repricing_y1")["points"], {LAST: 0.0})
         # Биты пишутся состоянием, ноги — значением: у ширины в сторе 1.0, не 0.35.
         self.assertEqual(self.store.load_series("shadow_breadth_early")["points"], {LAST: 1.0})
         self.assertEqual(self.store.load_series("shadow_rotation_trigger")["points"], {LAST: 1.0})
@@ -217,7 +231,7 @@ class ShadowCase(unittest.TestCase):
                                by["usd_ma200"]["value"], places=3)
         self.assertFalse(by["trades_contrarian"]["history_saved"])
         self.assertIsNone(self.store.load_series("shadow_trades_contrarian"))
-        meta = self.store.load_series("shadow_repricing")["meta"]
+        meta = self.store.load_series("shadow_repricing_y1")["meta"]
         self.assertEqual(meta["source"], "shadow")
         self.assertEqual(meta["cadence"], "derived")
         # Календарный сигнал без прошлого в панели берёт историю из стора.
@@ -241,7 +255,7 @@ class ShadowCase(unittest.TestCase):
             out = self.run_shadow()
         self.assertEqual(out["shadow_position"]["status"], "unavailable")
         self.assertIn("decision", out["shadow_position"]["reason"])
-        self.assertEqual(next(x for x in out["signals"] if x["id"] == "repricing")["state"], 1)
+        self.assertEqual(next(x for x in out["signals"] if x["id"] == "repricing_y1")["state"], 1)
 
     def test_позиция_считается_автоматом_решения_с_битом_репрайсинга(self):
         """Подставной decision.py: автомат «в акциях, пока es=0». es для августа = 1

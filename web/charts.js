@@ -194,11 +194,11 @@
       var innerW = W - padX * 2;
       var x = function (v) { return padX + (clamp(v, lo, hi) - lo) / (hi - lo) * innerW; };
       var zones = [
-        { a: -3, b: -1, c: tok('--neg'), o: 0.85, t: 'сильный шорт' },
-        { a: -1, b: -0.3, c: tok('--neg'), o: 0.42, t: 'умеренный шорт' },
+        { a: -3, b: -1, c: tok('--neg'), o: 0.85, t: 'сильно за деньги' },
+        { a: -1, b: -0.3, c: tok('--neg'), o: 0.42, t: 'умеренно за деньги' },
         { a: -0.3, b: 0.3, c: tok('--mid'), o: 1, t: 'нейтрально' },
-        { a: 0.3, b: 1, c: tok('--pos'), o: 0.42, t: 'умеренный лонг' },
-        { a: 1, b: 3, c: tok('--pos'), o: 0.85, t: 'сильный лонг' }
+        { a: 0.3, b: 1, c: tok('--pos'), o: 0.42, t: 'умеренно за акции' },
+        { a: 1, b: 3, c: tok('--pos'), o: 0.85, t: 'сильно за акции' }
       ];
       var kids = [];
       zones.forEach(function (z) {

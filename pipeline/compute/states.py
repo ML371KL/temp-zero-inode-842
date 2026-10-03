@@ -416,12 +416,21 @@ def _regime_stats(dates, cols, hyst, current_id):
     Срез — флаги с гистерезисом на последний торговый день месяца, только ЗАКРЫТЫЕ
     месяцы (две последние пары отброшены, как в health: форвард последнего месяца
     смотрит в будущее). Ставка кэша — вклады топ-10 (cols["deposit"]) на конец
-    месяца, /100/12; месяцы без ставки в избытке пропущены, поэтому n у «excess»
-    меньше — это честнее, чем подставить ноль и назвать его ставкой.
+    месяца; месяцы без ставки в избытке пропущены, поэтому n у «excess» меньше —
+    это честнее, чем подставить ноль и назвать его ставкой.
+
+    ИЗБЫТОК — ПО ИНДЕКСУ ПОЛНОЙ ДОХОДНОСТИ (MCFTR), а не по ценовому IMOEX. Ставка
+    вклада — это доход; ценовой индекс — доход без дивидендов. До 03.10.2026 избыток
+    считался по цене и был занижен на дивидендную составляющую — в среднем 0,47 п.п.
+    в месяц с 2009 года и 0,69 п.п. в 2022–2026; у «спокойного рынка» среднее
+    выходило −0,34% вместо +0,02%, у «стресса» −0,03% вместо +0,54% (аудит 03.10.2026,
+    §2.2). Ставка переводится в месячную ЛОГ-доходность log(1 + r/12), той же мерой,
+    что доходность индекса. Цена остаётся отдельной мерой — так считалась валидация.
     """
     empty = [None] * len(dates)
     me = calc.month_end_indices(dates)
     labels, px_m = calc.resample_month_end(dates, cols.get("imoex", empty))
+    _, tr_m = calc.resample_month_end(dates, cols.get("mcftr", empty))
     _, dep_m = calc.resample_month_end(dates, cols.get("deposit", empty))
     by = {r["id"]: {"price": [], "excess": []} for r in constants.REGIMES}
     for i in range(max(0, len(me) - 2)):
@@ -436,16 +445,21 @@ def _regime_stats(dates, cols, hyst, current_id):
             continue
         fwd = math.log(b / a)
         by[reg["id"]]["price"].append(fwd)
-        if calc.is_num(dep_m[i]):
-            by[reg["id"]]["excess"].append(fwd - dep_m[i] / 100.0 / 12.0)
+        ta, tb = tr_m[i], tr_m[i + 1]
+        if (calc.is_num(dep_m[i]) and calc.is_num(ta) and calc.is_num(tb)
+                and ta > 0 and tb > 0):
+            by[reg["id"]]["excess"].append(math.log(tb / ta)
+                                           - math.log(1.0 + dep_m[i] / 100.0 / 12.0))
     out = {}
     for reg in constants.REGIMES:
+        excess = _summary(by[reg["id"]]["excess"])
+        excess["basis"] = "total_return"
         out[reg["id"]] = {
             "id": reg["id"], "label": reg["label"],
             "cells": [cell_code(*c) for c in reg["cells"]],
             "current": reg["id"] == current_id,
             "price": _summary(by[reg["id"]]["price"]),
-            "excess": _summary(by[reg["id"]]["excess"]),
+            "excess": excess,
         }
     return out
 

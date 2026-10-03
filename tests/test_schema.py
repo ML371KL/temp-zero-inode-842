@@ -172,7 +172,7 @@ class TestRequiredShape(PayloadCase):
         for key in ("state", "since", "reason_text", "execute", "decision_day",
                     "next_decision", "comp_daily", "comp_state", "comp_threshold",
                     "gate_open", "regime", "cash_rate", "conditions", "history",
-                    "switches_per_year"):
+                    "switches_per_year", "journal", "switch_distance"):
             self.assertIn(key, pos, key)
         self.assertIn(pos["state"], ("long", "flat"))
         self.assertTrue(DAY.match(pos["since"]))
@@ -277,7 +277,7 @@ class TestSerialisation(PayloadCase):
 
     def test_utf8_without_escapes(self):
         raw = self.publish.dumps(self.payload)
-        self.assertIn("умеренный".encode("utf-8"), raw)
+        self.assertIn("токсичная".encode("utf-8"), raw)
         self.assertNotIn(b"\\u0443", raw)   # ensure_ascii=False экономит ~5x
 
     def test_trim_ladder_cuts_decorations_first(self):

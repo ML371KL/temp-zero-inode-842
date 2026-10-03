@@ -68,6 +68,56 @@ class TestDyTrailNeedsBothLegs(unittest.TestCase):
         self.assertIsNone(out["cols"]["switch_spread"][-1])
 
 
+class TestUsdIsTheRateInForce(unittest.TestCase):
+    """Нога ядра usd_mom63 стоит на официальном курсе, ДЕЙСТВУЮЩЕМ в торговый день.
+
+    ЦБ датирует курс днём применения: курс, установленный в пятницу, действует сб–пн
+    и лежит в ряду субботней строкой, записей с датой понедельника нет. До 03.10.2026
+    панель брала только точные совпадения дат и каждый понедельник подставляла
+    IMOEX/RTSI×K (аудит 03.10.2026, §2.1).
+    """
+
+    def setUp(self):
+        self.panel = need(self, "pipeline.compute.panel", "build_panel", "USD_SPLICE_K")
+        # Пн 02.03.2026 … пт 20.03.2026 — торговые дни индекса.
+        start = date(2026, 3, 2)
+        self.trading = [(start + timedelta(days=i)).isoformat() for i in range(19)
+                        if (start + timedelta(days=i)).weekday() < 5]
+        self.px = {d: 2500.0 for d in self.trading}
+        # «Курс» из отношения индексов нарочно далёк от официального: 2500/25×K ≈ 3149.
+        self.rtsi = {d: 25.0 for d in self.trading}
+
+    def build(self, usd_points):
+        return self.panel.build_panel({"imoex": _series(self.px), "rtsi": _series(self.rtsi),
+                                       "usd_cbr": _series(usd_points, "rub")})["cols"]["usd"]
+
+    def test_понедельник_берёт_субботнюю_запись(self):
+        # Записи ЦБ вт–сб: у каждой своё значение, у субботы — 90 + номер дня.
+        recs = {}
+        for i in range(19):
+            day = date(2026, 3, 2) + timedelta(days=i)
+            if 1 <= day.weekday() <= 5:          # вт … сб
+                recs[day.isoformat()] = 90.0 + i
+        col = dict(zip(self.trading, self.build(recs)))
+        # Понедельник 09.03 — курс субботы 07.03 (i = 5), а не склейка и не пятница.
+        # мутация: вернуть точное совпадение + склейку -> на понедельник придёт ~3149.
+        self.assertEqual(col["2026-03-09"], 95.0)
+        self.assertEqual(col["2026-03-16"], 102.0)
+        self.assertEqual(col["2026-03-10"], 98.0)   # вторник — своя запись
+
+    def test_склейка_только_до_первого_официального_курса(self):
+        # Официальный ряд начинается в среду 11.03: раньше — запасной курс из
+        # отношения индексов, позже — только официальный (понедельник 16.03 — субботний).
+        recs = {"2026-03-11": 91.0, "2026-03-14": 92.0, "2026-03-17": 93.0}
+        col = dict(zip(self.trading, self.build(recs)))
+        proxy = 2500.0 / 25.0 * self.panel.USD_SPLICE_K
+        self.assertAlmostEqual(col["2026-03-02"], proxy, places=6)
+        self.assertAlmostEqual(col["2026-03-10"], proxy, places=6)
+        self.assertEqual(col["2026-03-11"], 91.0)
+        self.assertEqual(col["2026-03-12"], 91.0)
+        self.assertEqual(col["2026-03-16"], 92.0)
+
+
 class TestDepositDoesNotOutliveItsSource(unittest.TestCase):
     """Декада ЦБ выходит раз в ~7 торговых дней; протяжка ограничена."""
 

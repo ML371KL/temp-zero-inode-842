@@ -27,7 +27,7 @@ import json
 import math
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,10 +40,19 @@ for _stream in (sys.stdout, sys.stderr):
     except (AttributeError, ValueError):
         pass
 
-from pipeline.compute import core, panel as panel_mod, states as states_mod  # noqa: E402
+from pipeline.compute import core, decision as decision_mod, panel as panel_mod  # noqa: E402
+from pipeline.compute import states as states_mod, track  # noqa: E402
 from pipeline.lib import calc, constants, mirror, r2, registry, store  # noqa: E402
 
 REFERENCE = ROOT / "validation" / "data" / "walkforward_results.csv"
+# Замороженный композит ПРОДА. До 03.10.2026 опорой инварианта был сам композит
+# исследования (M1_fixed выше), и прод совпадал с ним побитово. С 03.10.2026 нога
+# usd_mom63 стоит на официальном курсе ЦБ, действующем в день, без склейки с RTSI
+# (аудит validation/audit-2026-10, §2.1), и с исследованием композит расходится
+# НАМЕРЕННО — ловить «молча переписанный ряд» теперь можно только против числа,
+# снятого с самого прода после правки (--freeze-reference). Файл исследования
+# остаётся: расхождение с ним печатается справкой.
+FROZEN = ROOT / "validation" / "data" / "composite_reference.csv"
 OOS_START = "2010-01-01"          # окно walk-forward исследования (REGIME.md §4)
 
 # Порог дрейфа ячейки — ОТНОСИТЕЛЬНЫЙ, в долях её собственной ошибки среднего.
@@ -118,36 +127,47 @@ def pc(x):
     return (math.exp(x) - 1) * 100
 
 
-def ann_sharpe_dd(rets):
-    n = len(rets)
-    m = sum(rets) / n
-    sd = math.sqrt(sum((r - m) ** 2 for r in rets) / (n - 1)) if n > 1 else 0
-    peak = cum = worst = 0.0
-    for r in rets:
-        cum += r
-        peak = max(peak, cum)
-        worst = min(worst, cum - peak)
-    return pc(m * 12), (m / sd * math.sqrt(12) if sd else 0), pc(worst)
-
-
 # ---------------------------------------------------------------------- разделы
 
-def section_invariant(labels, comp, out):
+def read_reference(path, date_col, value_col):
+    """{месяц 'YYYY-MM': значение} из CSV; нет файла — пустой словарь."""
     ref = {}
-    if REFERENCE.exists():
-        with open(REFERENCE, encoding="utf-8") as fh:
+    if path is not None and Path(path).exists():
+        with open(path, encoding="utf-8") as fh:
             for row in csv.DictReader(fh):
                 try:
-                    ref[(row[""] or "")[:7]] = float(row["M1_fixed"])
+                    ref[(row[date_col] or "")[:7]] = float(row[value_col])
                 except (TypeError, ValueError, KeyError):
                     pass
-    mine = {labels[i][:7]: comp[i] for i in range(len(labels)) if comp[i] is not None}
+    return ref
+
+
+def _worst(mine, ref):
     both = sorted(set(ref) & set(mine))
-    worst = max((abs(mine[m] - ref[m]) for m in both), default=None)
+    return both, max((abs(mine[m] - ref[m]) for m in both), default=None)
+
+
+def section_invariant(labels, comp, out, frozen_path=FROZEN, research_path=REFERENCE):
+    """Совпадает ли композит с опорой. -> ok | drift | refreeze | no_reference.
+
+    Опора — замороженный композит прода (frozen_path), а пока его нет — композит
+    исследования. «refreeze» — отдельный исход, а не «drift»: после правки курса
+    03.10.2026 расхождение с исследованием ожидаемо, и тревога «композит разошёлся»
+    каждый месяц до заморозки приучила бы не читать отчёт. Но и «ok» это не
+    «ok»: пока опоры нет, инвариант НЕ проверяется, о чём отчёт и говорит.
+    """
+    mine = {labels[i][:7]: comp[i] for i in range(len(labels)) if comp[i] is not None}
+    frozen = read_reference(frozen_path, "month", "composite")
+    research = read_reference(research_path, "", "M1_fixed")
     out.append("## 1. Инвариант композита")
     out.append("")
+    if frozen:
+        ref, name = frozen, Path(frozen_path).name
+    else:
+        ref, name = research, Path(research_path).name if research_path else "—"
+    both, worst = _worst(mine, ref)
     out.append(f"Сопоставлено месяцев: **{len(both)}** из {len(ref)} эталонных "
-               f"(`validation/data/walkforward_results.csv`).")
+               f"(`validation/data/{name}`).")
     if worst is None:
         out.append("")
         out.append("⚠️ Пересечения с эталоном нет — сверять не с чем. Это НЕ значит, что "
@@ -156,15 +176,64 @@ def section_invariant(labels, comp, out):
         out.append("")
         return "no_reference"
     ok = worst < 1e-9
-    out.append(f"Максимальное расхождение: **{worst:.12f}** — "
-               f"{'совпадает побитово' if ok else '⚠️ РАСХОЖДЕНИЕ'}.")
-    out.append("")
-    if not ok:
-        out.append("Композит панели разошёлся с числом, на котором считалась вся "
-                   "валидация. Это не повод менять состав — это повод найти, какой "
-                   "ряд переписали, и понять, стало ли лучше.")
+    if frozen:
+        out.append(f"Максимальное расхождение: **{worst:.12f}** — "
+                   f"{'совпадает побитово' if ok else '⚠️ РАСХОЖДЕНИЕ'}.")
+        _, w_res = _worst(mine, research)
+        if w_res is not None:
+            out.append("")
+            out.append(f"Справка: от композита исследования (`{Path(research_path).name}`) "
+                       f"— до {w_res:.4f}. Это ожидаемо: с 03.10.2026 нога usd_mom63 "
+                       f"считается по официальному курсу ЦБ без склейки с RTSI.")
         out.append("")
-    return "ok" if ok else "drift"
+        if not ok:
+            out.append("Композит панели разошёлся с замороженным числом прода. Это не "
+                       "повод менять состав — это повод найти, какой ряд переписали, и "
+                       "понять, стало ли лучше.")
+            out.append("")
+        return "ok" if ok else "drift"
+    if ok:
+        out.append(f"Максимальное расхождение: **{worst:.12f}** — совпадает побитово.")
+        out.append("")
+        return "ok"
+    out.append(f"Максимальное расхождение с композитом исследования: **{worst:.4f}**.")
+    out.append("")
+    out.append("Опора инварианта не заморожена. С 03.10.2026 нога usd_mom63 считается по "
+               "официальному курсу ЦБ, действующему в день, без склейки с RTSI (аудит "
+               "validation/audit-2026-10, §2.1), поэтому с композитом исследования прод "
+               "расходится намеренно. Пока композит прода не заморожен "
+               "(`--freeze-reference`), инвариант НЕ ПРОВЕРЯЕТСЯ: молча переписанный "
+               "ряд этот раздел сейчас не поймает.")
+    out.append("")
+    return "refreeze"
+
+
+def freeze_reference(labels, comp, path, usd_first, need_from, slack_days):
+    """Записать композит прода как новую опору инварианта. -> число месяцев.
+
+    Отказ, пока фетчер ЦБ не дотянул курс до need_from: до дотяжки композит до 2013
+    года ещё стоит на склейке с RTSI и поменяется на первом же прогоне — замороженное
+    сегодня число завтра дало бы ложную тревогу «композит разошёлся». Точность —
+    repr(float): число читается обратно в тот же double, и сверка остаётся побитовой.
+    """
+    edge = (datetime.fromisoformat(need_from) + timedelta(days=slack_days)).date().isoformat()
+    if usd_first is None or usd_first > edge:
+        raise SystemExit(
+            f"заморозка отклонена: официальный курс в сторе с {usd_first or '—'}, а нужен "
+            f"с {need_from}. Дождитесь прогона фетчера ЦБ — он сам дотянет историю "
+            f"(pipeline/fetch/cbr.py, FX_FULL_HISTORY) — и повторите.")
+    # Последние два месяца не замораживаются: открытый ещё меняется по построению, а
+    # хвост только что закрытого источники правят задним числом (RETRO_DAYS фетчеров).
+    keep = len(labels) - 2
+    rows = [(labels[i][:7], comp[i]) for i in range(max(0, keep)) if comp[i] is not None]
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="") as fh:
+        w = csv.writer(fh, lineterminator="\n")
+        w.writerow(["month", "composite"])
+        for month, value in rows:
+            w.writerow([month, repr(float(value))])
+    return len(rows)
 
 
 def section_health(health, out):
@@ -298,27 +367,77 @@ def section_cells(labels, fwd, cells, out):
     return drift, len(rows)
 
 
-def section_strategies(labels, comp, fwd, cells, out):
-    out.append("## 4. Слои: что даёт каждый")
+def _fmt(v, digits=1, plus=True, unit="%"):
+    if v is None:
+        return "—"
+    return (f"{v:+.{digits}f}" if plus else f"{v:.{digits}f}") + unit
+
+
+def section_rule(panel, daily, out):
+    """Раздел 4: действующее правило — тем же движком и в той же мере, что и в проде.
+
+    До 03.10.2026 здесь стояли «слои»: месячное правило «композит закрытого месяца > 0
+    и ячейка не токсичная» по сырым битам, ценовой индекс и НОЛЬ во флэте. В проде с
+    02.09.2026 другое правило (P2), лонг — полная доходность, флэт — 10–20% годовых;
+    отчёт, по которому решают о реколибровке, оценивал модель, которой в проде нет
+    (аудит 03.10.2026, §2.6). Теперь позиции берутся из decision.compute_decision, а
+    деньги считает compute/track.py — тот же журнал, что на витрине.
+    """
+    out.append("## 4. Действующее правило: что оно дало")
     out.append("")
-    out.append("| выборка | вариант | год.дох | Шарп | макс.просадка |")
-    out.append("|---|---|---|---|---|")
-    usable_all = [i for i in range(len(labels) - 2)
-                  if fwd[i] is not None and comp[i] is not None and cells.get(labels[i])]
-    for start, name in ((labels[0], "вся история"), (OOS_START, "с 2010")):
-        idxs = [i for i in usable_all if labels[i] >= start]
-        if len(idxs) < 36:
-            continue
-        variants = (
-            ("buy & hold", lambda i: True),
-            ("слой 1 (композит>0)", lambda i: comp[i] > 0),
-            ("слой 2 (ворота)", lambda i: cells.get(labels[i]) != "bear|stress|stress"),
-            ("оба слоя", lambda i: comp[i] > 0 and cells.get(labels[i]) != "bear|stress|stress"),
-        )
-        for vname, rule in variants:
-            ann, sh, dd = ann_sharpe_dd([fwd[i] if rule(i) else 0.0 for i in idxs])
-            out.append(f"| {name} (n={len(idxs)}) | {vname} | {ann:+.1f}% | {sh:.2f} | {dd:.1f}% |")
+    dates, cols = panel["dates"], panel["cols"]
+    tr, cash = cols.get("mcftr"), cols.get("deposit")
+    variants = (("P2, действующее", daily.get("pos")),
+                ("P0, прежнее", daily.get("pos_prev_rule")),
+                ("удержание MCFTR", [1] * len(dates)))
+    rows = {name: track.daily_rows(dates, pos, tr, cash) for name, pos in variants if pos}
+    main = rows.get("P2, действующее") or []
+    if not main:
+        out.append("⚠️ Считать не по чему: в панели нет индекса полной доходности или "
+                   "ставки вкладов. Это не «правило не работает» — это «проверка не "
+                   "состоялась».")
+        out.append("")
+        return None
+    asof = main[-1][0]
+    windows = (("с 2010", OOS_START), ("24 месяца", track.months_back(asof, 24)),
+               ("12 месяцев", track.months_back(asof, 12)),
+               ("с заморозки " + track.FREEZE, track.FREEZE))
+    out.append(f"Мера: {track.BASIS}. Окно (начало; {asof}].")
     out.append("")
+    out.append("| окно | вариант | итог | годовых | вклады, годовых | над вкладами | "
+               "Шарп над вкладами | макс.просадка | в акциях | смен |")
+    out.append("|---|---|---|---|---|---|---|---|---|---|")
+    for wname, lo in windows:
+        for name, _pos in variants:
+            s = track.summarize(rows.get(name) or [], lo, asof)
+            if s is None:
+                continue
+            ann, cash_ann = s.get("rule_ann_pct"), s.get("cash_ann_pct")
+            over = (_fmt(ann - cash_ann, 1, unit=" п.п./год") if ann is not None
+                    and cash_ann is not None else _fmt(s["excess_pp"], 2, unit=" п.п."))
+            out.append(f"| {wname} | {name} | {_fmt(s['rule_pct'], 1)} | {_fmt(ann)} | "
+                       f"{_fmt(cash_ann, 1, plus=False)} | {over} | "
+                       f"{_fmt(s.get('ex_sharpe'), 2, unit='')} | {_fmt(s['mdd_pct'], plus=False)} | "
+                       f"{s['in_market_pct']}% | {s['switches']} |")
+    out.append("")
+    hi_month = track.months_back(asof[:7] + "-01", 1)[:7]
+    lo24 = track.months_back(hi_month + "-01", 23)[:7]
+    lines = []
+    for wname, lo_month in (("за 24 закрытых месяца", lo24), ("с 2010", OOS_START[:7])):
+        hit = track.monthly_hits(main, lo_month, hi_month)
+        if hit["months"]:
+            lo, hi = hit["ci95"]
+            lines.append(f"{wname} — {hit['right']} из {hit['months']} "
+                         f"({hit['share'] * 100:.0f}%, 95% ДИ [{lo * 100:.0f}%; {hi * 100:.0f}%])")
+    if lines:
+        out.append("Доля месяцев, когда позиция P2 дала не меньше зеркальной (деньги вместо "
+                   "акций и наоборот): " + "; ".join(lines) + ". Интервал, накрывающий 50%, "
+                   "значит: на этом окне выбор неотличим от монетки.")
+        out.append("")
+    out.append("Числа до заморозки — бэктест на той же истории, по которой правило "
+               "выбирали; честный счёт идёт с " + track.FREEZE + ".")
+    out.append("")
+    return main
 
 
 BITS_OF_CODE = {"bull": ("trend", 1), "bear": ("trend", 0),
@@ -530,6 +649,9 @@ def main():
                     help="скачать стор из зеркала R2 (для пустого раннера)")
     ap.add_argument("--notify", choices=("auto", "always", "never"), default="never",
                     help="строка вердикта в ops-канал: auto — только когда есть что сказать")
+    ap.add_argument("--freeze-reference", metavar="PATH",
+                    help="записать композит прода как опору инварианта "
+                         "(validation/data/composite_reference.csv) и выйти")
     args = ap.parse_args()
 
     raw = Path(store.raw_dir())
@@ -560,7 +682,18 @@ def main():
     panel = panel_mod.build_panel(store)
     mf = core.monthly_frame(panel)
     labels, comp, fwd = mf["dates"], mf["composite"], mf["fwd1m"]
-    cells = dict(states_mod.compute_states(panel).get("series") or [])
+
+    if args.freeze_reference:
+        from pipeline.fetch import cbr
+        usd = (store.load_series("usd_cbr") or {}).get("points") or {}
+        usd_first = min((str(d)[:10] for d, v in usd.items() if calc.is_num(v)), default=None)
+        n = freeze_reference(labels, comp, args.freeze_reference, usd_first,
+                             cbr.FX_FULL_HISTORY["usd_cbr"], cbr.FX_HISTORY_SLACK_DAYS)
+        print(f"опора инварианта: {n} месяцев -> {args.freeze_reference}; "
+              f"закоммитьте файл в validation/data/")
+        return 0
+    states = states_mod.compute_states(panel)
+    cells = dict(states.get("series") or [])
     health = core.compute_core(panel)["health"]
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -575,7 +708,7 @@ def main():
     invariant = section_invariant(labels, comp, out)
     section_health(health, out)
     drift, compared_cells = section_cells(labels, fwd, cells, out)
-    section_strategies(labels, comp, fwd, cells, out)
+    section_rule(panel, decision_mod.compute_decision(panel, mf, states).get("daily") or {}, out)
     section_second_layer(labels, fwd, cells, panel, out)
 
     out.append("## Что делать с этим отчётом")
@@ -587,6 +720,11 @@ def main():
         out.append("1. **Инвариант не проверялся** — найти "
                    "`validation/data/walkforward_results.csv`; без него у отчёта нет "
                    "главной опоры.")
+    if invariant == "refreeze":
+        out.append("1. **Опора инварианта не заморожена** — когда фетчер ЦБ дотянет курс "
+                   "с 1997 года, на стор прода: `PYTHONPATH=. python3 ops/recalibrate.py "
+                   "--freeze-reference validation/data/composite_reference.csv`, файл — "
+                   "в репозиторий. До тех пор переписанный ряд этот отчёт не поймает.")
     if drift:
         out.append("1. Числа ячеек разошлись — правку делать целиком, вместе с "
                    "`web/guide.html` (его сверяет `tests/test_guide.py`).")
@@ -612,6 +750,10 @@ def main():
     elif invariant == "no_reference":
         verdicts.insert(0, ("no_reference",
                             "инвариант НЕ ПРОВЕРЕН: эталона walk-forward не нашлось"))
+    elif invariant == "refreeze":
+        verdicts.insert(0, ("invariant_refreeze",
+                            "инвариант НЕ ПРОВЕРЕН: после правки курса 03.10.2026 композит "
+                            "прода нужно заморозить (--freeze-reference)"))
     # «Расхождений нет» и «сравнивать было нечего» — РАЗНЫЕ исходы, и второй опаснее:
     # он приходит тем же успокаивающим сообщением. Воспроизводилось удалением одного
     # ряда из стора: разделы 3–5 пустели, а финал печатал «Расхождений нет».

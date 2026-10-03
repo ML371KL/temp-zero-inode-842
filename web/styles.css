@@ -517,6 +517,19 @@ table.data tbody tr:last-child td { border-bottom: 0; }
 @media (max-width: 760px) {
   table.data th, table.data td { white-space: normal; padding: 8px 6px; overflow-wrap: anywhere; }
   table.data thead th { letter-spacing: 0; }
+  /* В журнале правила колонки — только числа и короткие заголовки: «+1,0%» рвалось
+     посередине, хотя таблица и так помещается. */
+  .position__journal table.data th, .position__journal table.data td { overflow-wrap: normal; padding: 8px 3px; }
+  .position__journal table.data thead th { font-size: 11px; text-transform: none; }
+  .position__journal table.data td, .position__journal table.data thead th { white-space: nowrap; }
+}
+/* Самые узкие телефоны: разница видна из двух соседних колонок, а таблица обязана
+   помещаться без горизонтальной прокрутки (см. комментарий к .tablewrap). */
+@media (max-width: 389px) {
+  .position__journal table.data th:nth-child(5), .position__journal table.data td:nth-child(5) { display: none; }
+}
+@media (max-width: 359px) {
+  .position__journal table.data th, .position__journal table.data td { padding: 8px 2px; }
 }
 
 /* ────────────────────────────────────────────────────────── графики */
@@ -748,6 +761,8 @@ table.data.guide__table th[scope="col"] { white-space: nowrap; }
 }
 .position__ribbon { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--hair); }
 .position__ribbon .stat__k { margin-bottom: 4px; }
+.position__journal { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--hair); }
+.position__journal .stat__k { margin-bottom: 6px; }
 .legend__sw--accent { background: var(--accent); }
 /* Режим в шапке: сноска про распределение и n — мелко, но чернилами 4,5:1. */
 .hero__fine {

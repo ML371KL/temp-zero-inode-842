@@ -210,13 +210,21 @@ def _core_flip(payload, prev, state, now):
     label = (payload.get("verdict") or {}).get("core_label") or ""
     was_label = _core_label(prev_value)
     since = core.get("sign_since")
+    # Разворот здесь — по дневному значению с порогом ±0,1, а знак решения о позиции
+    # меняется только в последний торговый день недели и за ±0,2 (constants.DECISION).
+    # Без этой фразы читатель получал «разворот вниз», а позиция оставалась прежней, —
+    # два разных знака под одним словом (аудит 03.10.2026, §3.6).
+    thr = constants.DECISION["comp_threshold"]
+    rule = (f"Позицию это само не меняет: знак решения пересчитывается в последний "
+            f"торговый день недели и только за пределами ±{_num(thr, 1, False)}.")
+    detail = (f"Знак держится с {wording.ru_day(since)}. " if since else "") + rule
     return [_ev(f"core_flip:{sign}:{payload.get('asof_trading_day')}", "core_flip",
                 "Оценка рынка на месяц вперёд развернулась "
                 + ("вверх" if sign > 0 else "вниз"),
                 now=now,
                 before=f"{_num(prev_value, 2, True)}{f' ({was_label})' if was_label else ''}",
                 after=f"{_num(val, 2, True)}{f' ({_core_label(val)})' if _core_label(val) else ''}",
-                detail=(f"Знак держится с {wording.ru_day(since)}." if since else ""),
+                detail=detail,
                 meaning="Шкала — от −3 до +3: чем дальше от нуля, тем увереннее "
                         "перевес в эту сторону. Это оценка направления на месяц, "
                         "а не обещание доходности.")]
@@ -561,10 +569,18 @@ def _deposit(payload, prev, state, now):
     step = round(new - old, 2)
     meaning = ""
     if isinstance(spread, (int, float)):
-        meaning = (f"Вклад теперь даёт на {wording.points(spread)}"
-                   + (" больше" if spread > 0 else " меньше")
-                   + " дивидендной доходности акций. Чем выгоднее вклад, тем дольше "
-                     "деньги не пойдут с депозитов на биржу.")
+        # spread_pp тайла — дивдоходность МИНУС вклад. Отрицательный спред значит, что
+        # вклад платит БОЛЬШЕ дивидендов. До 03.10.2026 слова стояли наоборот, и
+        # 14.09/22.09.2026 в ленту ушло «вклад даёт на 4,5 п.п. меньше дивидендов»
+        # при вкладе 12,95% против дивидендов 8,5% (аудит 03.10.2026, §2.3).
+        if abs(spread) < 0.005:
+            compare = "столько же, сколько дивидендная доходность акций."
+        else:
+            compare = (f"на {wording.points(spread)}"
+                       + (" меньше" if spread > 0 else " больше")
+                       + " дивидендной доходности акций.")
+        meaning = (f"Вклад теперь даёт {compare} Чем выгоднее вклад, тем дольше "
+                   "деньги не пойдут с депозитов на биржу.")
     return [_ev(f"deposit_uptick:{pl.get('deposit_asof')}", "deposit_uptick",
                 "Банки подняли ставки по вкладам", "info", now,
                 before=_pct(old, 2), after=_pct(new, 2),

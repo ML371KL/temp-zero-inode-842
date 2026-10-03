@@ -8,10 +8,12 @@
   закрытого месяца. Каждая проверка — правило из спецификации аудита 02.09.2026
   (results/P_package.md, ступень P2), а не «что вернул код»;
 * РЕГРЕССИЯ ПО ФИКСТУРЕ — tests/fixtures/decision_fixture.json хранит RLE позиций,
-  флагов и знака, посчитанные эталонным движком аудита (pandas, scripts/P_lib.py)
-  на копии боевого стора 02.09.2026. Реализация обязана воспроизвести их ПОБИТОВО.
-  Тест включается только при STATE_DIR, указывающем на КОПИЮ того стора (в нём
-  raw/imoex.json): на CI и на чужой машине он честно пропускается с причиной.
+  флагов и знака на копии боевого стора 02.09.2026. Исходно их посчитал эталонный
+  движок аудита (pandas, scripts/P_lib.py); 03.10.2026 курс USD стал «действующим в
+  день» (без подстановки IMOEX/RTSI по понедельникам), и эталон пересчитан — как
+  именно, записано в поле note самой фикстуры. Реализация обязана воспроизвести его
+  ПОБИТОВО. Тест включается только при STATE_DIR, указывающем на КОПИЮ того стора (в
+  нём raw/imoex.json): на CI и на чужой машине он честно пропускается с причиной.
 
 Дата в тестах фиксирована (никаких «сегодня минус N»): календарь панели — это
 список строк, а последний день фикстуры — вторник 2026-09-01.
@@ -271,6 +273,96 @@ class TestDailyComposite(DecisionCase):
         self.assertAlmostEqual(comp[j], comp[j - 1], delta=1e-12)
 
 
+class TestSwitchDistance(DecisionCase):
+    """«Что изменит позицию» с числом: когда снимется флаг волы и сколько не хватает
+    оценке рынка (аудит 03.10.2026, рекомендация 11). Это ориентиры «при прочих
+    равных», и проверяется здесь, что они посчитаны ТЕМ ЖЕ движком, что и решение."""
+
+    def setUp(self):
+        super().setUp()
+        need(self, "pipeline.compute.decision", "vol_calm_days", "comp_leg_moves",
+             "switch_distance")
+
+    @staticmethod
+    def three_legs():
+        panel = synthetic_panel()
+        n = len(panel["dates"])
+        panel["cols"]["slope_10_2"] = [1.5 * math.cos(i / 23.0) for i in range(n)]
+        panel["cols"]["urals_rub_gap"] = [0.2 * math.sin(i / 31.0) for i in range(n)]
+        return panel
+
+    def test_вола_снимается_когда_большой_день_выпадает_из_окна(self):
+        quiet = [0.004, -0.004] * 10
+        ret1 = [0.0] * 30 + [0.06] + quiet          # 6% — самый старый день окна
+        rv = self.dec._ann_vol(ret1[-21:])
+        # порог чуть ниже нынешней волы: хватает одного тихого дня
+        self.assertEqual(self.dec.vol_calm_days(ret1, rv * 0.9, step=0.0), (1, "ok"))
+        # тот же день в середине окна: ждать, пока он выпадет
+        ret1 = [0.0] * 30 + quiet[:10] + [0.06] + quiet[10:]
+        days, status = self.dec.vol_calm_days(ret1, rv * 0.9, step=0.0)
+        self.assertEqual((days, status), (11, "ok"))
+
+    def test_вола_не_снимается_за_месяц_и_нет_данных(self):
+        ret1 = [0.03, -0.03] * 15
+        self.assertEqual(self.dec.vol_calm_days(ret1, 0.10, step=0.01), (None, "beyond"))
+        self.assertEqual(self.dec.vol_calm_days(ret1[:10], 0.10), (None, "no_data"))
+        self.assertEqual(self.dec.vol_calm_days(ret1, None), (None, "no_data"))
+
+    def test_сдвиг_одной_ноги_даёт_ровно_порог(self):
+        panel = self.three_legs()
+        mf = self.core.monthly_frame(panel)
+        comp = self.dec.daily_composite(panel, mf)[-1]
+        target = comp + 0.3
+        moves = self.dec.comp_leg_moves(panel, mf, target)
+        self.assertEqual({m["id"] for m in moves}, {"usd_mom63", "slope_10_2", "urals_rub_gap"})
+        for m in moves:
+            with self.subTest(leg=m["id"]):
+                self.assertIsNotNone(m["delta"])
+                moved = {"dates": panel["dates"], "cols": dict(panel["cols"])}
+                col = list(moved["cols"][m["id"]])
+                col[-1] += m["delta"]
+                moved["cols"][m["id"]] = col
+                # окна закрытых месяцев не меняются: пересчёт дневного числа даёт порог
+                got = self.dec.daily_composite(moved, self.core.monthly_frame(moved))[-1]
+                self.assertAlmostEqual(got, target, delta=1e-9)
+        # контрарианская нога (бочка, знак −1) для роста оценки обязана падать
+        urals = [m for m in moves if m["id"] == "urals_rub_gap"][0]
+        self.assertLess(urals["delta"], 0)
+
+    def test_за_обрезкой_одной_ногой_не_достать(self):
+        panel = self.three_legs()
+        mf = self.core.monthly_frame(panel)
+        moves = self.dec.comp_leg_moves(panel, mf, 2.9)   # нужен z ≈ 8,7 у одной ноги
+        self.assertTrue(moves and all(m["delta"] is None for m in moves))
+
+    def test_какой_порог_решает(self):
+        panel = self.three_legs()
+        mf = self.core.monthly_frame(panel)
+        sd = self.dec.switch_distance
+        flags = {"trend": 1, "vol": 0, "bond": 0}
+        self.assertEqual(sd(panel, mf, "long", 1, flags)["comp_target"], -0.2)
+        self.assertEqual(sd(panel, mf, "flat", -1, flags)["comp_target"], 0.2)
+        # «деньги» при знаке «за акции» держат ворота — подсказка про оценку не нужна
+        held = sd(panel, mf, "flat", 1, flags)
+        self.assertIsNone(held["comp_target"])
+        self.assertEqual(held["legs"], [])
+        self.assertIsNone(held["vol_calm_status"])   # флаг волы не стоит
+
+    def test_условия_называют_срок_снятия_волы(self):
+        panel = self.three_legs()
+        n = len(panel["dates"])
+        cols = panel["cols"]
+        cols["ret1"] = [0.0] * (n - 21) + [0.05] + [0.003, -0.003] * 10
+        cols["vol_thresh60"] = [0.05] * n
+        dist = {"vol_calm_status": "ok", "vol_calm_days_min": 1, "vol_calm_days_max": 3}
+        hyst = {"trend": [0] * n, "vol": [1] * n, "bond": [1] * n}
+        lines = self.dec._conditions("flat", hyst, False, 1, 0.5, cols, panel["dates"], dist)
+        self.assertIn("снимется через 1–3 торговых дня", lines[0])
+        dist = {"vol_calm_status": "beyond"}
+        lines = self.dec._conditions("flat", hyst, False, 1, 0.5, cols, panel["dates"], dist)
+        self.assertIn("за месяц не снимется", lines[0])
+
+
 class TestHysteresisBits(DecisionCase):
     def bits(self, **cols):
         n = max(len(v) for v in cols.values())
@@ -325,7 +417,7 @@ class TestComputeDecisionShape(DecisionCase):
         for key in ("state", "since", "reason", "reason_text", "execute", "decision_day",
                     "next_decision", "comp_daily", "comp_state", "comp_threshold",
                     "gate_open", "regime", "cash_rate", "cash_rate_asof", "conditions",
-                    "history", "switches_per_year"):
+                    "history", "switches_per_year", "journal", "switch_distance"):
             self.assertIn(key, pos, key)
         self.assertIn(pos["state"], ("long", "flat"))
         self.assertEqual(pos["decision_day"], self.panel["dates"][-1])

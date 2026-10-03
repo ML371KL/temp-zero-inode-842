@@ -468,6 +468,27 @@ class TestТайлыНаЖивыхДанных(TileCase):
         self.assertEqual(p["chg_21d_pp"], -1.9)
         self.assertIn("в цене 2.25 п.п. смягчения", t["headline"])
 
+    def test_expectations_снижение_ключа_не_репрайсинг(self):
+        """Снижение ставки, которое рынок уже заложил, двигает СПРЕД, а не кривую.
+
+        Ключ снижен 05.08 с 14 до 13 при неподвижном годе ОФЗ 13.65: спред за 21 день
+        −0.35 → +0.65, то есть +1.00 — ровно шаг ЦБ. До 03.10.2026 бит стоял на
+        спреде и называл это «репрайсингом ожиданий» (аудит 03.10.2026, §2.4).
+        Мутация: вернуть бит на chg_21d_pp — repricing станет True.
+        """
+        self.seed_expectations()
+        span = days("2026-08-14", 30)
+        self.put("zcyc_y1", {d: 13.65 for d in span})
+        self.put("key_rate", {"2026-07-01": 14.0, "2026-08-05": 13.0})
+        t = self.tile("expectations")
+        p = t["payload"]
+        self.assertEqual(p["chg_21d_pp"], 1.0)
+        self.assertEqual(p["y1_chg_21d_pp"], 0.0)
+        self.assertEqual(p["key_chg_21d_pp"], -1.0)
+        self.assertFalse(p["repricing"])
+        self.assertIn("шаг ключа -1.00, год ОФЗ +0.00", t["headline"])
+        self.assertNotIn("репрайсинг", t["headline"])
+
     def test_expectations_репрайсинг_подписывается(self):
         self.seed_expectations()
         span = days("2026-08-14", 30)

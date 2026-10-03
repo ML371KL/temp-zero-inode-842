@@ -14,7 +14,7 @@ from html.parser import HTMLParser
 from urllib.parse import urlencode
 
 from . import (FetchError, dates, empty_is_fatal, http, incremental_start,
-               make_meta, to_float)
+               make_meta, store, to_float)
 
 FX_URL = "https://www.cbr.ru/scripts/XML_dynamic.asp"
 KEYRATE_URL = "https://www.cbr.ru/hd_base/keyrate/"
@@ -36,9 +36,21 @@ _KEYRATE_ENVELOPE = (
 # Коды валют ЦБ -> id рядов реестра.
 FX_IDS = {"R01235": "usd_cbr", "R01375": "cny_cbr", "R01239": "eur_cbr"}
 
-# Ключевая ставка существует с 13.09.2013; курс тянем с 2003, чтобы у панели с
-# 2004 года был разгон для 63-дневного моментума (usd_mom63 — нога ядра).
-FX_DEFAULT_START = "2003-01-01"
+# Ключевая ставка существует с 13.09.2013. Курс тянем с 1997 года: IMOEX начинается
+# 22.09.1997, и нога ядра usd_mom63 вместе с 60-месячным окном её z обязана стоять на
+# ОФИЦИАЛЬНОМ курсе с первого дня индекса. До 03.10.2026 ряд начинался с 2003 года
+# (продовый стор, затравленный рядом исследования, — с 2013), и раньше этой даты
+# панель брала «курс» из отношения IMOEX/RTSI — до 2013 года это две РАЗНЫЕ корзины,
+# медианное расхождение с официальным курсом 3,7% (аудит 03.10.2026, §2.1).
+FX_DEFAULT_START = "1997-01-01"
+# Ряды, историю которых панель обязана иметь целиком: если ряд в сторе начинается
+# позже, один полный запрос дотягивает прошлое (XML_dynamic отдаёт всю историю одной
+# страницей, ~0,9 МБ). Без этого стор, затравленный с 2013 года, так и жил бы без
+# официального курса до 2013-го: инкрементальное окно смотрит только на хвост.
+FX_FULL_HISTORY = {"usd_cbr": FX_DEFAULT_START}
+FX_HISTORY_SLACK_DAYS = 31
+# Деноминация: до 01.01.1998 ЦБ публикует курс в старых рублях (5 560 за доллар).
+REDENOMINATION = "1998-01-01"
 KEYRATE_DEFAULT_START = "2013-09-13"
 DEPOSIT_DEFAULT_START = "2009-01-01"
 DEPOSIT_BACK_DAYS = 40  # декада правится задним числом; 40 дней = 4 декады запаса
@@ -78,11 +90,23 @@ def fx(code="R01235", series_id=None, start=None, end=None, bootstrap=False):
 
     Record Date в XML_dynamic — это дата, НА которую курс действует (опубликован
     он накануне). Ничего сдвигать не надо: именно так ряд лагирован в валидации,
-    и именно поэтому заглядывания в будущее тут нет.
+    и именно поэтому заглядывания в будущее тут нет. Записей с датой понедельника у
+    ЦБ почти нет — курс пятницы действует сб–пн и лежит субботней строкой; курс
+    торгового дня собирает панель («последняя запись не позже дня»).
+
+    Ряды из FX_FULL_HISTORY, которые в сторе начинаются позже нужного, один раз
+    дотягиваются целиком; значения до деноминации 1998 года делятся на 1000.
     """
     sid = series_id or FX_IDS.get(code.upper(), f"fx_{code.lower()}")
-    frm = dates.parse_date(start or incremental_start(sid, 5, FX_DEFAULT_START,
-                                                      bootstrap))
+    from_default = incremental_start(sid, 5, FX_DEFAULT_START, bootstrap)
+    need_from = FX_FULL_HISTORY.get(sid)
+    if not start and not bootstrap and need_from:
+        first = _first_date(sid)
+        edge = dates.fmt_date(dates.add_days(need_from, FX_HISTORY_SLACK_DAYS))
+        if first and first > edge:
+            http.LOG(f"{sid}: история в сторе с {first} — дотягиваю с {need_from}")
+            from_default = need_from
+    frm = dates.parse_date(start or from_default)
     till = dates.parse_date(end or dates.today_msk())
     url = f"{FX_URL}?" + urlencode({"date_req1": dates.fmt_ru(frm, "/"),
                                     "date_req2": dates.fmt_ru(till, "/"),
@@ -93,12 +117,21 @@ def fx(code="R01235", series_id=None, start=None, end=None, bootstrap=False):
         value = _fx_value(body)
         if value is None:
             continue
-        points[dates.fmt_date(day)] = value
+        key = dates.fmt_date(day)
+        points[key] = value / 1000.0 if key < REDENOMINATION else value
     _drop_future(points, till, sid)
     if not points and empty_is_fatal(sid):
         raise FetchError(f"ЦБ: пустой ряд курса {code} за {frm}..{till}", url=url)
     return sid, points, make_meta("cbr", url, points, unit="rub", code=code,
                                   note="дата = дата применения курса")
+
+
+def _first_date(series_id):
+    """Первая дата ряда с годным значением; None — ряда нет."""
+    series = store.load_series(series_id) or {}
+    days = [str(d)[:10] for d, v in (series.get("points") or {}).items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    return min(days) if days else None
 
 
 def _fx_value(body):
