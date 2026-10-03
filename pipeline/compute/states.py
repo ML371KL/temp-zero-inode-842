@@ -432,7 +432,8 @@ def _regime_stats(dates, cols, hyst, current_id):
     labels, px_m = calc.resample_month_end(dates, cols.get("imoex", empty))
     _, tr_m = calc.resample_month_end(dates, cols.get("mcftr", empty))
     _, dep_m = calc.resample_month_end(dates, cols.get("deposit", empty))
-    by = {r["id"]: {"price": [], "excess": []} for r in constants.REGIMES}
+    by = {r["id"]: {"price": [], "excess": [], "price_same": [], "since": None}
+          for r in constants.REGIMES}
     for i in range(max(0, len(me) - 2)):
         if labels[i] < STATS_START:
             continue
@@ -450,10 +451,20 @@ def _regime_stats(dates, cols, hyst, current_id):
                 and ta > 0 and tb > 0):
             by[reg["id"]]["excess"].append(math.log(tb / ta)
                                            - math.log(1.0 + dep_m[i] / 100.0 / 12.0))
+            by[reg["id"]]["price_same"].append(fwd)
+            by[reg["id"]]["since"] = by[reg["id"]]["since"] or labels[i][:7]
     out = {}
     for reg in constants.REGIMES:
         excess = _summary(by[reg["id"]]["excess"])
         excess["basis"] = "total_return"
+        # Ставка вкладов есть только с 07.2009, и выборка избытка КОРОЧЕ ценовой: в ней
+        # нет 2008 года. Строки «по цене» и «сверх вкладов» без этого читались как
+        # «с дивидендами и вкладами режим не так плох» (−2,86 → −2,09), хотя на тех же
+        # месяцах избыток ХУЖЕ цены (−1,73 → −2,09): вклад платил больше дивидендов.
+        # Поэтому рядом — с какого месяца выборка и цена на тех же месяцах.
+        same = _summary(by[reg["id"]]["price_same"])
+        excess["since"] = by[reg["id"]]["since"]
+        excess["price_same_mean_pct"] = same["mean_pct"]
         out[reg["id"]] = {
             "id": reg["id"], "label": reg["label"],
             "cells": [cell_code(*c) for c in reg["cells"]],
