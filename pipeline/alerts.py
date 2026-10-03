@@ -15,6 +15,7 @@
 
 import json
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -67,6 +68,37 @@ def _state_path():
     return state_dir() / STATE_NAME
 
 
+# 14.09 и 22.09.2026 событие о вкладах ушло со знаком наоборот: «вклад даёт на 4,5 п.п.
+# МЕНЬШЕ дивидендной доходности», когда вклад давал на 4,5 п.п. больше (spread =
+# дивдоходность − вклад, слово выбиралось по его знаку наоборот; аудит 03.10.2026,
+# §2.3). Код исправлен 03.10.2026, но записи остались в ленте витрины — с
+# комментарием модели, построенным на неверном факте. Чиним их один раз при чтении
+# состояния: слово сравнения меняется на противоположное, к тексту — пометка об
+# исправлении (по ней правка не повторяется), комментарий снимается. Записи после
+# даты исправления написаны новым кодом и не трогаются. Уже доставленные в телеграм
+# сообщения так не исправить — это только лента витрины.
+DEPOSIT_SIGN_FIXED_ON = "2026-10-03"
+DEPOSIT_SIGN_NOTE = "(Исправлено 03.10.2026: в исходном сообщении сравнение было перевёрнуто.)"
+_DEPOSIT_SIGN_RE = re.compile(r"(Вклад теперь даёт на [^.]*?) (больше|меньше)( дивидендной доходности)")
+
+
+def _fix_deposit_sign(events):
+    swap = {"больше": "меньше", "меньше": "больше"}
+    for ev in events:
+        if ev.get("kind") != "deposit_uptick" or str(ev.get("ts") or "") >= DEPOSIT_SIGN_FIXED_ON:
+            continue
+        text = ev.get("text") or ""
+        if DEPOSIT_SIGN_NOTE in text or not _DEPOSIT_SIGN_RE.search(text):
+            continue
+        for field in ("text", "meaning"):
+            if isinstance(ev.get(field), str):
+                ev[field] = _DEPOSIT_SIGN_RE.sub(
+                    lambda m: f"{m.group(1)} {swap[m.group(2)]}{m.group(3)}", ev[field], count=1)
+        ev["text"] = ev["text"].rstrip() + " " + DEPOSIT_SIGN_NOTE
+        ev.pop("comment", None)
+    return events
+
+
 def load_state():
     """Состояние прошлого прогона. Значения неверных типов выбрасываем.
 
@@ -83,6 +115,7 @@ def load_state():
     for key in ("pending", "feed"):
         data[key] = [e for e in data.get(key) or [] if isinstance(e, dict) and e.get("key")] \
             if isinstance(data.get(key), list) else []
+        _fix_deposit_sign(data[key])
     if not isinstance(data.get("last"), dict):
         data.pop("last", None)
     return data
