@@ -572,7 +572,7 @@ table.data caption { text-align: left; font-size: 13px; color: var(--ink-3); pad
 table.data th, table.data td { padding: 8px 12px; text-align: right; white-space: nowrap; border-bottom: 1px solid var(--hair); }
 table.data th:first-child, table.data td:first-child { text-align: left; }
 table.data thead th { font-weight: 600; color: var(--ink-3); font-size: 11px; letter-spacing: .05em; text-transform: uppercase; }
-table.data tbody tr:last-child td { border-bottom: 0; }
+table.data tbody tr:last-child th, table.data tbody tr:last-child td { border-bottom: 0; }
 @media (max-width: 760px) {
   table.data th, table.data td { white-space: normal; padding: 8px 6px; overflow-wrap: anywhere; }
   table.data thead th { letter-spacing: 0; }
