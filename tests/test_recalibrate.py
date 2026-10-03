@@ -98,6 +98,128 @@ class HealthSectionCase(unittest.TestCase):
         self.assertIn("24 мес", text)
 
 
+class InvariantCase(unittest.TestCase):
+    """Опора инварианта после правки курса 03.10.2026.
+
+    До правки прод совпадал с композитом исследования побитово, и любое расхождение
+    значило «переписали ряд». После правки расхождение с исследованием НАМЕРЕННОЕ:
+    сравнивать с ним дальше — это ежемесячная ложная тревога, а молча принять — это
+    инвариант, который ничего не ловит. Поэтому опора — композит самого прода,
+    замороженный после дотяжки курса, а до заморозки отчёт честно говорит, что
+    инвариант не проверяется.
+    """
+
+    LABELS = ["2026-01-30", "2026-02-27", "2026-03-31", "2026-04-30", "2026-05-29"]
+    COMP = [0.1 + 0.2, -0.2, 1 / 3, 0.4, 0.5]
+
+    def setUp(self):
+        self.rc = need(self, "ops.recalibrate", "section_invariant", "freeze_reference")
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        # Композит исследования — другой: так выглядит прод после правки курса.
+        self.research = self.dir / "walkforward_results.csv"
+        self.research.write_text(
+            ",M1_fixed,fwd\n" + "".join(f"{d[:7]}-28,{v + 0.05},0.0\n"
+                                        for d, v in zip(self.LABELS, self.COMP)),
+            encoding="utf-8")
+        self.frozen = self.dir / "composite_reference.csv"
+
+    def freeze(self, usd_first="1997-01-01"):
+        return self.rc.freeze_reference(self.LABELS, self.COMP, self.frozen, usd_first,
+                                        "1997-01-01", 31)
+
+    def check(self, comp):
+        out = []
+        status = self.rc.section_invariant(self.LABELS, comp, out, frozen_path=self.frozen,
+                                           research_path=self.research)
+        return status, "\n".join(out)
+
+    def test_без_заморозки_это_не_тревога_и_не_зелёный_свет(self):
+        status, text = self.check(self.COMP)
+        # мутация: вернуть сверку с исследованием как единственную -> "drift" каждый месяц
+        self.assertEqual(status, "refreeze")
+        self.assertIn("НЕ ПРОВЕРЯЕТСЯ", text)
+
+    def test_замороженная_опора_совпадает_побитово(self):
+        self.freeze()
+        status, text = self.check(list(self.COMP))
+        self.assertEqual(status, "ok")
+        self.assertIn("Справка", text)  # расхождение с исследованием — справкой
+
+    def test_переписанный_ряд_после_заморозки_ловится(self):
+        self.freeze()
+        comp = list(self.COMP)
+        comp[1] += 1e-6
+        self.assertEqual(self.check(comp)[0], "drift")
+
+    def test_два_последних_месяца_не_замораживаются(self):
+        # Открытый месяц меняется по построению, хвост закрытого правят задним числом.
+        self.assertEqual(self.freeze(), len(self.LABELS) - 2)
+        comp = list(self.COMP)
+        comp[-1] += 0.3
+        comp[-2] += 0.3
+        self.assertEqual(self.check(comp)[0], "ok")
+
+    def test_заморозка_до_дотяжки_курса_отклоняется(self):
+        # До дотяжки композит до 2013 года ещё на склейке с RTSI и сменится на первом
+        # прогоне фетчера — замороженное число дало бы ложную тревогу.
+        with self.assertRaises(SystemExit):
+            self.freeze(usd_first="2013-01-10")
+        self.assertFalse(self.frozen.exists())
+
+
+class RuleSectionCase(unittest.TestCase):
+    """Раздел 4 меряет ДЕЙСТВУЮЩЕЕ правило и в той мере, в какой оно решает.
+
+    До 03.10.2026 здесь стояли месячные «слои» по цене индекса с нулём во флэте —
+    другое правило и другая мера (аудит 03.10.2026, §2.6). Отчёт, по которому решают
+    о реколибровке, оценивал модель, которой в проде уже не было.
+    """
+
+    def setUp(self):
+        self.rc = need(self, "ops.recalibrate", "section_rule")
+        from datetime import date, timedelta
+        days, cur = [], date(2024, 9, 2)
+        while cur <= date(2026, 10, 2):
+            if cur.weekday() < 5:
+                days.append(cur.isoformat())
+            cur += timedelta(days=1)
+        n = len(days)
+        # Полная доходность растёт, цена стоит: мера обязана быть первой.
+        self.panel = {"dates": days, "cols": {"imoex": [3000.0] * n,
+                                              "mcftr": [1000.0 * 1.0003 ** i for i in range(n)],
+                                              "deposit": [15.0] * n}}
+        self.daily = {"pos": [1] * n, "pos_prev_rule": [i % 2 for i in range(n)]}
+
+    def test_правило_полная_доходность_и_вклады(self):
+        out = []
+        rows = self.rc.section_rule(self.panel, self.daily, out)
+        text = "\n".join(out)
+        self.assertTrue(rows)
+        for needle in ("P2, действующее", "P0, прежнее", "удержание MCFTR",
+                       "с заморозки 2026-09-02", "MCFTR", "вклады топ-10"):
+            self.assertIn(needle, text)
+        cells = [c.strip() for c in
+                 [ln for ln in out if ln.startswith("| 12 месяцев | удержание MCFTR")][0]
+                 .split("|")]
+        # мутация: мерить по cols["imoex"] -> рынок за год 0%
+        self.assertGreater(float(cells[3].rstrip("%")), 5.0)
+        self.assertEqual(cells[5], "15.0%")     # вклады во флэте, а не ноль
+        # Окно «с 2010» на истории с 2024 года — годовой темп по самим данным.
+        since = [c.strip() for c in
+                 [ln for ln in out if ln.startswith("| с 2010 | удержание MCFTR")][0].split("|")]
+        self.assertGreater(float(since[4].rstrip("%")), 5.0)
+
+    def test_нет_индекса_полной_доходности_это_несостоявшаяся_проверка(self):
+        panel = {"dates": self.panel["dates"], "cols": {"imoex": self.panel["cols"]["imoex"]}}
+        out = []
+        self.assertIsNone(self.rc.section_rule(panel, self.daily, out))
+        self.assertIn("не состоялась", "\n".join(out))
+
+
 class NotifyCase(unittest.TestCase):
     def setUp(self):
         self.rc = need(self, "ops.recalibrate", "notify", "QUARTER_MONTHS")

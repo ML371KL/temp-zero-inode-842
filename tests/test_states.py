@@ -12,6 +12,7 @@
   фаза ставки — на 200 (ключевая 18 → 17, то есть смягчение).
 """
 
+import math
 import re
 import unittest
 
@@ -437,6 +438,33 @@ class TestGate(StatesCase):
                     self.assertGreaterEqual(hi, reg[part]["mean_pct"])
             # избыток над кэшем считается по подмножеству месяцев со ставкой
             self.assertLessEqual(reg["excess"]["n"], reg["price"]["n"])
+
+    def test_избыток_над_деньгами_по_полной_доходности(self):
+        """Позиция «акции» получает дивиденды, значит избыток — по MCFTR, а не по цене.
+
+        Индекс полной доходности растёт быстрее цены ровно на 1% в месяц (дивиденды),
+        ставка вкладов 12% годовых = те же ~1% в месяц: избыток обязан выйти около
+        ЦЕНОВОЙ доходности. Мутация: считать избыток по IMOEX (как до 03.10.2026) —
+        он съедет на −1 п.п. в месяц, то есть на всю дивидендную доходность.
+        """
+        dates = self.panel["dates"]
+        cols = dict(self.panel["cols"])
+        step = math.log(1.01) / 21.0
+        cols["mcftr"] = [None if p is None else p * math.exp(step * t)
+                         for t, p in enumerate(cols["imoex"])]
+        cols["deposit"] = [12.0] * len(dates)
+        out = self.states.compute_states({"dates": dates, "cols": cols})
+        checked = 0
+        for reg in out["regime_stats"].values():
+            px, ex = reg["price"], reg["excess"]
+            self.assertEqual(ex.get("basis"), "total_return")
+            if not px["n"] or not ex["n"]:
+                continue
+            self.assertEqual(ex["n"], px["n"])
+            # дивиденды ≈ ставка: избыток близок к цене, а не к «цене минус ставка»
+            self.assertAlmostEqual(ex["mean_pct"], px["mean_pct"], delta=0.15, msg=reg["id"])
+            checked += 1
+        self.assertGreater(checked, 0, "ни в одном режиме нет месяцев со ставкой")
 
     def test_лента_ворот_помесячно_и_по_известным_кодам(self):
         series = self.out["series_gate"]

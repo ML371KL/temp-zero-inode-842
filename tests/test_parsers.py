@@ -284,6 +284,56 @@ class TestCbrFx(FetcherCase):
         self.assertAlmostEqual(points["2026-08-03"], 123.4567, places=6)
 
 
+class TestCbrFxHistory(FetcherCase):
+    """История курса — с 1997 года, с поправкой на деноминацию, и дотягивается сама.
+
+    Продовый стор затравлен курсом с 2013 года, а инкрементальное окно смотрит только
+    на хвост: без разовой догрузки нога ядра до 2013 года так и считалась бы по
+    отношению IMOEX/RTSI (аудит 03.10.2026, §2.1).
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.cbr = need(self, "pipeline.fetch.cbr", "fx", "FX_DEFAULT_START")
+        self.store = need(self, "pipeline.lib.store", "upsert_points", "load_series")
+
+    def xml(self, records):
+        body = "".join(f'<Record Date="{d}" Id="R01235"><Nominal>1</Nominal>'
+                       f'<Value>{v}</Value><VunitRate>{v}</VunitRate></Record>'
+                       for d, v in records)
+        return ('<?xml version="1.0" encoding="windows-1251"?><ValCurs ID="R01235">'
+                + body + "</ValCurs>").encode("windows-1251")
+
+    def test_деноминация_1998_года(self):
+        # До 01.01.1998 курс в старых рублях: 5 960 за доллар — это 5,96 новых.
+        self.serve_const(self.xml([("30.12.1997", "5960,0000"), ("06.01.1998", "5,9700")]))
+        _sid, points, _meta = self.cbr.fx(code="R01235", start="1997-12-29", end="1998-01-07")
+        self.assertAlmostEqual(points["1997-12-30"], 5.96, places=6)
+        self.assertAlmostEqual(points["1998-01-06"], 5.97, places=6)
+
+    def test_стор_с_2013_года_дотягивается_до_1997(self):
+        self.store.upsert_points("usd_cbr", {"2013-01-10": 30.5, "2026-09-30": 83.0},
+                                 {"status": "ok"})
+        seen = []
+
+        def responder(url):
+            seen.append(url)
+            return self.xml([("01.10.2026", "83,1000")])
+        self.serve(responder)
+        self.cbr.fx(code="R01235", end="2026-10-01")
+        # мутация: снять FX_FULL_HISTORY -> запрос начнётся с 25.09.2026, и прошлое
+        # до 2013 года так и останется без официального курса.
+        self.assertIn("date_req1=01%2F01%2F1997", seen[0])
+
+    def test_полная_история_тянет_только_хвост(self):
+        self.store.upsert_points("usd_cbr", {"1997-01-01": 5.56, "2026-09-30": 83.0},
+                                 {"status": "ok"})
+        seen = []
+        self.serve(lambda url: seen.append(url) or self.xml([("01.10.2026", "83,1000")]))
+        self.cbr.fx(code="R01235", end="2026-10-01")
+        self.assertIn("date_req1=25%2F09%2F2026", seen[0])
+
+
 class TestCbrFutureDates(FetcherCase):
     """Дата из будущего в ответе ЦБ не попадает в ряд.
 

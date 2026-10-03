@@ -65,7 +65,7 @@ def payload(core=0.68, trend=0, vol=1, bond=1, asof=ASOF, health="ok",
                    "distances": [{"id": "bond", "text": "просадка RGBI −1,2% от максимума"}],
                    **({"gate": gate} if gate else {})},
         "verdict": {"cell_code": cell, "cell_label": "токсичная",
-                    "core_label": "умеренный лонг",
+                    "core_label": "умеренно за акции",
                     "cell_stats": {"mean_fwd1m_pct": -0.55, "hit": 0.4, "n": 12},
                     **({"position": position_block(position)} if position else {})},
         "monitors": monitors if monitors is not None else [tile_cb()],
@@ -623,6 +623,33 @@ class TestDepositAnchor(AlertsCase):
         got = [e for e in evs if e["kind"] == "deposit_uptick"]
         self.assertTrue(got, "рост от дна потерялся за старым пиком")
         self.assertIn("15,00", got[0]["text"])
+
+    def uptick_text(self, spread):
+        def tile(pct):
+            return [{"id": "deposit_spread", "status": "ok", "asof": ASOF,
+                     "headline": "ставка", "payload": {"deposit_pct": pct,
+                                                       "deposit_asof": ASOF,
+                                                       "spread_pp": spread}}]
+        # Первый прогон после затравки только запоминает якорь ставки, событие даёт второй.
+        self.seed(payload(monitors=tile(12.88)))
+        self.alerts.run(payload(monitors=tile(12.88)), dry_run=False, now=NOW)
+        evs = self.alerts.run(payload(monitors=tile(12.95)), dry_run=False,
+                              now=NOW + timedelta(days=1))
+        got = [e for e in evs if e["kind"] == "deposit_uptick"]
+        self.assertTrue(got)
+        return got[0]["text"]
+
+    def test_вклад_выше_дивидендов_называется_больше(self):
+        # spread_pp = дивдоходность − вклад. Живой случай 14.09.2026: вклад 12,95%,
+        # дивиденды 8,5%, спред −4,4 — вклад платит БОЛЬШЕ. Мутация: вернуть условие
+        # «больше при spread > 0» — и событие снова скажет обратное правде.
+        text = self.uptick_text(-4.43)
+        self.assertIn("больше дивидендной доходности", text)
+        self.assertNotIn("меньше дивидендной доходности", text)
+
+    def test_дивиденды_выше_вклада_называются_меньше(self):
+        text = self.uptick_text(1.2)
+        self.assertIn("меньше дивидендной доходности", text)
 
 
 class TestOrfrBackdate(AlertsCase):

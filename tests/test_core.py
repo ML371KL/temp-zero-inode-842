@@ -79,7 +79,7 @@ class TestComposite(CoreCase):
         # мутация: окно z 36 вместо 60 -> уедет СКО, а с ним и z.
         self.assertAlmostEqual(self.out["value"], round(Q / 3.0, 3), places=6)
         self.assertEqual(self.out["value"], 0.331)
-        self.assertEqual(self.out["label"], "умеренный лонг")
+        self.assertEqual(self.out["label"], "умеренно за акции")
         self.assertEqual(self.out["sign"], 1)
         self.assertFalse(self.out["degraded"])
         self.assertEqual(self.out["n_components"], 3)
@@ -135,7 +135,7 @@ class TestComponentDropout(CoreCase):
         # Те же две ноги, что и в TestComposite, но делитель стал 2: вклады
         # +q и −q гасятся ровно в ноль.
         # мутация: делить всегда на len(CORE_COMPONENTS) -> получится q/3 и
-        # композит будет уверенно врать про «умеренный лонг» на нулевом сигнале.
+        # композит будет уверенно врать про «умеренно за акции» на нулевом сигнале.
         self.assertEqual(self.out["value"], 0.0)
         self.assertEqual(self.out["n_components"], 2)
         self.assertEqual(self.out["n_expected"], 3)
@@ -168,7 +168,7 @@ class TestZClip(CoreCase):
         # 59 нулей и выброс: сырой z = 7,62. Обрезка ±3 (constants.Z_CLIP) —
         # часть контракта ядра.
         # мутация: снять обрезку -> один выброс месяца утащит композит на 7,6,
-        # то есть на порядок за пределы шкалы «сильный лонг».
+        # то есть на порядок за пределы шкалы «сильно за акции».
         spike = [0.0] * (MONTHS - 1) + [1000.0]
         out = self.core.compute_core(panel_of(
             usd_mom63=spike,
@@ -177,7 +177,7 @@ class TestZClip(CoreCase):
         ), with_health=False)
         self.assertEqual(out["value"], self.constants.Z_CLIP)
         self.assertEqual(self.by_id(out)["usd_mom63"]["z"], self.constants.Z_CLIP)
-        self.assertEqual(out["label"], "сильный лонг")
+        self.assertEqual(out["label"], "сильно за акции")
 
     def test_clip_is_symmetric(self):
         spike = [0.0] * (MONTHS - 1) + [-1000.0]
@@ -227,12 +227,12 @@ class TestLabels(CoreCase):
         # Границы шкалы из constants.CORE_LABELS: интервалы полуоткрытые [lo, hi).
         self.assertEqual(self.core.core_label(0.0), "нейтрально")
         self.assertEqual(self.core.core_label(0.29), "нейтрально")
-        self.assertEqual(self.core.core_label(0.3), "умеренный лонг")
-        self.assertEqual(self.core.core_label(1.0), "сильный лонг")
+        self.assertEqual(self.core.core_label(0.3), "умеренно за акции")
+        self.assertEqual(self.core.core_label(1.0), "сильно за акции")
         self.assertEqual(self.core.core_label(-0.3), "нейтрально")
-        self.assertEqual(self.core.core_label(-0.31), "умеренный шорт")
-        self.assertEqual(self.core.core_label(-1.0), "умеренный шорт")
-        self.assertEqual(self.core.core_label(-1.01), "сильный шорт")
+        self.assertEqual(self.core.core_label(-0.31), "умеренно за деньги")
+        self.assertEqual(self.core.core_label(-1.0), "умеренно за деньги")
+        self.assertEqual(self.core.core_label(-1.01), "сильно за деньги")
         self.assertEqual(self.core.core_label(None), "нет данных")
 
 
@@ -333,13 +333,25 @@ class TestHealthReviewStreak(unittest.TestCase):
         self.assertEqual(st(-0.3, 24, 12), "review")
         self.assertEqual(st(-0.3, 24, 0), "warn")
         self.assertEqual(st(0.02, 24, 0), "warn")
-        self.assertEqual(st(0.05, 24, 0), "ok")
         self.assertEqual(st(None, 24, 30), "warn")
         self.assertEqual(st(-0.3, 5, 30), "warn", "окно не набралось — судить не о чем")
 
+    def test_ok_только_когда_интервал_выше_нуля(self):
+        # При n=24 интервал ±1,96/√23 ≈ ±0,41: «связь различима» начинается около +0,41.
+        # Живой случай 01.10.2026: IC +0,076 [−0,33; +0,49] горел «ok — связь видна».
+        # мутация: вернуть порог IC ≥ 0,05 -> первые две проверки станут ok.
+        st = self.health._status
+        self.assertEqual(st(0.05, 24, 0), "warn")
+        self.assertEqual(st(0.076, 24, 0), "warn")
+        self.assertEqual(st(0.40, 24, 0), "warn")
+        self.assertEqual(st(0.42, 24, 0), "ok")
+        self.assertEqual(st(0.25, 120, 0), "ok", "на длинном окне интервал уже")
+
     def test_подпись_статуса_словами(self):
         txt = self.health.status_text
-        self.assertEqual(txt("ok"), "связь видна")
+        self.assertEqual(txt("ok"), "связь различима: интервал выше нуля")
+        self.assertIn("неотличимо от нуля", txt("warn", 0.076, 24, covers_zero=True))
+        self.assertNotIn("видна", txt("warn", 0.076, 24, covers_zero=True))
         self.assertIn("не видно", txt("warn", -0.08, 24, covers_zero=True))
         self.assertIn("накрывает ноль", txt("warn", -0.08, 24, covers_zero=True))
         self.assertNotIn("накрывает ноль", txt("warn", -0.55, 24, covers_zero=False))

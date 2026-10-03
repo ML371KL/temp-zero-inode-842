@@ -34,13 +34,16 @@ from datetime import date, timedelta
 
 try:
     from ..lib import calc, constants, dates as datelib
+    from ..lib.wording import plural
 except ImportError:
     from lib import calc, constants, dates as datelib
+    from lib.wording import plural
 
 try:
-    from . import states as states_mod
+    from . import states as states_mod, track
 except ImportError:
     import states as states_mod
+    import track
 
 __all__ = ["compute_decision", "daily_composite", "run_automaton", "decision_days",
            "comp_state_series", "next_decision_day", "last_day_decides",
@@ -61,10 +64,11 @@ REASON_TEXT = {
     "gate_open": "ворота открылись",
     "comp_pos": "оценка рынка поднялась выше +0,2 в день решения",
     "entry": "все условия выполнены: ворота открыты, оценка рынка в плюсе",
-    "es_exit": "цена ожиданий по ставке резко выросла (доходность годовых ОФЗ оторвалась "
-               "от ключевой)",
-    "es_block": "ждём, пока цена ожиданий по ставке успокоится",
-    "es_clear": "цена ожиданий по ставке успокоилась (день решения)",
+    # Тень: бит репрайсинга с 03.10.2026 меряет рост годовой доходности ОФЗ, а не
+    # спред к ключу (shadow._sig_repricing) — и причина называет именно это.
+    "es_exit": "доходность годовых ОФЗ резко выросла (больше +0,25 п.п. за 21 день)",
+    "es_block": "ждём, пока доходность годовых ОФЗ успокоится",
+    "es_clear": "доходность годовых ОФЗ успокоилась (день решения)",
 }
 # Что именно изменилось во флагах ворот в день смены позиции: (флаг, было, стало).
 _FLAG_MOVES = {
@@ -356,7 +360,166 @@ def _run_start(series, dates, j):
     return dates[k]
 
 
-def _conditions(state, hyst, gate_open_now, comp_state, comp_now, cols, dates):
+# Два сценария «спокойной торговли» для оценки, когда снимется флаг волы: индекс стоит
+# на месте (самый быстрый путь) и ходит по ±1% в день (граница, которую обычно зовут
+# спокойным днём). Ответ — коридор между ними, а не обещание.
+CALM_STEP = 0.01
+VOL_WINDOW = 21
+
+
+def _ann_vol(rets):
+    m = sum(rets) / len(rets)
+    return math.sqrt(sum((r - m) ** 2 for r in rets) / (len(rets) - 1)) * math.sqrt(252)
+
+
+def vol_calm_days(ret1, q60, step=CALM_STEP, window=VOL_WINDOW, horizon=VOL_WINDOW):
+    """Сколько спокойных дней подряд нужно, чтобы 21-дневная вола ушла ниже p60.
+
+    Спокойный день — ход ровно ±step со сменой знака каждый день; из двух порядков
+    знаков берётся худший (step=0 — индекс стоит на месте). Порог p60 считается
+    неизменным: его окно — 756 дней, за месяц он почти не двигается. Флаг держат прежде
+    всего большие дни внутри окна, поэтому ответ — это вопрос о том, когда они из него
+    выпадут (аудит 03.10.2026, рекомендация 11).
+
+    -> (дней | None, статус): "ok"; "beyond" — за horizon дней не снимется (нужны дни
+    ещё тише, и честнее сказать это, чем назвать срок); "no_data" — считать не по чему.
+    """
+    tail = list(ret1[-window:]) if ret1 else []
+    if len(tail) < window or not all(calc.is_num(r) for r in tail) or not calc.is_num(q60):
+        return None, "no_data"
+    worst = 0
+    for first in (step, -step):
+        buf, found = tail, None
+        for k in range(1, horizon + 1):
+            buf = buf[1:] + [first if k % 2 else -first]
+            if _ann_vol(buf) < q60:
+                found = k
+                break
+        if found is None:
+            return None, "beyond"
+        worst = max(worst, found)
+    return worst, "ok"
+
+
+def _z_with(prev, x):
+    """z значения x в окне prev + [x] — ровно как daily_composite (ddof=1)."""
+    nn = len(prev) + 1
+    mean = (sum(prev) + x) / nn
+    var = (sum((p - mean) ** 2 for p in prev) + (x - mean) ** 2) / (nn - 1)
+    return (x - mean) / math.sqrt(var) if var > 0 else None
+
+
+def comp_leg_moves(panel, mf, target):
+    """Сдвиг ОДНОЙ ноги ядра, при котором дневной композит последнего дня равен target.
+
+    Остальные ноги стоят на месте, окна закрытых месяцев те же, что у daily_composite.
+    -> [{"id", "delta"}]: delta — в единицах ноги (лог-ход курса за 63 дня, п.п. наклона,
+    лог-гэп бочки); None — одной этой ногой не достать (нужен z за обрезкой ±3).
+    Это «при прочих равных», а не прогноз: ноги двигаются вместе.
+    """
+    dates = panel.get("dates") or []
+    cols = panel.get("cols") or {}
+    if not dates or not calc.is_num(target):
+        return []
+    t = len(dates) - 1
+    month = calc.month_key(dates[t])
+    m = {calc.month_key(lab): i for i, lab in enumerate(mf.get("dates") or [])}.get(month)
+    if m is None:
+        return []
+    win, zmin, clip = constants.Z_WINDOW_MONTHS, constants.Z_MIN_MONTHS, constants.Z_CLIP
+    legs = []
+    for comp in constants.CORE_COMPONENTS:
+        cid, sgn = comp["id"], comp["sign"]
+        raw = (mf.get("raw") or {}).get(cid) or []
+        prev = [v for v in raw[max(0, m - (win - 1)):m] if calc.is_num(v)]
+        vals = cols.get(cid) or []
+        cur = None
+        for k in range(min(t, len(vals) - 1), -1, -1):
+            if calc.month_key(dates[k]) != month:
+                break
+            if calc.is_num(vals[k]):
+                cur = vals[k]
+                break
+        z = _z_with(prev, cur) if cur is not None and len(prev) + 1 >= zmin else None
+        if z is not None:
+            legs.append((cid, sgn, prev, cur, sgn * max(-clip, min(clip, z))))
+    out = []
+    total = sum(leg[4] for leg in legs)
+    for cid, sgn, prev, cur, own in legs:
+        z_need = (target * len(legs) - (total - own)) / sgn
+        delta = None
+        if abs(z_need) < clip:
+            sd = math.sqrt(sum((p - sum(prev) / len(prev)) ** 2 for p in prev) / (len(prev) - 1))
+            lo, hi = cur - 50 * sd, cur + 50 * sd
+            if _z_with(prev, lo) < z_need < _z_with(prev, hi):
+                for _ in range(200):
+                    mid = (lo + hi) / 2
+                    if _z_with(prev, mid) < z_need:
+                        lo = mid
+                    else:
+                        hi = mid
+                delta = (lo + hi) / 2 - cur
+        out.append({"id": cid, "delta": delta})
+    return out
+
+
+def _leg_text(cid, delta):
+    """Сдвиг ноги словами читателя (без слов «нога», «z», «композит»)."""
+    if delta is None:
+        return None
+    if cid == "usd_mom63":
+        f = (math.exp(delta) - 1) * 100
+        return f"доллар {'дороже' if f > 0 else 'дешевле'} сегодняшнего на {_n(abs(f), 0, False)}%"
+    if cid == "slope_10_2":
+        return (f"кривая ОФЗ {'круче' if delta > 0 else 'положе'} на "
+                f"{_n(abs(delta), 1, False)} п.п. (10 лет минус 2 года)")
+    if cid == "urals_rub_gap":
+        f = (math.exp(delta) - 1) * 100
+        return f"рублёвая бочка {'выше' if f > 0 else 'ниже'} своего тренда ещё на {_n(abs(f), 0, False)}%"
+    return None
+
+
+def switch_distance(panel, mf, state, comp_state, flags):
+    """Сколько не хватает до смены позиции — то, что может сдвинуть её ближайшим.
+
+    vol_calm_days_min / _max — через сколько торговых дней снимется флаг волы, если
+    индекс будет стоять на месте / ходить по ±1% в день (только когда флаг стоит и
+    позиция «деньги»; vol_calm_status — ok | slow_beyond | beyond | no_data);
+    comp_target и legs — порог оценки рынка, который сейчас решает (вход выше +0,2 у
+    «денег» без знака «за акции», выход ниже −0,2 у «акций»), и сдвиг каждой ноги,
+    которого хватило бы одного. Аудит 03.10.2026, рекомендация 11.
+    """
+    cols = panel.get("cols") or {}
+    thr = constants.DECISION["comp_threshold"]
+    out = {"calm_step_pct": CALM_STEP * 100, "vol_calm_days_min": None,
+           "vol_calm_days_max": None, "vol_calm_status": None,
+           "comp_target": None, "legs": []}
+    if state == FLAT and flags.get("vol") == 1:
+        q60 = calc.last_valid(cols.get("vol_thresh60") or [])[1]
+        ret1 = cols.get("ret1") or []
+        fast, st_fast = vol_calm_days(ret1, q60, step=0.0)
+        slow, st_slow = vol_calm_days(ret1, q60, step=CALM_STEP)
+        out["vol_calm_days_min"], out["vol_calm_days_max"] = fast, slow
+        out["vol_calm_status"] = (st_fast if st_fast != "ok"
+                                  else ("ok" if st_slow == "ok" else "slow_beyond"))
+    target = None
+    if state == LONG:
+        target = -thr
+    elif comp_state != 1:
+        target = thr
+    if target is not None:
+        out["comp_target"] = target
+        labels = {c["id"]: c.get("label") for c in constants.CORE_COMPONENTS}
+        for leg in comp_leg_moves(panel, mf, target):
+            leg["label"] = labels.get(leg["id"])
+            leg["text"] = _leg_text(leg["id"], leg["delta"])
+            if leg["delta"] is not None:
+                leg["delta"] = round(leg["delta"], 4)
+            out["legs"].append(leg)
+    return out
+
+
+def _conditions(state, hyst, gate_open_now, comp_state, comp_now, cols, dates, dist=None):
     """Что должно случиться, чтобы позиция сменилась — по одной строке на условие."""
     out = []
     thr = constants.DECISION["comp_threshold"]
@@ -373,9 +536,12 @@ def _conditions(state, hyst, gate_open_now, comp_state, comp_now, cols, dates):
             cur = f" (сейчас {_n(ratio * 100, 1)}%)" if calc.is_num(ratio) else ""
             rows.append(f"рынок: индекс выше 200-дневной средней на {_n(band, 0, False)}%{cur}")
         if flags["vol"] == 1:
-            cur = (f" (сейчас {_n(rv * 100, 1, False)}% против {_n(q60 * 100, 1, False)}%)"
+            cur = (f"сейчас {_n(rv * 100, 1, False)}% против {_n(q60 * 100, 1, False)}%"
                    if calc.is_num(rv) and calc.is_num(q60) else "")
-            rows.append(f"волатильность: ниже 60-го перцентиля за 3 года{cur}")
+            eta = _calm_text(dist)
+            inner = "; ".join(x for x in (cur, eta) if x)
+            rows.append(f"волатильность: ниже 60-го перцентиля за 3 года"
+                        + (f" ({inner})" if inner else ""))
         if flags["bond"] == 1:
             cur = (f" (сейчас {_n((math.exp(dd) - 1) * 100, 1)}%)" if calc.is_num(dd) else "")
             rows.append(f"ОФЗ: просадка RGBI мельче −3%{cur}")
@@ -391,6 +557,9 @@ def _conditions(state, hyst, gate_open_now, comp_state, comp_now, cols, dates):
                 out.append("ворота откроются, когда по всем трём флагам появятся данные")
         if comp_state != 1:
             out.append(f"оценка рынка выше +{_n(thr, 1, False)} в день решения ({now})")
+            legs = _legs_line(dist, "до входа по оценке рынка")
+            if legs:
+                out.append(legs)
         if gate_open_now and comp_state == 1:
             out.append("условия входа выполнены — позиция сменится на следующем расчёте")
     else:
@@ -405,11 +574,43 @@ def _conditions(state, hyst, gate_open_now, comp_state, comp_now, cols, dates):
                     + (f"; не хватает: {'; '.join(missing)}" if missing else ""))
         out.append("любой из: " + gate_txt
                    + f"; оценка рынка ниже −{_n(thr, 1, False)} в день решения ({now})")
+        legs = _legs_line(dist, "до выхода по оценке рынка")
+        if legs:
+            out.append(legs)
     return out
 
 
+def _days(n):
+    return f"{n} {plural(n, 'торговый день', 'торговых дня', 'торговых дней')}"
+
+
+def _calm_text(dist):
+    d = dist or {}
+    status, lo, hi = d.get("vol_calm_status"), d.get("vol_calm_days_min"), d.get("vol_calm_days_max")
+    if status == "beyond":
+        return "даже если индекс замрёт, за месяц не снимется"
+    if status == "slow_beyond" and lo:
+        return (f"снимется через {_days(lo)}, если индекс будет стоять на месте; при ходах "
+                f"по 1% в день — не раньше чем через месяц")
+    if status != "ok" or not lo or not hi:
+        return ""
+    if lo == hi:
+        return f"при ходах индекса до 1% в день снимется через {_days(lo)}"
+    word = plural(hi, "торговый день", "торговых дня", "торговых дней")
+    return (f"снимется через {lo}–{hi} {word}: {lo} — если индекс будет стоять на месте, "
+            f"{hi} — если ходить по 1% в день")
+
+
+def _legs_line(dist, head):
+    texts = [leg.get("text") for leg in (dist or {}).get("legs") or [] if leg.get("text")]
+    if not texts:
+        return None
+    return (f"{head} при прочих равных хватило бы одного из: " + "; ".join(texts)
+            + " — это ориентир, а не прогноз: показатели двигаются вместе")
+
+
 def _position_block(dates, cols, states, hyst, gate_open, comp_live, comp_state,
-                    is_dec, pos, reasons):
+                    is_dec, pos, reasons, dist=None):
     n = len(dates)
     last = n - 1
     state = LONG if pos[last] else FLAT
@@ -451,10 +652,13 @@ def _position_block(dates, cols, states, hyst, gate_open, comp_live, comp_state,
         "cash_rate": round(dep, 2) if calc.is_num(dep) else None,
         "cash_rate_asof": dates[dep_j] if dep_j is not None else None,
         "conditions": _conditions(state, hyst, gate_open[last], comp_state[last],
-                                  comp_now, cols, dates),
+                                  comp_now, cols, dates, dist),
+        "switch_distance": dist,
         "history": _rle(dates, pos),
         "switches_per_year": round(switches / 5.0, 1),
         "start": START,
+        # Что правило дало в деньгах с заморозки и за 12/24 месяца (compute/track.py).
+        "journal": track.journal(dates, pos, reasons, cols.get("mcftr"), cols.get("deposit")),
     }
 
 
@@ -502,9 +706,12 @@ def compute_decision(panel, mf, states=None):
                                     constants.CORE_FLIP_HYSTERESIS)
     pos0, reasons0 = run_automaton(dates, gate_raw, comp_state0, always)
 
+    last = n - 1
+    dist = switch_distance(panel, mf, LONG if pos[last] else FLAT, comp_state[last],
+                           {k: hyst[k][last] for k in ("trend", "vol", "bond")})
     return {
         "position": _position_block(dates, cols, states, hyst, gate_open, comp_live,
-                                    comp_state, is_dec, pos, reasons),
+                                    comp_state, is_dec, pos, reasons, dist),
         "position_prev_rule": _prev_rule_block(dates, pos0, reasons0),
         "daily": {
             "dates": dates, "comp_live": comp_live, "comp_state": comp_state,

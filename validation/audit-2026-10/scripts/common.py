@@ -57,7 +57,9 @@ _CBR = _work_json("usd_cbr_full.json")     # официальный курс Ц�
 _RECS = sorted(_CBR)
 USD_SPLICE_K = P.USD_SPLICE_K
 # Продовый стор затравлен официальным курсом исследования, который начинался в 2013
-# году (validation/audit-2026-09/scripts/long_panel.py: «official (2013+)»).
+# году (validation/audit-2026-09/scripts/long_panel.py: «official (2013+)»). После правки
+# 03.10.2026 прод сам дотягивает курс с 1997 года, и вариант 'prod' ниже — это прод ДО
+# правки, а 'clean' — после.
 PROD_OFFICIAL_FROM = "2013-01-01"
 
 

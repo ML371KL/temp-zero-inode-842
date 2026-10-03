@@ -293,8 +293,8 @@
     gate_close: 'ворота закрылись', comp_neg: 'наклон ниже порога в день решения',
     gate_open: 'ворота открылись', comp_pos: 'наклон выше порога в день решения',
     entry: 'вход: ворота открыты и наклон за акции',
-    es_exit: 'цена ожиданий по ставке резко выросла', es_block: 'ждём, пока цена ожиданий по ставке успокоится',
-    es_clear: 'цена ожиданий по ставке успокоилась (день решения)'
+    es_exit: 'доходность годовых ОФЗ резко выросла', es_block: 'ждём, пока доходность годовых ОФЗ успокоится',
+    es_clear: 'доходность годовых ОФЗ успокоилась (день решения)'
   };
   var COMP_STATE_WORD = { '1': '+ (за акции)', '-1': '− (за деньги)', '0': 'не определён' };
   var WEEKDAY = ['воскресенье', 'понедельник', 'вторник', 'среда', 'четверг', 'пятница', 'суббота'];
@@ -391,6 +391,57 @@
     var why = reason ? (since ? ' · ' : '') + ruText(reason) : '';
     var now = holds ? ((since || why) ? ' · ' : '') + holds : '';
 
+    /* Журнал правила (compute/track.py, аудит 03.10.2026): что позиция дала в деньгах
+       против удержания индекса полной доходности и вкладов. Здоровье ядра меряет
+       связь композита со следующим месяцем, а не деньги, и на 24 месяцах почти всегда
+       неотличимо от нуля; на вопрос «работает ли правило» отвечает этот блок. Окно «с
+       заморозки» первое: всё, что раньше, — бэктест на той же истории, по которой
+       правило выбирали. Годовой темп — только у окон от года. */
+    var jr = p.journal && Array.isArray(p.journal.windows) && p.journal.windows.length ? p.journal : null;
+    var journal = null;
+    if (jr) {
+      var jrRow = function (w) {
+        var ann = w.id !== 'since_freeze' && isNum(w.rule_ann_pct);
+        var rule = ann ? w.rule_ann_pct : w.rule_pct, cash = ann ? w.cash_ann_pct : w.cash_pct;
+        var tr = ann ? w.tr_ann_pct : w.tr_pct;
+        var over = isNum(rule) && isNum(cash) ? rule - cash : null;
+        var label = w.id === 'since_freeze' ? 'с ' + fmtDay(jr.freeze)
+          : ({ m12: '12 мес.', m24: '24 мес.' }[w.id] || w.label || w.id) + (ann ? ', годовых' : '');
+        return h('tr', null, [
+          h('th', { scope: 'row', text: label }),
+          h('td', { 'class': toneOf(rule), text: isNum(rule) ? fmtNum(rule, 1, true) + '%' : '—' }),
+          h('td', { text: isNum(tr) ? fmtNum(tr, 1, true) + '%' : '—' }),
+          h('td', { text: isNum(cash) ? fmtNum(cash, 1, true) + '%' : '—' }),
+          h('td', { 'class': toneOf(over), text: isNum(over) ? fmtNum(over, 1, true) : '—' })
+        ]);
+      };
+      var trades = Array.isArray(jr.trades) ? jr.trades : [];
+      var tradeText = trades.length
+        ? 'Сделки с ' + fmtDay(jr.freeze) + ': ' + trades.map(function (t) {
+            return 'решено «' + (POSITION_WORD[t.to] || t.to) + '» ' + fmtDay(t.decided) +
+              (t.executed ? ', исполнено ' + fmtDay(t.executed) : ', исполнение на следующем закрытии') +
+              (REASON_WORD[t.reason] ? ' (' + REASON_WORD[t.reason] + ')' : '');
+          }).join('; ') + '.'
+        : 'Сделок с ' + fmtDay(jr.freeze) + ' не было.';
+      journal = h('div', { 'class': 'position__journal' }, [
+        h('div', { 'class': 'stat__k', text: 'Журнал правила: позиция в деньгах' }),
+        h('div', { 'class': 'tablewrap' }, [
+          h('table', { 'class': 'data' }, [
+            h('caption', { text: (jr.basis ? ruText(jr.basis) + '; ' : '') + 'разница — правило минус вклады, в процентных пунктах. ' +
+              'Строка «с ' + fmtDay(jr.freeze) + '» — за всё время с заморозки правила; раньше — бэктест на той же ' +
+              'истории, по которой правило выбирали, честный счёт идёт с этой даты.' }),
+            h('thead', null, [h('tr', null, [
+              h('th', { scope: 'col', text: 'Окно' }), h('th', { scope: 'col', text: 'Правило' }),
+              h('th', { scope: 'col', text: 'Индекс' }), h('th', { scope: 'col', text: 'Вклады' }),
+              h('th', { scope: 'col', text: 'Разница' })
+            ])]),
+            h('tbody', null, jr.windows.map(jrRow))
+          ])
+        ]),
+        h('p', { 'class': 'position__note', text: tradeText })
+      ]);
+    }
+
     return h('div', { 'class': 'position position--' + p.state }, [
       h('div', { 'class': 'kicker', text: 'Позиция · итог ворот и наклона' }),
       h('div', { 'class': 'position__row' }, [
@@ -408,6 +459,7 @@
           h('ul', { 'class': 'position__cond' }, conds.map(function (c) { return h('li', { text: ruText(c) }); }))
         ]) : null
       ]),
+      journal,
       Array.isArray(p.history) && p.history.length ? h('div', { 'class': 'position__ribbon' }, [
         h('div', { 'class': 'stat__k', text: 'Акции и деньги с 2004 года' }),
         C.positionRibbon(p.history, { end: p.decision_day || d.asof_trading_day, aria: 'Позиция по правилу панели с 2004 года' }),
@@ -511,7 +563,7 @@
           stat('Среднее', pct2(rp.mean_pct), 'среднее тянут хвосты', toneOf(rp.mean_pct)),
           stat('Доля плюсовых', share(rp.hit), 'из ' + (isNum(rp.n) ? rp.n : '—') + ' закрытых месяцев')
         ]) : null,
-        rx ? h('div', { 'class': 'stat__k', style: 'margin:14px 0 8px', text: 'Над деньгами · за вычетом ставки вкладов' }) : null,
+        rx ? h('div', { 'class': 'stat__k', style: 'margin:14px 0 8px', text: 'Над деньгами · индекс полной доходности минус ставка вкладов' }) : null,
         rx ? h('div', { 'class': 'stats' }, [
           stat('Медиана', pct2(rx.median_pct), 'в этой мере принимается решение', toneOf(rx.median_pct)),
           stat('Среднее', pct2(rx.mean_pct), null, toneOf(rx.mean_pct)),
@@ -679,14 +731,19 @@
     ]);
 
     var hl = core.health || {};
-    /* Статусы после аудита 02.09.2026: ok — связь видна; warn — связи на этом окне
-       не видно (и это НЕ «модель сломана»: при окне 24 месяца интервал ±0,41, а
-       слом быстрее ~5 лет статистически не обнаруживается); review — двенадцать
-       закрытых месяцев подряд ниже нуля, плановая ревалидация состава. Старые
-       витрины присылают dead — читаем его как warn. */
-    var hlWord = { ok: 'связь видна', warn: 'связи не видно', review: 'ревалидация', dead: 'связи не видно' };
+    /* Статусы: ok — весь 95% интервал выше нуля, связь различима (с 03.10.2026; до
+       того хватало IC ≥ 0,05, и карточка горела «связь видна» при IC +0,08 с
+       интервалом от −0,33 до +0,49); warn — на этом окне неотличимо от нуля (при
+       плюсе — нейтрально, при минусе — «связи не видно»; и то и другое НЕ «модель
+       сломана»: при окне 24 месяца интервал ±0,41, а слом быстрее ~5 лет
+       статистически не обнаруживается); review — двенадцать закрытых месяцев
+       подряд ниже нуля, плановая ревалидация состава. Старые витрины присылают
+       dead — читаем его как warn. */
+    var hlNeg = isNum(hl.ic_24m) && hl.ic_24m < 0;
+    var hlWord = { ok: 'связь различима', warn: hlNeg ? 'связи не видно' : 'неотличимо от нуля',
+                   review: 'ревалидация', dead: 'связи не видно' };
     var hlStatus = hlWord[hl.status] || 'нет данных';
-    var hlKind = { ok: 'good', warn: 'warn', review: 'crit', dead: 'warn' }[hl.status] || 'flat';
+    var hlKind = { ok: 'good', warn: hlNeg ? 'warn' : 'flat', review: 'crit', dead: 'warn' }[hl.status] || 'flat';
     var hlIco = ico(hlKind);
     hlIco.setAttribute('class', 'sig__ico');
     hlIco.style.color = QUALITY_COLOR[hlKind];
@@ -697,14 +754,20 @@
       hlFoot = 'IC ниже нуля ' + (hl.below_zero_months || 0) + ' мес подряд — порог плановой ревалидации состава (' +
         reviewMonths + ' месяцев, §7) достигнут. Протокол — реколибровка, а не сокращение позиции: на истории такие тревоги ' +
         'были контрарными (после них умение модели и избыток над деньгами выше среднего).';
+    } else if ((hl.status === 'warn' || hl.status === 'dead') && !hlNeg) {
+      hlFoot = 'IC выше нуля, но интервал его накрывает: на 24 месяцах различима только связь сильнее ' +
+        'примерно ±0,4, а так бывает редко (IC-24 внутри ±0,4 в девяти месяцах истории из десяти). ' +
+        'Это не тревога, а честное «на этом окне информации мало». Ревалидация состава — после ' +
+        reviewMonths + ' месяцев подряд ниже нуля (сейчас ' + (hl.below_zero_months || 0) + ').';
     } else if (hl.status === 'warn' || hl.status === 'dead') {
-      hlFoot = (isNum(hl.ic_24m) && hl.ic_24m < 0 ? 'IC ниже нуля' : 'IC около нуля') +
+      hlFoot = 'IC ниже нуля' +
         (coversZero ? ', и доверительный интервал накрывает ноль: на 24 месяцах отличить модель от монетки нечем. ' : '. ') +
         '«Связи не видно» — не «модель сломана»: слом быстрее пяти лет статистически не обнаруживается. ' +
         'Ревалидация состава — после ' + reviewMonths + ' месяцев подряд ниже нуля (сейчас ' + (hl.below_zero_months || 0) + '); ' +
         'до этого состав не меняется.';
     } else {
-      hlFoot = 'Состав ядра фиксирован: отбор по скользящей результативности проверялся на истории и проиграл.';
+      hlFoot = 'Интервал целиком выше нуля: связь различима даже на коротком окне. Состав ядра фиксирован: ' +
+        'отбор по скользящей результативности проверялся на истории и проиграл.';
     }
 
     var health = h('article', { 'class': 'card' }, [
@@ -908,24 +971,29 @@
     switch (m.id) {
       case 'expectations':
         // Крупно — спред годовой ОФЗ к ключу: это и есть «сколько смягчения в
-        // цене». Рядом три числа того же тайла: изменение спреда за 21 день
-        // (рост больше +0,25 п.п. — детектор турбулентности, живёт в тени),
-        // RUSFAR 3M − ключ и полгода ОФЗ − ключ. Уровень направление не
-        // предсказывает — тир B, не решение.
+        // цене». Рядом три числа того же тайла: изменение спреда за 21 день С
+        // РАЗЛОЖЕНИЕМ на шаг ключа и сам год ОФЗ (снижение ставки, уже заложенное
+        // рынком, двигает спред при неподвижной кривой — аудит 03.10.2026, §2.4),
+        // RUSFAR 3M − ключ и полгода ОФЗ − ключ (оценка короткого конца по паре
+        // бумаг). Детектор турбулентности — рост самого года ОФЗ, живёт в тени.
+        // Уровень направление не предсказывает — тир B, не решение.
         var y1k = isNum(p.spread_y1_key_pp) ? p.spread_y1_key_pp : p.y1_minus_key;
         var d21 = isNum(p.chg_21d_pp) ? p.chg_21d_pp : p.d21;
+        var kc = p.key_chg_21d_pp, y1c = p.y1_chg_21d_pp;
+        var split = (isNum(kc) && Math.abs(kc) > 1e-9 && isNum(y1c))
+          ? ' (шаг ключа ' + fmtNum(kc, 2, true) + ', год ОФЗ ' + fmtNum(y1c, 2, true) + ')' : '';
         var rk = isNum(p.spread_rusfar_key_pp) ? p.spread_rusfar_key_pp : p.rusfar_minus_key;
         var y05k = isNum(p.spread_y05_key_pp) ? p.spread_y05_key_pp : p.y05_minus_key;
         var y1v = isNum(p.y1_pct) ? p.y1_pct : p.y1, keyv = isNum(p.key_rate_pct) ? p.key_rate_pct : p.key_rate;
         out.push(num(y1k, 2, ' п.п.', true));
         out.push(h('div', { 'class': 'tile__sub', text: 'год ОФЗ минус ключ' +
           ((isNum(y1v) && isNum(keyv)) ? ' (' + fmtNum(y1v, 2, false) + '% против ' + fmtNum(keyv, 2, false) + '%)' : '') +
-          (isNum(d21) ? '; за 21 день ' + fmtNum(d21, 2, true) + ' п.п.' : '') +
-          (p.repricing === true ? ' — рост больше порога, репрайсинг ожиданий (тень)' : '') }));
+          (isNum(d21) ? '; за 21 день ' + fmtNum(d21, 2, true) + ' п.п.' + split : '') +
+          (p.repricing === true ? ' — год ОФЗ вырос больше порога, репрайсинг ожиданий (тень)' : '') }));
         if (isNum(rk) || isNum(y05k)) {
           out.push(h('div', { 'class': 'tile__sub', text: [
             isNum(rk) ? 'RUSFAR 3M − ключ ' + fmtNum(rk, 2, true) + ' п.п.' : null,
-            isNum(y05k) ? 'полгода ОФЗ − ключ ' + fmtNum(y05k, 2, true) + ' п.п.' : null
+            isNum(y05k) ? 'полгода ОФЗ − ключ ' + fmtNum(y05k, 2, true) + ' п.п. (оценка по паре бумаг)' : null
           ].filter(Boolean).join(' · ') }));
         }
         if (p.series) out.push(C.miniSeries(p.series, { digits: 2, zero: true, label: 'год − ключ', unit: ' п.п.', color: tok('--s2') }));
