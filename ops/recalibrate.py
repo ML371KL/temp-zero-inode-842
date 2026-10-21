@@ -401,7 +401,7 @@ def section_rule(panel, daily, out):
     asof = main[-1][0]
     windows = (("с 2010", OOS_START), ("24 месяца", track.months_back(asof, 24)),
                ("12 месяцев", track.months_back(asof, 12)),
-               ("с заморозки " + track.FREEZE, track.FREEZE))
+               ("с редакции " + track.RULE_SINCE, track.RULE_SINCE))
     out.append(f"Мера: {track.BASIS}. Окно (начало; {asof}].")
     out.append("")
     out.append("| окно | вариант | итог | годовых | вклады, годовых | над вкладами | "
@@ -434,8 +434,8 @@ def section_rule(panel, daily, out):
                    "акций и наоборот): " + "; ".join(lines) + ". Интервал, накрывающий 50%, "
                    "значит: на этом окне выбор неотличим от монетки.")
         out.append("")
-    out.append("Числа до заморозки — бэктест на той же истории, по которой правило "
-               "выбирали; честный счёт идёт с " + track.FREEZE + ".")
+    out.append("Числа до этой даты — бэктест на той же истории, по которой правило "
+               "выбирали; честный счёт действующей редакции идёт с " + track.RULE_SINCE + ".")
     out.append("")
     return main
 

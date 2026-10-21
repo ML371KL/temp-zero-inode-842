@@ -27,17 +27,27 @@ try:
 except ImportError:
     from lib import calc
 
-__all__ = ["FREEZE", "SWITCH_COST", "BASIS", "daily_rows", "summarize", "monthly_hits",
-           "wilson", "months_back", "journal"]
+__all__ = ["FREEZE", "RULE_SINCE", "SWITCH_COST", "BASIS", "daily_rows", "summarize",
+           "monthly_hits", "wilson", "months_back", "last_switch", "journal"]
 
-# С этого дня правило P2 ведёт позицию в проде (аудит 02.09.2026). Всё, что раньше, —
-# бэктест на той же истории, по которой правило выбирали; честный счёт идёт с этой даты.
+# С этого дня слой решения (правило P2) ведёт позицию в проде (аудит 02.09.2026); до
+# него позицию вело прежнее правило — так и подписана его карточка на витрине.
 FREEZE = "2026-09-02"
+# С этого дня действует ТЕКУЩАЯ редакция правила: 21.10.2026 у флага волатильности
+# снят гистерезис (constants.DECISION["vol_off_quantile"]). История позиции на витрине
+# пересчитана по ней целиком, поэтому всё раньше этой даты — расчёт на истории, а не
+# то, что правило делало вживую; сделки журнала считаются с этой даты.
+RULE_SINCE = "2026-10-21"
 SWITCH_COST = 0.002
 BASIS = ("акции — индекс полной доходности MCFTR, деньги — вклады топ-10; исполнение "
          "на следующем закрытии, 0,2% за смену; налоги не учтены")
 # Шарп над деньгами по окну короче квартала — шум, его не печатаем.
 MIN_DAYS_SHARPE = 60
+# Годовой темп окна «с начала года» — только с квартала: в январе две недели,
+# возведённые в годовые, дают трёхзначные проценты, которые читаются как обещание.
+# Вклады котируются в годовых, поэтому с квартала сравнение «в годовых» честнее
+# накопленного итога, где ставка вкладов выглядит меньше, чем она есть.
+YTD_ANN_MIN_YEARS = 0.25
 
 
 def daily_rows(dates, pos, tr, cash, lag=1, cost=SWITCH_COST):
@@ -72,12 +82,13 @@ def _pct(x, nd=2):
     return round(x * 100.0, nd)
 
 
-def summarize(rows, lo=None, hi=None):
+def summarize(rows, lo=None, hi=None, ann_min_years=0.99):
     """Итог окна (lo, hi] -> dict | None (в окне нет ни одного дня).
 
     total_* — накопленные проценты за окно; ann_* — годовые (только для окна от
-    года: годовой темп за месяц читается как обещание); excess_pp — правило минус
-    вклады за окно, п.п.; ex_sharpe — Шарп дневного избытка над вкладами.
+    ann_min_years, по умолчанию от года: годовой темп за месяц читается как
+    обещание); excess_pp — правило минус вклады за окно, п.п.; ex_sharpe — Шарп
+    дневного избытка над вкладами.
     """
     idx = [i for i, r in enumerate(rows)
            if (lo is None or r[0] > lo) and (hi is None or r[0] <= hi)]
@@ -111,7 +122,7 @@ def summarize(rows, lo=None, hi=None):
            "excess_pp": _pct(eq["rule"] - eq["cash"]),
            "mdd_pct": _pct(mdd, 1), "in_market_pct": round(100.0 * inm / n),
            "switches": switches}
-    if years >= 0.99:
+    if years >= ann_min_years:
         for k in ("rule", "tr", "cash"):
             out[f"{k}_ann_pct"] = _pct(eq[k] ** (1.0 / years) - 1.0, 1)
     if n >= MIN_DAYS_SHARPE:
@@ -164,10 +175,27 @@ def months_back(day, months):
     return date(y, m, min(d.day, last)).isoformat()
 
 
-def journal(dates, pos, reasons, tr, cash, freeze=FREEZE, lag=1, cost=SWITCH_COST):
+def last_switch(dates, pos, reasons, asof):
+    """Последняя смена позиции, которая уже ИСПОЛНЕНА к asof. -> (решено, исполнено, к) | None.
+
+    Окно «с последней смены» начинается с закрытия дня исполнения: с него держится
+    новая позиция, а комиссия смены падает на первый день окна. Смена, решённая в
+    последний день (исполнение ещё впереди), окна не открывает — в нём пока прежняя
+    позиция, и считать надо от предыдущей смены.
+    """
+    for i in range(len(dates) - 2, -1, -1):
+        if reasons[i] and dates[i + 1] < asof:
+            return dates[i], dates[i + 1], ("long" if pos[i] else "flat")
+    return None
+
+
+def journal(dates, pos, reasons, tr, cash, freeze=FREEZE, rule_since=RULE_SINCE,
+            lag=1, cost=SWITCH_COST):
     """Блок verdict.position.journal: правило против удержания индекса и вкладов.
 
-    Три окна — с заморозки правила и за 12/24 месяца — и сделки с заморозки.
+    Окна: с последней смены позиции — накопленные проценты; с начала года — ещё и
+    годовые, как только прошёл квартал (YTD_ANN_MIN_YEARS); за 12 и 24 месяца — ещё и
+    годовые. Сделки — с даты действующей редакции правила.
     -> None, если считать не по чему (нет индекса полной доходности или ставки).
     """
     if not dates:
@@ -177,17 +205,26 @@ def journal(dates, pos, reasons, tr, cash, freeze=FREEZE, lag=1, cost=SWITCH_COS
         return None
     asof = rows[-1][0]
     windows = []
-    for wid, label, lo in (("since_freeze", "с заморозки правила", freeze),
-                           ("m12", "12 месяцев", months_back(asof, 12)),
-                           ("m24", "24 месяца", months_back(asof, 24))):
-        s = summarize(rows, lo, asof)
+    sw = last_switch(dates, pos, reasons, asof)
+    year_start = next((d for d in reversed(dates) if d < asof[:4] + "-01-01"), None)
+    spans = []
+    if sw:
+        spans.append(("since_change", "с последней смены позиции", sw[1],
+                      {"since_decided": sw[0], "since_executed": sw[1], "since_state": sw[2]}, 0.99))
+    if year_start:
+        spans.append(("ytd", "с начала года", year_start, {"year": asof[:4]},
+                      YTD_ANN_MIN_YEARS))
+    spans += [("m12", "12 месяцев", months_back(asof, 12), {}, 0.99),
+              ("m24", "24 месяца", months_back(asof, 24), {}, 0.99)]
+    for wid, label, lo, extra, ann_min in spans:
+        s = summarize(rows, lo, asof, ann_min)
         if s is not None:
-            s.update({"id": wid, "label": label})
+            s.update({"id": wid, "label": label}, **extra)
             windows.append(s)
     nxt = {dates[i]: (dates[i + 1] if i + 1 < len(dates) else None)
            for i in range(len(dates))}
     trades = [{"decided": d, "executed": nxt.get(d),
                "to": "long" if pos[i] else "flat", "reason": reasons[i]}
-              for i, d in enumerate(dates) if reasons[i] and d >= freeze]
-    return {"freeze": freeze, "asof": asof, "basis": BASIS, "windows": windows,
-            "trades": trades}
+              for i, d in enumerate(dates) if reasons[i] and d >= rule_since]
+    return {"freeze": freeze, "rule_since": rule_since, "asof": asof, "basis": BASIS,
+            "windows": windows, "trades": trades}

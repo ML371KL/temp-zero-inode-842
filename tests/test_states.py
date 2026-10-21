@@ -408,9 +408,11 @@ class TestGate(StatesCase):
         by_id = {d["id"]: d for d in self.out["distances"]}
         self.assertEqual(by_id["trend"]["off_threshold"], -2.0)
         self.assertEqual(by_id["trend"]["on_threshold"], 2.0)
-        # Порог снятия волы — 60-й перцентиль, он НИЖЕ порога включения (80-й).
-        self.assertLess(by_id["vol"]["off_threshold"], by_id["vol"]["threshold"])
-        self.assertIn("60-й перцентиль", by_id["vol"]["text_off"])
+        # С 21.10.2026 у волы гистерезиса нет: порог снятия — тот же 80-й перцентиль.
+        # мутация: оставить в подписи «60-й перцентиль» -> витрина назовёт не тот порог.
+        self.assertEqual(by_id["vol"]["off_threshold"], by_id["vol"]["threshold"])
+        self.assertIn("80-й перцентиль", by_id["vol"]["text_off"])
+        self.assertNotIn("60-й", by_id["vol"]["text_off"])
         # −3 % лог = −2,96 % простыми -> −3,0 после округления; выше порога включения.
         self.assertEqual(by_id["bond"]["off_threshold"], -3.0)
         self.assertGreater(by_id["bond"]["off_threshold"], by_id["bond"]["threshold"])

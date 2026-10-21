@@ -16,8 +16,9 @@ CELL_STATS получены на 2004–2026 и меняются только р
   * СЫРЫЕ биты (`_bits`) — «цена выше MA200», «вола выше p80», «RGBI глубже −4 %».
     На них посчитаны CELL_STATS, лента ячеек и второй ряд; трогать их нельзя.
   * биты С ГИСТЕРЕЗИСОМ (`_bits_hyst`) — те же три флага, но с двумя порогами:
-    включаются как прежде, а снимаются позже (тренд ±2 % к MA200, вола ниже p60,
-    RGBI выше −3 %). На них стоят ВОРОТА позиции (compute/decision.py): без
+    включаются как прежде, а снимаются позже (тренд ±2 % к MA200, RGBI выше −3 %).
+    У волы с 21.10.2026 порог снятия тот же, что включения (p80): см.
+    constants.DECISION["vol_off_quantile"]. На них стоят ВОРОТА позиции (compute/decision.py): без
     гистерезиса ворота хлопали на каждом касании порога, и аудит 02.09.2026 (S2_1)
     показал, что дребезг стоил больше, чем опоздание на выходе.
 """
@@ -143,7 +144,8 @@ def _bits_hyst(dates, cols, raw=None):
 
     Порог ВКЛЮЧЕНИЯ у каждого флага тот же, что у сырого бита (ячейки и ворота
     зажигаются одновременно), порог ВЫКЛЮЧЕНИЯ — дальше: тренд снимается ниже −2 % к
-    MA200, вола — ниже 60-го перцентиля, RGBI — выше −3 %. Колонки vol_thresh60 и
+    MA200, RGBI — выше −3 %, вола — ниже DECISION["vol_off_quantile"] (с 21.10.2026 тот
+    же p80, что включение; до того p60). Колонки vol_thresh60 (имя историческое) и
     px_ma_ratio считает панель; если панель старая (фикстуры тестов), считаем их тут
     тем же способом — иначе ворота на такой панели были бы вечно закрыты.
     """
@@ -161,10 +163,7 @@ def _bits_hyst(dates, cols, raw=None):
 
     rv = cols.get("realized_vol_21", empty)
     q80 = cols.get("vol_thresh80", empty)
-    q60 = cols.get("vol_thresh60")
-    if not q60:
-        q60 = calc.rolling_quantile(rv, constants.STATE_RULES["vol"]["lookback"],
-                                    d["vol_off_quantile"], min_periods=252)
+    q60 = _vol_off_series(dates, cols)
     vol, cur = [], None
     for a, hi, lo, b in zip(rv, q80, q60, raw["vol"]):
         if not (calc.is_num(a) and calc.is_num(hi) and calc.is_num(lo)):
@@ -489,10 +488,19 @@ def _last_pair(a, b):
 
 
 def _vol_off_series(dates, cols):
-    """Порог выключения волы (p60): из панели, а на старой панели — считаем тут же."""
+    """Порог выключения волы (vol_off_quantile): из панели, а на старой панели — тут же.
+
+    Когда квантиль снятия совпадает с квантилем включения (с 21.10.2026), порог снятия
+    и ЕСТЬ порог включения: берём ту же колонку, а не пересчитываем — иначе панель, где
+    vol_thresh80 задан, а vol_thresh60 нет, получила бы два «одинаковых» порога из
+    разных рядов и гистерезис из ниоткуда.
+    """
     q60 = cols.get("vol_thresh60")
     if q60:
         return q60
+    if (constants.DECISION["vol_off_quantile"] == constants.STATE_RULES["vol"]["quantile"]
+            and cols.get("vol_thresh80")):
+        return cols["vol_thresh80"]
     return calc.rolling_quantile(cols.get("realized_vol_21") or [None] * len(dates),
                                  constants.STATE_RULES["vol"]["lookback"],
                                  constants.DECISION["vol_off_quantile"], min_periods=252)
@@ -537,9 +545,15 @@ def _distances(dates, cols, current, gate=None):
         }
         _, q60 = _last_pair(cols.get("realized_vol_21"), _vol_off_series(dates, cols))
         if calc.is_num(q60):
+            q_off = round(constants.DECISION["vol_off_quantile"] * 100)
             row["off_threshold"] = round(q60 * 100, 1)
-            row["text_off"] = (f"для ворот флаг снимается ниже {_n(q60 * 100)}% "
-                               f"(60-й перцентиль за 3 года)")
+            if q_off >= 80:
+                # С 21.10.2026 гистерезиса у волы нет: снимается там же, где включается.
+                row["text_off"] = (f"для ворот флаг снимается на том же пороге — ниже "
+                                   f"{_n(q60 * 100)}% ({q_off}-й перцентиль за 3 года)")
+            else:
+                row["text_off"] = (f"для ворот флаг снимается ниже {_n(q60 * 100)}% "
+                                   f"({q_off}-й перцентиль за 3 года)")
         out.append(row)
 
     _, dd = calc.last_valid(cols.get("rgbi_dd") or [])
