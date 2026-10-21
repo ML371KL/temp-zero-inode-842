@@ -302,6 +302,10 @@ class TestGuideMatchesConstants(unittest.TestCase):
         self.assertIn(f"±{thr}", text, "порог решения по наклону не назван")
         q = round(dec["vol_off_quantile"] * 100)
         self.assertRegex(text, rf"{q}-(й|го) перцентил", "порог выключения волатильности не назван")
+        # Строка таблицы порогов говорит ровно о действующем пороге снятия: 21.10.2026
+        # он стал тем же 80-м, и «спокойно — ниже 60-го» описывало бы прежнюю редакцию.
+        self.assertRegex(text, rf"спокойно — ниже (того же )?{q}-го перцентил",
+                         "в таблице порогов не тот порог снятия волатильности")
         bond_off = f"{abs(dec['bond_off']) * 100:.0f}"
         self.assertIn(f"−{bond_off}%", text, "порог снятия облигационного флага не назван")
         band = f"{dec['trend_band'] * 100:.0f}"

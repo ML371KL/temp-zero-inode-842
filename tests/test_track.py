@@ -127,23 +127,64 @@ class TestMonthsBack(TrackCase):
 
 
 class TestJournal(TrackCase):
-    def test_окна_и_сделки_с_заморозки(self):
-        dates = weekdays("2025-08-01", 320)
+    def journal(self, switch_day, until=320):
+        dates = weekdays("2025-08-01", until)
         n = len(dates)
-        k = dates.index("2026-09-10")
+        k = dates.index(switch_day)
         pos = [0] * k + [1] * (n - k)
         reasons = [""] * n
         reasons[k] = "gate_open"
-        reasons[10] = "comp_neg"                       # до заморозки — не сделка журнала
-        j = self.t.journal(dates, pos, reasons, [100.0 + i for i in range(n)], [12.0] * n)
+        reasons[10] = "comp_neg"            # до действующей редакции — не сделка журнала
+        return dates, self.t.journal(dates, pos, reasons, [100.0 + i for i in range(n)],
+                                     [12.0] * n, rule_since="2026-09-01")
+
+    def test_окна_с_последней_смены_и_с_начала_года(self):
+        dates, j = self.journal("2026-09-10")
         self.assertEqual(j["freeze"], self.t.FREEZE)
-        self.assertEqual([w["id"] for w in j["windows"]], ["since_freeze", "m12", "m24"])
+        self.assertEqual(j["rule_since"], "2026-09-01")
+        self.assertEqual([w["id"] for w in j["windows"]], ["since_change", "ytd", "m12", "m24"])
+        since = j["windows"][0]
+        # Окно начинается с исполнения смены: с закрытия 11.09 держатся акции, и
+        # комиссия падает на первый же день окна. мутация: окно от дня решения ->
+        # в окно попадает день прежней позиции, и в нём «в акциях» меньше 100%.
+        self.assertEqual((since["since_decided"], since["since_executed"], since["since_state"]),
+                         ("2026-09-10", "2026-09-11", "long"))
+        self.assertEqual(since["from"], "2026-09-11")
+        # to — конец окна, как у остальных окон; позиция смены лежит в since_state.
+        # мутация: ключ "to" в дополнительных полях -> конец окна затирается словом.
+        self.assertEqual(since["to"], dates[-1])
+        self.assertEqual(since["in_market_pct"], 100)
+        self.assertEqual(since["switches"], 0)
+        self.assertNotIn("rule_ann_pct", since)          # накопленное, не годовое
+        ytd = j["windows"][1]
+        self.assertEqual(ytd["from"], "2025-12-31")      # последний торговый день прошлого года
+        self.assertEqual(ytd["year"], dates[-1][:4])
+        # С начала года — в годовых, как только прошёл квартал (просьба владельца
+        # 21.10.2026: вклады котируются в годовых). мутация: порог ytd как у 12 мес. ->
+        # rule_ann_pct до конца года не приходит.
+        self.assertIn("rule_ann_pct", ytd)
+        self.assertIn("cash_ann_pct", ytd)
+        self.assertAlmostEqual(ytd["cash_ann_pct"], 12.0, delta=0.6)
         self.assertEqual(j["trades"], [{"decided": "2026-09-10", "executed": "2026-09-11",
                                         "to": "long", "reason": "gate_open"}])
-        since = j["windows"][0]
-        self.assertEqual(since["from"], self.t.FREEZE)
-        self.assertEqual(since["switches"], 1)
         self.assertIn("MCFTR", j["basis"])
+
+    def test_смена_в_последний_день_окна_не_открывает(self):
+        # Решено в последний день — исполнение впереди, держится прежняя позиция:
+        # окно считается от ПРЕДЫДУЩЕЙ смены (comp_neg в начале ряда).
+        dates = weekdays("2025-08-01", 320)
+        _, j = self.journal(dates[-1])
+        since = j["windows"][0]
+        self.assertEqual(since["since_decided"], dates[10])
+        self.assertEqual(since["since_state"], "flat")
+        self.assertEqual(j["trades"][-1]["executed"], None)
+
+    def test_в_первом_квартале_с_начала_года_накопленным(self):
+        # Две недели января в годовых — трёхзначные проценты: до квартала ytd без ann.
+        dates, j = self.journal("2025-09-10", until=120)      # ряд кончается в январе
+        ytd = next(w for w in j["windows"] if w["id"] == "ytd")
+        self.assertTrue(dates[-1].startswith("2026-01"))
+        self.assertNotIn("rule_ann_pct", ytd)
 
     def test_без_индекса_полной_доходности_журнала_нет(self):
         dates = weekdays("2026-09-01", 10)
@@ -165,7 +206,6 @@ class TestDecisionCarriesJournal(unittest.TestCase):
         out = dec.compute_decision(panel, core.monthly_frame(panel))
         j = out["position"]["journal"]
         ids = [w["id"] for w in j["windows"]]
-        self.assertNotIn("since_freeze", ids)     # панель кончается до заморозки
         self.assertIn("m12", ids)
         m12 = [w for w in j["windows"] if w["id"] == "m12"][0]
         # мутация: журнал по cols["imoex"] -> рынок за год 0%

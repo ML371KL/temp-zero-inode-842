@@ -511,20 +511,26 @@
     /* Что дало правило (compute/track.py, аудит 03.10.2026): позиция в деньгах
        против удержания индекса полной доходности и вкладов. Здоровье ядра меряет
        связь композита со следующим месяцем, а не деньги, и на 24 месяцах почти всегда
-       неотличимо от нуля; на вопрос «работает ли правило» отвечает этот блок. Окно «с
-       заморозки» первое: всё, что раньше, — бэктест на той же истории, по которой
-       правило выбирали. Годовой темп — только у окон от года. Как считается (мера,
+       неотличимо от нуля; на вопрос «работает ли правило» отвечает этот блок. Первое
+       окно — с последней смены позиции (с её исполнения), накопленным итогом; второе —
+       с начала года, в годовых, когда прошёл квартал (до того бэкенд годовых не шлёт,
+       и строка остаётся накопленной); 12 и 24 месяца — в годовых. Всё раньше даты
+       действующей редакции правила (journal.rule_since) — расчёт на истории, по
+       которой правило выбирали, а не то, что оно делало вживую. Как считается (мера,
        комиссия, исполнение) — в руководстве, раздел «Позиция»: на панели остаются
        числа и одна строка о том, что в них сравнивается. */
     var jr = p.journal && Array.isArray(p.journal.windows) && p.journal.windows.length ? p.journal : null;
     var journal = null;
     if (jr) {
       var jrRow = function (w) {
-        var ann = w.id !== 'since_freeze' && isNum(w.rule_ann_pct);
+        var ann = (w.id === 'm12' || w.id === 'm24' || w.id === 'ytd') && isNum(w.rule_ann_pct);
         var rule = ann ? w.rule_ann_pct : w.rule_pct, cash = ann ? w.cash_ann_pct : w.cash_pct;
         var tr = ann ? w.tr_ann_pct : w.tr_pct;
         var over = isNum(rule) && isNum(cash) ? rule - cash : null;
-        var label = w.id === 'since_freeze' ? 'с ' + fmtDay(jr.freeze)
+        // since_freeze — окно витрин до 21.10.2026 (старый data.json).
+        var label = w.id === 'since_change' ? 'с последней смены' + (w.since_decided ? ' (' + ruDay(w.since_decided) + ')' : '')
+          : w.id === 'ytd' ? 'с начала года' + (ann ? ', годовых' : '')
+          : w.id === 'since_freeze' ? 'с ' + fmtDay(jr.freeze)
           : ({ m12: '12 мес.', m24: '24 мес.' }[w.id] || w.label || w.id) + (ann ? ', годовых' : '');
         return h('tr', null, [
           h('th', { scope: 'row', text: label }),
@@ -535,13 +541,16 @@
         ]);
       };
       var trades = Array.isArray(jr.trades) ? jr.trades : [];
+      var live = jr.rule_since || jr.freeze;
+      // С rule_since дата редакции и начало сделок — одна дата: называем её один раз.
+      var tradeSince = jr.rule_since ? ' по нынешней редакции правила (с ' + fmtDay(live) + ')' : ' с ' + fmtDay(live);
       var tradeText = trades.length
-        ? 'Сделки с ' + fmtDay(jr.freeze) + ': ' + trades.map(function (t) {
+        ? 'Сделки' + tradeSince + ': ' + trades.map(function (t) {
             return 'решено «' + (POSITION_WORD[t.to] || t.to) + '» ' + fmtDay(t.decided) +
               (t.executed ? ', исполнено ' + fmtDay(t.executed) : ', исполнение на следующем закрытии') +
               (REASON_WORD[t.reason] ? ' (' + REASON_WORD[t.reason] + ')' : '');
           }).join('; ') + '.'
-        : 'Сделок с ' + fmtDay(jr.freeze) + ' не было.';
+        : 'Сделок' + tradeSince + ' не было.';
       journal = h('div', { 'class': 'position__journal' }, [
         h('div', { 'class': 'stat__k', text: 'Что дало правило' }),
         h('div', { 'class': 'tablewrap' }, [
@@ -562,7 +571,9 @@
           ])
         ]),
         h('p', { 'class': 'position__note' }, [
-          document.createTextNode(tradeText + ' До этой даты — расчёт на истории. '),
+          document.createTextNode(tradeText + (jr.rule_since
+            ? ' Всё раньше — расчёт на истории. '
+            : ' До этой даты — расчёт на истории. ')),
           h('a', { href: 'guide.html#journal', text: 'Как считается' })
         ])
       ]);
@@ -647,7 +658,7 @@
     var v = d.verdict || {}, st = d.states || {}, core = d.core || {};
     var cur = st.current || {};
     // Ворота с гистерезисом (states.gate) главнее сырых битов: именно по ним
-    // считается позиция, и именно они переключаются реже (вола p80/p60, RGBI
+    // считается позиция, и именно они переключаются реже (вола p80 — с 21.10.2026 без гистерезиса, RGBI
     // −4/−3%, тренд ±2% от MA200). Сырые биты остаются для ленты ячеек и их
     // статистики. Старая витрина без gate — сырые биты, как раньше.
     var gateSrc = st.gate && typeof st.gate === 'object' ? st.gate : null;
@@ -1048,7 +1059,7 @@
     ]) : null;
 
     // Расстояние до переключения считается от ТОГО порога, который сработает
-    // следующим: у включённого бита это порог выключения (вола p60, RGBI −3%,
+    // следующим: у включённого бита это порог выключения (вола — тот же p80, RGBI −3%,
     // тренд −2% от MA200), у выключенного — порог включения. Витрина без
     // гистерезиса (старый data.json) присылает один порог — берём его.
     var gateSrc = st.gate && typeof st.gate === 'object' ? st.gate : (st.current || {});

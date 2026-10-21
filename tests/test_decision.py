@@ -72,7 +72,9 @@ class TestConstants(DecisionCase):
         d = self.K.DECISION
         self.assertEqual(d["comp_threshold"], 0.20)
         self.assertEqual(d["decision_weekday"], "FRI")
-        self.assertEqual(d["vol_off_quantile"], 0.60)
+        # 21.10.2026: у волы гистерезис снят — снимается на том же p80, что включается
+        # (решение владельца; обоснование и цена — в комментарии constants.DECISION).
+        self.assertEqual(d["vol_off_quantile"], 0.80)
         self.assertEqual((d["bond_on"], d["bond_off"]), (-0.04, -0.03))
         self.assertEqual(d["trend_band"], 0.02)
         self.assertEqual(d["execution"], "next_close")

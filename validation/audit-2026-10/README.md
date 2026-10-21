@@ -24,6 +24,7 @@ python check_usd_splice.py   # курс USD в ноге ядра — §2.1
 python check_excess_tr.py    # «над деньгами» без дивидендов — §2.2
 python check_repricing.py    # «репрайсинг» и шаг ключевой ставки — §2.4
 python check_layer2.py       # конфликт карточек второго ряда — §3.1
+python check_vol_off.py      # смена редакции 21.10.2026: снятие флага волы p60 → p80 — §9
 ```
 
 Первая строка `check_backtest.py` обязана напечатать «побитово: True»: только при этом

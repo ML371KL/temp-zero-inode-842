@@ -200,7 +200,8 @@ class RuleSectionCase(unittest.TestCase):
         text = "\n".join(out)
         self.assertTrue(rows)
         for needle in ("P2, действующее", "P0, прежнее", "удержание MCFTR",
-                       "с заморозки 2026-09-02", "MCFTR", "вклады топ-10"):
+                       "MCFTR", "вклады топ-10",
+                       "честный счёт действующей редакции идёт с 2026-10-21"):
             self.assertIn(needle, text)
         cells = [c.strip() for c in
                  [ln for ln in out if ln.startswith("| 12 месяцев | удержание MCFTR")][0]
