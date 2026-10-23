@@ -138,6 +138,100 @@ class TestSentenceScope(ConsensusCase):
         self.assertEqual(self.c._rate_from(text), 14.25)
 
 
+class TestAnnualSurvey(ConsensusCase):
+    """Макроопрос Банка России — годовая средняя ставка, а не заседание.
+
+    Найдено прогоном по всем заседаниям 2026 (23.10.2026): в июле макроопрос
+    повторили два канала числом 14,5 при консенсусе 14,25 — правило двух каналов
+    такое пропускает. Тексты — живые сообщения из каналов.
+    """
+
+    def test_макроопрос_заголовком_не_консенсус(self):
+        # t.me/cbrstocks/81308, 15.07.2026
+        text = ("#Макро\nОПРОС ЦБ: АНАЛИТИКИ ПРОГНОЗ ПО СРЕДНЕЙ КЛЮЧЕВОЙ СТАВКЕ НА "
+                "2026Г ДО 14,5% С 14,1%, НА 2027Г - ДО 12,2% С 10,6%")
+        # мутация: снять фильтр годового прогноза -> 14.5.
+        self.assertIsNone(self.c._rate_from(text))
+
+    def test_макроопрос_в_середине_статьи_не_консенсус(self):
+        # t.me/if_market_news/83902, 22.07.2026 — за два дня до заседания.
+        text = ("В июльском опросе Банка России аналитики понизили прогноз роста ВВП "
+                "на 2026 год до 0,6%, повысили прогноз инфляции на конец года до 6,2%, "
+                "а средней ключевой ставки — до 14,5%.")
+        self.assertIsNone(self.c._rate_from(text))
+
+    def test_средняя_ставка_без_слов_про_цб_тоже_не_заседание(self):
+        text = "Аналитики прогнозируют, что средняя ключевая ставка снизится до 14,1%"
+        self.assertIsNone(self.c._rate_from(text))
+
+    def test_сводки_опросов_агрегатора_разбираются(self):
+        # Заголовки markettwits к 23.10.2026: слово опроса — в конце, после тире.
+        for text in (
+                "⚠️ 🇷🇺 #дкп #россия #опрос\nЦБ РФ сохранит ставку на уровне 14% на "
+                "заседании 23 октября — аналитики, опрос RTRS",
+                "⚠️ 🇷🇺 #дкп #россия #опрос\nАналитики ожидают сохранения ключевой "
+                "ставки ЦБ в октябре на уровне 14% годовых — опрос РИА",
+                "⚠️ 🇷🇺 #дкп #россия #прогноз\nБанк России на заседании 23 октября "
+                "сохранит ключевую ставку на уровне 14% — консенсус-прогноз Известий"):
+            with self.subTest(text=text[:60]):
+                self.assertEqual(self.c._rate_from(text), 14.0)
+
+
+class TestQueries(ConsensusCase):
+    """Поиск двумя запросами по два слова (правка 23.10.2026).
+
+    Поиск t.me отдаёт ~20 последних совпадений: одно слово «консенсус» тонет в
+    чужих сюжетах, а заголовки опросов пишут «опрос». К заседанию 23.10.2026 при
+    одном запросе не нашлась ни одна из семи сводок.
+    """
+
+    def test_есть_запрос_со_словом_опрос(self):
+        # мутация: вернуть единственный запрос «консенсус» -> падает.
+        self.assertTrue(any("опрос" in q for q in self.c.QUERIES))
+        self.assertTrue(any("консенсус" in q for q in self.c.QUERIES))
+
+    def test_каждый_канал_спрашивается_каждым_запросом(self):
+        calls = []
+
+        def fake(channel, pages=1, timeout=25, query=None):
+            calls.append((channel, query))
+            return []
+
+        with mock.patch.object(self.c.tg, "messages", side_effect=fake):
+            self.c.survey("2026-10-23", channels=("markettwits", "banksta"))
+        self.assertEqual(sorted(calls), sorted((ch, q) for ch in ("markettwits", "banksta")
+                                               for q in self.c.QUERIES))
+
+    def test_сообщение_на_оба_запроса_это_один_кандидат(self):
+        text = "Консенсус и опрос аналитиков: ЦБ сохранит ключевую ставку на уровне 14%"
+        same = msg(text, "2026-10-20", "banksta")
+
+        def fake(channel, pages=1, timeout=25, query=None):
+            return [dict(same)]
+
+        with mock.patch.object(self.c.tg, "messages", side_effect=fake):
+            found = self.c.survey("2026-10-23", channels=("banksta",))
+        self.assertEqual(len(found), 1)
+
+    def test_отказ_одного_запроса_не_отменяет_другой(self):
+        from pipeline.lib.http import FetchError
+        text = "ЦБ РФ сохранит ставку на уровне 14% на заседании 23 октября — опрос РБК"
+
+        def fake(channel, pages=1, timeout=25, query=None):
+            if query == self.c.QUERIES[0]:
+                raise FetchError("таймаут")
+            return [msg(text, "2026-10-19", channel)]
+
+        with mock.patch.object(self.c.tg, "messages", side_effect=fake):
+            found = self.c.survey("2026-10-23", channels=("markettwits",))
+        self.assertEqual([c["value"] for c in found], [14.0])
+
+    def test_агрегатор_и_банковский_канал_в_белом_списке(self):
+        # Сводки к 23.10.2026 вышли только в них.
+        self.assertIn("markettwits", self.c.CHANNELS)
+        self.assertIn("banksta", self.c.CHANNELS)
+
+
 class TestAgreement(ConsensusCase):
     def cand(self, value, channel, at="2026-07-20"):
         return {"value": value, "channel": channel, "at": at, "url": "u"}
