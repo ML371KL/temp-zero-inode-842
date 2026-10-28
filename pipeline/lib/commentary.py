@@ -128,7 +128,7 @@ def effort():
 USER_AGENT = "moex-radar/1.0 (dashboard pipeline; +https://github.com/ML371KL/temp-zero-inode-842)"
 
 # Имя панели в ops-сообщениях учёта разборов и адрес, куда смотреть при отказе API.
-PANEL = "842"
+PANEL = "Рынок РФ"
 OPS_WHERE = "ключ — ANTHROPIC_API_KEY в /usr/local/etc/moex-radar/env."
 # Прогнозы в ответе ловит словарь llm_guard. Здесь — вне «если …, то …»: сценарий с
 # условием и признаком и есть то, о чём просит промпт. У 843 запрет жёсткий.
