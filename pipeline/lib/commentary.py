@@ -22,6 +22,12 @@ Gemma отвечала 429 почти всегда, последний рубе�
 правиле или петля прогонов не должна молча жечь кредиты — суточный потолок
 `LLM_DAILY_USD` останавливает разбор, а не доставку.
 
+ПРОВЕРКА СМЫСЛА — pipeline/lib/llm_guard.py (с 29.10.2026, общий с соседней панелью):
+числа своего события, прогнозы, внутренние слова, язык, предел 600 знаков и 4 фраз,
+метки ===N===. Фраза с нарушением вырезается, разбор без двух годных фраз — отбрасывается;
+вырезанное пишется в журнал. Итог обращения ложится в недельный учёт (llm_stats.json), а
+ops_tick() каждого прогона шлёт строку недели и тревогу об отказе API по доступу.
+
 ПОЧЕМУ НИКОГДА НЕ БРОСАЕТ: комментарий — украшение события, а не само событие. Нет
 ключа, лежит провайдер, ответ не разобрался, потолок исчерпан — уходит голый факт, и
 это нормальный режим, а не отказ.
@@ -36,7 +42,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
-from pipeline.lib import wording
+from pipeline.lib import llm_guard, wording
 
 ENDPOINT = "https://api.anthropic.com/v1/messages"
 API_VERSION = "2026-10-21"
@@ -65,6 +71,8 @@ ATTEMPTS = 3                     # первая попытка и до двух 
 RETRY_STATUSES = {408, 409, 429, 500, 502, 503, 504, 529}
 DAILY_USD_DEFAULT = 1.0
 SPEND_FILE = "llm_spend.json"
+# Недельный учёт разборов и отказов API — llm_guard.record / llm_guard.ops_tick.
+STATS_FILE = "llm_stats.json"
 MSK = timezone(timedelta(hours=3))
 
 
@@ -119,14 +127,12 @@ def effort():
 # защите от ботов, а причина в коде ниоткуда не видна.
 USER_AGENT = "moex-radar/1.0 (dashboard pipeline; +https://github.com/ML371KL/temp-zero-inode-842)"
 
-# Метка блока. Якоря начала и конца строки СНЯТЫ намеренно: боевой ответ пришёл
-# склеенным — «…построенную на экспортно-импортных равновесиях.===1===\nСтавка…».
-# Строгая регулярка такую метку не видела вовсе: разбор возвращал ОДИН блок,
-# комментарий второго события утекал хвостом в первое, а само второе оставалось
-# без разбора. Формат меток наш собственный, и встретить «===1===» в живом русском
-# тексте неоткуда, поэтому терпимость здесь ничего не ломает (в 837 разбор ответа
-# терпим по той же причине и с той же оговоркой).
-_BLOCK = re.compile(r"={2,}\s*(\d+)\s*={2,}")
+# Имя панели в ops-сообщениях учёта разборов и адрес, куда смотреть при отказе API.
+PANEL = "842"
+OPS_WHERE = "ключ — ANTHROPIC_API_KEY в /usr/local/etc/moex-radar/env."
+# Прогнозы в ответе ловит словарь llm_guard. Здесь — вне «если …, то …»: сценарий с
+# условием и признаком и есть то, о чём просит промпт. У 843 запрет жёсткий.
+FORECAST_STRICT = False
 
 # Направленных прогнозов комментатору не разрешено с 03.10.2026: в ленте уже стояли
 # «это не разворот тренда, а распродажа» о флажке волатильности, который снялся через
@@ -152,13 +158,15 @@ SYSTEM = """Ты — независимый аналитик российско�
 ЧЕГО ДЕЛАТЬ НЕЛЬЗЯ:
 · Утверждать, куда пойдёт рынок, и выдавать догадку о намерениях участников за факт («это не разворот, а распродажа», «участники начали агрессивно закрывать позиции»). Проверка на двадцати годах истории показала: направление акций по таким событиям не угадывается. Говори «может означать», «если …, то …» и называй, что подтвердит или опровергнет версию.
 · Пересказывать текст события своими словами — он у читателя уже перед глазами.
-· Упоминать панель, дашборд, композит, ядро, ячейку, ворота, слои, мониторы, баллы, оценку панели и прочее устройство — читатель о нём не знает. Говори о рынке: тренде, волатильности, ставке, облигациях.
-· Выдумывать числа, пороги, уровни, время, консенсусы и прогнозы, которых тебе не давали. Про ожидания рынка можно говорить только качественно.
+· Упоминать панель, дашборд, композит, ядро, ячейку, ворота, якоря, веер, детекторы, слои, мониторы, баллы, оценку панели и прочее устройство, а также имена полей входа — читатель о них не знает. Говори о рынке: тренде, волатильности, ставке, облигациях.
+· Выдумывать числа, пороги, уровни, время, консенсусы и прогнозы, которых тебе не давали. Про ожидания рынка можно говорить только качественно. Число бери только из своего события и из market_now (округлять можно; отношение и разность двух данных чисел — тоже можно); год — только из дат входа.
 · Упоминать решения, заявления и события, которых нет во входных данных.
 · Канцелярит, дисклеймеры, «важно отметить», «стоит подчеркнуть», «в заключение».
 · Приказы «покупайте / продавайте» — объясняй механику и последствия.
 
-ФОРМАТ: 2–4 предложения живого русского на событие. Термин — с короткой расшифровкой прямо в тексте при первом употреблении.
+ФОРМАТ: 2–4 предложения живого русского на событие, вместе не длиннее 600 знаков. Термин — с короткой расшифровкой прямо в тексте при первом употреблении.
+
+ПРОВЕРКА. Ответ проверяется машинно: предложение с числом не из входа, прогнозом или внутренним словом вырезается, всё сверх 4 предложений и 600 знаков отрезается с конца. Самое важное ставь первым.
 
 ОТВЕТ строго такой структурой, без вступлений и заголовков:
 ===0===
@@ -226,68 +234,41 @@ def market_now(payload):
     return out
 
 
-# Сколько знаков одного комментария вообще имеет смысл разбирать. Просим три-четыре
-# фразы; всё, что длиннее, — уже не комментарий. Ограничение нужно не ради красоты:
-# поиск зацикливания ниже квадратичен по длине (замер: 4 тыс. знаков — 0,1 с,
-# 8 тыс. — 0,41 с, то есть 100 КБ ответа заняли бы около минуты). Интрадей-такт идёт
-# каждые 5 минут и живёт под RuntimeMaxSec — минута в регулярном выражении там лишняя.
-_SCAN_LIMIT = 4000
-
-# Письменности, которых в русском разборе быть не может ни при каких терминах
-# (арабская, иврит, CJK, кана, хангыль) — перенесено из 837 (`textDefect`).
-_FOREIGN_SCRIPT = re.compile("[\u0600-\u06ff\u0590-\u05ff\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]")
-# Транслит — длинные СТРОЧНЫЕ латинские слова. Аббревиатуры (ОФЗ, RGBI, IMOEX) заглавные,
-# имена собственные начинаются с заглавной; одиночный устоявшийся англицизм терпим.
-_TRANSLIT = re.compile(r"(?<![A-Za-z])[a-z]{5,}(?![A-Za-z])")
-_TRANSLIT_OK = {"spread", "carry", "hedge", "futures", "options", "basis", "funding"}
-
-
-def _defect(text):
-    """Явный брак ответа: пустота, обрубок, зацикливание, разметка вместо текста."""
-    t = (text or "").strip()
-    if len(t) < 40:
-        return "слишком короткий ответ"
-    # Все проверки ниже смотрят на голову текста: признаки брака (зацикливание,
-    # чужой язык, транслит) равномерны по ответу, а стоимость — нет.
-    head = t[:_SCAN_LIMIT]
-    if re.search(r"(.{12,}?)\1{2,}", head):
-        return "текст зациклился"
-    if t.count("```") or t.lstrip().startswith("{"):
-        return "вместо текста разметка или JSON"
-    if _FOREIGN_SCRIPT.search(head):
-        return "чужая письменность"
-    cyr = len(re.findall(r"[а-яёА-ЯЁ]", head))
-    lat = len(re.findall(r"[a-zA-Z]", head))
-    # Промпт требует русского, но требование можно и проигнорировать: англоязычный
-    # разбор до читателя доходить не должен.
-    if cyr + lat >= 40 and cyr / (cyr + lat) < 0.5:
-        return f"ответ не на русском (кириллицы {round(100 * cyr / (cyr + lat))}%)"
-    # Латиница и кириллица ВНУТРИ одного слова — «atractтивными», «фondовый». Промпт
-    # это запрещает прямым текстом, но первый же боевой ответ такое слово принёс.
-    # Порог в два слова намеренный: одна описка в семистах знаках — это опечатка, и
-    # выбрасывать из-за неё разумный разбор дороже, чем показать.
-    mixed = [w for w in re.findall(r"[^\W\d_]+", head, re.UNICODE)
-             if len(re.findall(r"[а-яёА-ЯЁ]", w)) >= 2 and len(re.findall(r"[a-zA-Z]", w)) >= 2]
-    if len(mixed) >= 2:
-        return "латиница вперемешку с кириллицей в словах: " + ", ".join(mixed[:3])
-    translit = [w for w in _TRANSLIT.findall(head) if w not in _TRANSLIT_OK]
-    if len(translit) >= 2:
-        return "похоже на транслитерацию: " + ", ".join(translit[:3])
-    return None
-
-
+# Проверка ответа — общий модуль llm_guard (тот же код в 842 и 843, тот же алгоритм в
+# 837/838): числа своего события, прогнозы, внутренние слова, язык, длина, метки блоков.
+# Брак текста (зацикливание, разметка, чужой язык) ищется в голове ответа — первых
+# llm_guard.SCAN_LIMIT знаках: поиск повтора квадратичен по длине, а интрадей-такт
+# живёт под RuntimeMaxSec.
 def parse(text, count):
-    """Разбор ответа по меткам ===N===. -> список длиной count (None где пусто)."""
-    marks = list(_BLOCK.finditer(text or ""))
-    if not marks:
-        return None
-    out = [None] * count
-    for i, m in enumerate(marks):
-        idx = int(m.group(1))
-        end = marks[i + 1].start() if i + 1 < len(marks) else len(text)
-        if 0 <= idx < count:
-            out[idx] = text[m.end():end].strip() or None
-    return out if any(out) else None
+    """Разбор ответа по меткам ===N===. -> список длиной count (None где пусто) | None."""
+    return llm_guard.parse_blocks(text, count)[0]
+
+
+def _stats_path():
+    return os.path.join(os.environ.get("STATE_DIR") or ".state", STATS_FILE)
+
+
+def _record(**kw):
+    """Итог обращения к модели — в недельный учёт. Сбой записи разбор не трогает."""
+    path = _stats_path()
+    llm_guard.save_stats(path, llm_guard.record(llm_guard.load_stats(path), _now(), **kw))
+
+
+def ops_tick(send, log=None):
+    """Раз в прогон: тревога об отказе API по доступу и строка за прошлую неделю.
+
+    send(text) -> bool — отправка в ops-канал панели. Никогда не бросает.
+    """
+    say = _sayer(log)
+    try:
+        path = _stats_path()
+        stats = llm_guard.load_stats(path)
+        sent = llm_guard.ops_tick(stats, _now(), PANEL, send, OPS_WHERE)
+        llm_guard.save_stats(path, stats)
+        for item in sent:
+            say(f"ops: {item}")
+    except Exception as exc:  # noqa: BLE001 — учёт не роняет прогон
+        say(f"ops: учёт разборов не сработал — {type(exc).__name__}: {str(exc)[:160]}")
 
 
 def today_msk(now=None):
@@ -331,6 +312,7 @@ class ApiError(Exception):
     def __init__(self, status, kind, message, retry_after=None):
         super().__init__(f"{status} {kind}: {message}")
         self.status, self.kind, self.retry_after = status, kind, retry_after
+        self.message = message
 
 
 def _post(body, key, timeout):
@@ -423,31 +405,45 @@ def _text_of(data):
                    if isinstance(b, dict) and b.get("type") == "text").strip()
 
 
-def ask(events, payload, key, seconds, log=None):
-    """Одна попытка. -> (комментарии | None, стоит ли повторять, пауза до повтора)."""
+def ask(events, payload, key, seconds, log=None, trace=None):
+    """Одна попытка. -> (комментарии | None, стоит ли повторять, пауза до повтора).
+
+    trace — словарь итога для недельного учёта: цена, вид отказа, отказ по доступу,
+    сводка проверки ответа.
+    """
     say = _sayer(log)
+    trace = trace if trace is not None else {}
     started = time.monotonic()
     name = model()
+    body = request_body(events, payload)
     try:
-        data = _call_with_deadline(request_body(events, payload), key, seconds)
+        data = _call_with_deadline(body, key, seconds)
     except ApiError as exc:
         retry = exc.status in RETRY_STATUSES
         say(f"{name}: отказ API {exc.status} {exc.kind} — {exc}"[:300])
+        trace["failed"] = f"API {exc.status}"
+        if llm_guard.access_problem(exc.status, exc.message):
+            trace["access"] = {"status": exc.status, "kind": exc.kind, "message": exc.message}
         return None, retry, exc.retry_after
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         say(f"{name}: запрос не удался — {type(exc).__name__}: {str(exc)[:160]}")
+        trace["failed"] = "таймаут" if isinstance(exc, TimeoutError) else "сеть"
         return None, True, None
     except Exception as exc:  # noqa: BLE001 — контракт модуля: разбор не роняет прогон
         say(f"{name}: непредвиденный отказ — {type(exc).__name__}: {str(exc)[:160]}")
+        trace["failed"] = "сбой запроса"
         return None, False, None
     try:
         if not isinstance(data, dict) or data.get("type") == "error":
             err = (data or {}).get("error") if isinstance(data, dict) else None
             say(f"{name}: тело-ошибка при 200 — {str(err)[:200]}")
+            trace["failed"] = "ошибка API"
             return None, True, None
         usage = data.get("usage") or {}
         usd = cost_usd(usage)
         _add_spend(today_msk(), usd)
+        trace["usd"] = trace.get("usd", 0.0) + usd
+        trace["ok"] = True
         thinking = (usage.get("output_tokens_details") or {}).get("thinking_tokens")
         stop = data.get("stop_reason")
         say(f"{data.get('model') or name}: вход {usage.get('input_tokens')}, выход {usage.get('output_tokens')}"
@@ -456,64 +452,69 @@ def ask(events, payload, key, seconds, log=None):
         if stop == "refusal":
             category = (data.get("stop_details") or {}).get("category")
             say(f"{name}: модель отказалась отвечать (категория {category}) — разбора не будет")
+            trace["failed"] = "отказ модели"
             return None, False, None
         if stop == "max_tokens":
             say(f"{name}: не хватило max_tokens={MAX_TOKENS} — ответ оборван, разбора не будет")
+            trace["failed"] = "обрыв ответа"
             return None, False, None
-        text = _text_of(data)
-        parsed = parse(text, len(events))
-        if parsed is None:
-            say(f"{name}: ответ не разобран ({len(text)} симв.): {text[:200]}")
-            return None, False, None
-        for i, item in enumerate(parsed):
-            if item is None:
-                continue
-            defect = _defect(item)
-            if defect:
-                say(f"{name}: комментарий к событию {i} отброшен — {defect}")
-                parsed[i] = None
-        if not any(parsed):
-            return None, False, None
-        return parsed, False, None
+        # Проверка смысла: числа своего события, прогнозы, внутренние слова, язык,
+        # длина, метки. Вырезанное и отброшенное — в журнал с причиной и текстом.
+        got, summary = llm_guard.review(_text_of(data), body["messages"][0]["content"], len(events),
+                                        strict=FORECAST_STRICT, say=lambda m: say(f"{name}: {m}"),
+                                        extra=SYSTEM.split("ФОРМАТ:")[0])
+        trace["summary"] = summary
+        return (got if any(got) else None), False, None
     except Exception as exc:  # noqa: BLE001 — контракт модуля: разбор не роняет прогон
         say(f"{name}: ответ не разобран — {type(exc).__name__}: {str(exc)[:160]}")
+        trace["failed"] = "сбой разбора"
         return None, False, None
 
 
 def comments(events, payload, log=None):
     """Комментарии к событиям в том же порядке. None — разбора нет (это норма)."""
     say = _sayer(log)
+    if not events:
+        return None
     key = api_key()
-    if not key or not events:
+    if not key:
+        _record(asked=len(events), failed="нет ключа")
         return None
     day = today_msk()
     spent, cap = _spend_today(day), daily_usd()
     if spent >= cap:
         say(f"суточный потолок расходов на разбор исчерпан (${spent:.2f} из ${cap:.2f}) — события уйдут без комментария")
+        _record(asked=len(events), failed="потолок $")
         return None
     budget = budget_s()
     left = deadline_left()
     if left is not None:
         budget = min(budget, left)
     started = time.monotonic()
+    trace = {}
+    got = None
     for attempt in range(ATTEMPTS):
         remaining = budget - (time.monotonic() - started)
         if remaining < MIN_ATTEMPT_S:
             say(f"на разбор осталось {max(remaining, 0):.0f} с — не начинаю"
                 + (" (дедлайн прогона)" if left is not None and left <= budget_s() else ""))
+            trace.setdefault("failed", "нет времени")
             break
-        got, retry, pause = ask(events, payload, key, remaining, log=say)
-        if got:
-            return got
-        if not retry or attempt + 1 >= ATTEMPTS:
+        got, retry, pause = ask(events, payload, key, remaining, log=say, trace=trace)
+        if got or not retry or attempt + 1 >= ATTEMPTS:
             break
         wait = min(pause if pause is not None else 2.0 * (attempt + 1), 20.0)
         if budget - (time.monotonic() - started) - wait < MIN_ATTEMPT_S:
             break
         say(f"повтор через {wait:.0f} с")
         time.sleep(wait)
-    say("модель не дала разбора — события уйдут без комментария")
-    return None
+    summary = trace.get("summary")
+    _record(asked=len(events), summary=summary,
+            failed=None if summary else (trace.get("failed") or "нет ответа"),
+            usd=trace.get("usd", 0.0), access=trace.get("access"), ok=trace.get("ok", False))
+    if not got:
+        say("модель не дала разбора — события уйдут без комментария")
+    return got
 
 
 def annotate(events, payload, log=None):

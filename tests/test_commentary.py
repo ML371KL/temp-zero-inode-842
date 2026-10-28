@@ -11,6 +11,9 @@
 * медленный ответ не съедает дедлайн прогона: предел по часам, а не по сокету;
 * суточный потолок в долларах останавливает разбор, а не доставку;
 * англоязычный, транслитный, зациклившийся ответ отбрасывается, а не показывается;
+* ответ проходит проверку смысла (llm_guard): фраза с числом не из входа вырезается,
+  сбой нумерации меток бракует весь ответ, и всё это видно в журнале;
+* итог каждого обращения ложится в недельный учёт, отказ API по доступу — в тревогу;
 * отсутствие ключа — законный режим, а не отказ.
 
 В сеть не ходим: подменяется urlopen внутри модуля.
@@ -339,20 +342,23 @@ class TestBadAnswers(CommentaryCase):
         with self._urlopen(message(mixed)):
             self.assertIsNone(self.mod.comments(self.events(), self.panel(), log=self.log.append))
 
-    def test_single_slip_is_tolerated(self):
-        # Одна описка в длинном разборе — не повод выбрасывать разумный текст.
-        one = ("===0===\nДоходности выглядят atractтивными на фоне ставки 14%, и это "
-               "меняет расклад для длинных облигаций в ближайшие месяцы.\n")
+    def test_single_slip_costs_one_sentence(self):
+        # Одна описка в разумном разборе — не повод выбрасывать весь текст: с 29.10.2026
+        # вырезается фраза с ней, остальное уходит читателю.
+        one = ("===0===\nДоходности выглядят atractтивными на фоне ставки 14%. Расклад для длинных "
+               "облигаций меняется медленно. Ставка 14% держит деньги на вкладах.\n")
         with self._urlopen(message(one)):
-            got = self.mod.comments(self.events(), self.panel())
-        self.assertIn("atract", got[0])
+            got = self.mod.comments(self.events(), self.panel(), log=self.log.append)
+        self.assertNotIn("atract", got[0])
+        self.assertIn("Расклад для длинных облигаций", got[0])
+        self.assertTrue(any("вырезано" in m and "atract" in m for m in self.log))
 
     def test_transliteration_and_foreign_script_are_dropped(self):
         # Оба дефекта видели вживую в 837: «kvantitativnogo uzhestocheniya», «продажи حكومات».
         for text in ("Модель пишет kvantitativnogo uzhestocheniya вместо русского языка в разборе ставки.",
                      "Продажи حكومات давят на рынок облигаций и ставку в течение всего месяца."):
             with self.subTest(text=text[:20]):
-                self.assertIsNotNone(self.mod._defect(text))
+                self.assertIsNone(self.mod.llm_guard.check(text)["text"])
 
     def test_looping_answer_is_dropped(self):
         loop = "===0===\n" + "рынок падает и падает, " * 12 + "\n"
@@ -393,13 +399,14 @@ class TestBadAnswers(CommentaryCase):
         def noise(n):
             return "".join(rnd.choice("абвгдеёжзийклмнопрстуфхцчшщыьэюя ") for _ in range(n))
 
-        clean = noise(self.mod._SCAN_LIMIT)
+        guard = self.mod.llm_guard
+        clean = noise(guard.SCAN_LIMIT)
         loop = "одна и та же длинная фраза подряд. " * 3000
         started = time.monotonic()
-        self.assertIsNone(self.mod._defect(clean + loop))
+        self.assertIsNone(guard._whole_fault(clean + loop))
         self.assertLess(time.monotonic() - started, 1.0, "разбор ответа встал в регулярке")
         # А брак в ГОЛОВЕ по-прежнему ловится — окно урезает цену, а не строгость.
-        self.assertEqual(self.mod._defect(loop + clean), "текст зациклился")
+        self.assertEqual(guard._whole_fault(loop + clean), "текст зациклился")
 
     def test_partial_answer_keeps_what_is_good(self):
         half = "===0===\n" + "Длинные ОФЗ дорожают первыми — обычный порядок в начале цикла снижения ставки.\n"
@@ -414,7 +421,7 @@ class TestAnnotate(CommentaryCase):
         # Санитарные уходят в ops-канал: разбор рынка там не к месту и стоит денег.
         evs = [{"kind": "source_stale", "text": "Источник iss: error."},
                {"kind": "core_flip", "text": "Ядро развернулось: +0.66."}]
-        with self._urlopen(message("===0===\nРазбор одного события про разворот ядра сюда.\n")):
+        with self._urlopen(message("===0===\nРазбор одного события про разворот оценки сюда.\n")):
             filled = self.mod.annotate(evs, self.panel())
         self.assertEqual(filled, 1)
         self.assertNotIn("comment", evs[0])
@@ -430,6 +437,93 @@ class TestAnnotate(CommentaryCase):
             self.assertEqual(self.mod.annotate(evs, self.panel()), 0)
         self.assertEqual(self.calls, [])
         self.assertEqual(evs[0]["comment"], "уже есть")
+
+
+class TestGuardWiring(CommentaryCase):
+    """Проверка смысла подключена к настоящему ответу, а итог — к недельному учёту."""
+
+    def stats(self):
+        with open(os.path.join(self.state, self.mod.STATS_FILE), encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_фраза_с_выдуманным_числом_вырезается_и_пишется_в_журнал(self):
+        answer = ("===0===\nИндекс 2323,82 растёт при ставке 14%. Доходности уйдут ещё на 30–50 бп. "
+                  "Ставка держит деньги в облигациях.\n===1===\n"
+                  "Движение рядовое и решения не меняет, за пределы обычного размаха оно не выходит.\n")
+        with self._urlopen(message(answer)):
+            got = self.mod.comments(self.events(), self.panel(), log=self.log.append)
+        self.assertEqual(got[0], "Индекс 2323,82 растёт при ставке 14%. Ставка держит деньги в облигациях.")
+        self.assertTrue(any("вырезано — числа не из входа: 30, 50" in m and "30–50 бп" in m
+                            for m in self.log), self.log)
+
+    def test_числа_формата_из_промпта_не_становятся_входом(self):
+        # Во вход проверки идёт только предметная часть промпта, до раздела формата:
+        # иначе любое «4» или «600» из «2–4 предложения, 600 знаков» проходило бы молча.
+        answer = ("===0===\nЗа 600 дней картина не изменилась. Ставка 14% держит деньги в облигациях. "
+                  "Рынок ждёт ясности по ставке.\n")
+        with self._urlopen(message(answer)):
+            got = self.mod.comments(self.events(), self.panel(), log=self.log.append)
+        self.assertNotIn("600", got[0])
+
+    def test_сбой_нумерации_меток_бракует_весь_ответ(self):
+        answer = "===1===\nРазбор не того события про ставку и облигации.\n===2===\nЕщё один разбор.\n"
+        with self._urlopen(message(answer), message(ANSWER)):
+            self.assertIsNone(self.mod.comments(self.events(), self.panel(), log=self.log.append))
+        self.assertEqual(len(self.calls), 1, "брак разметки повтором не лечится — лишние деньги")
+        self.assertTrue(any("вместо 0…1" in m for m in self.log))
+
+    def test_итог_обращения_в_недельном_учёте(self):
+        with self._urlopen(message(ANSWER, usage={"input_tokens": 2000, "output_tokens": 3000})):
+            self.mod.comments(self.events(), self.panel())
+        cur = self.stats()["cur"]
+        self.assertEqual((cur["asked"], cur["shown"]), (2, 2))
+        self.assertAlmostEqual(cur["usd"], 0.034, places=6)
+
+    def test_без_ключа_события_учтены_как_без_ответа(self):
+        os.environ.pop("ANTHROPIC_API_KEY", None)
+        self.mod.comments(self.events(), self.panel())
+        self.assertEqual(self.stats()["cur"]["failed"], {"нет ключа": 2})
+
+    def test_отказ_401_ставит_тревогу_и_она_уходит_один_раз(self):
+        with self._urlopen(http_error(401, "authentication_error")):
+            self.assertIsNone(self.mod.comments(self.events(), self.panel(), log=self.log.append))
+        self.assertEqual(len(self.calls), 1, "401 не лечится повтором")
+        self.assertEqual(self.stats()["access"]["status"], 401)
+        sent = []
+        self.mod.ops_tick(lambda text: sent.append(text) or True, log=self.log.append)
+        self.mod.ops_tick(lambda text: sent.append(text) or True, log=self.log.append)
+        self.assertEqual(len(sent), 1)
+        self.assertIn(self.mod.PANEL + " · ИИ-разбор не работает", sent[0])
+        self.assertIn(self.mod.OPS_WHERE, sent[0])
+        # ключ вернули — первый ответ закрывает эпизод строкой «снова работает»
+        with self._urlopen(message(ANSWER)):
+            self.mod.comments(self.events(), self.panel())
+        self.mod.ops_tick(lambda text: sent.append(text) or True)
+        self.assertIn("снова работает", sent[-1])
+
+    def test_нехватка_кредитов_400_тоже_тревога(self):
+        body = json.dumps({"type": "error", "error": {
+            "type": "invalid_request_error",
+            "message": "Your credit balance is too low to access the Anthropic API."}}).encode()
+        err = urllib.error.HTTPError("https://api.anthropic.com/v1/messages", 400, "err",
+                                     email.message.Message(), io.BytesIO(body))
+        with self._urlopen(err):
+            self.mod.comments(self.events(), self.panel())
+        self.assertEqual(self.stats()["access"]["status"], 400)
+
+    def test_перегрузка_не_тревога(self):
+        with self._urlopen(http_error(529)):
+            self.mod.comments(self.events(), self.panel())
+        self.assertNotIn("access", self.stats())
+        self.assertEqual(self.stats()["cur"]["failed"], {"API 529": 2})
+
+    def test_ops_tick_не_бросает_и_не_помечает_неушедшее(self):
+        def boom(_text):
+            raise OSError("телеграм лёг")
+        with self._urlopen(http_error(401, "authentication_error")):
+            self.mod.comments(self.events(), self.panel())
+        self.mod.ops_tick(boom, log=self.log.append)
+        self.assertFalse(self.stats()["access"]["alerted"], "тревога помечена ушедшей, хотя отправка упала")
 
 
 if __name__ == "__main__":
