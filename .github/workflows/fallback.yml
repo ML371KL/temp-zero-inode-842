@@ -204,7 +204,7 @@ jobs:
           # выключают соответствующий канал и шаг не роняют.
           ERROR_BOT_TOKEN: ${{ secrets.ERROR_BOT_TOKEN }}
           ERROR_CHAT_ID: ${{ secrets.ERROR_CHAT_ID }}
-          OPENROUTER_KEY: ${{ secrets.OPENROUTER_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           set -euo pipefail
           mkdir -p "$STATE_DIR"
