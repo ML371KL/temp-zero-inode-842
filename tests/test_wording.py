@@ -63,6 +63,21 @@ class TestNumbers(WordingCase):
                          "физлица купили на 12,3 млрд")
         self.assertIn("−5", self.w.ru_decimals("шаг -5 б.п."))
 
+    def test_длительность_без_нулевых_минут(self):
+        self.assertEqual(self.w.hours_minutes(15), "15 мин")
+        self.assertEqual(self.w.hours_minutes(1440), "24 ч")
+        self.assertEqual(self.w.hours_minutes(95), "1 ч 35 мин")
+
+    def test_момент_по_москве(self):
+        from datetime import datetime, timezone
+        ref = datetime(2026, 10, 21, 16, 0, tzinfo=timezone.utc)
+        self.assertEqual(self.w.msk_when("2026-10-21T15:30:16Z", ref), "18:30 МСК")
+        # 21:30 UTC 20.10 — уже 21.10 по Москве: тот же день, что и ref.
+        self.assertEqual(self.w.msk_when("2026-10-20T21:30:00Z", ref), "00:30 МСК")
+        self.assertEqual(self.w.msk_when("2026-10-19T20:00:00Z", ref), "19.10, 23:00 МСК")
+        self.assertEqual(self.w.msk_when("2025-12-31T12:00:00Z", ref), "31.12.2025, 15:00 МСК")
+        self.assertEqual(self.w.msk_when("мусор", ref), "н/д")
+
 
 class TestNames(WordingCase):
     def test_код_ячейки_превращается_в_слова(self):
