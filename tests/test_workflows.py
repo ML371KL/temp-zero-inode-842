@@ -93,5 +93,18 @@ class TestWorkflows(unittest.TestCase):
                             f"ключом YAML — блок разорван")
 
 
+class WatchdogChannelTest(unittest.TestCase):
+    """Сторож о смерти VPS пишет в ops-канал, а рыночный бот — только запас.
+
+    Аудит 28.10.2026: при порядке «TELEGRAM_* || ERROR_*» стоило завести рыночные
+    секреты в репозиторий — и тревога о смерти машины уехала бы к читателям сигналов.
+    """
+
+    def test_ops_secrets_come_first(self):
+        text = (ROOT / ".github" / "workflows" / "watchdog.yml").read_text(encoding="utf-8")
+        self.assertIn("secrets.ERROR_BOT_TOKEN || secrets.TELEGRAM_BOT_TOKEN", text)
+        self.assertIn("secrets.ERROR_CHAT_ID || secrets.TELEGRAM_CHAT_ID", text)
+        self.assertNotIn("secrets.TELEGRAM_BOT_TOKEN || secrets.ERROR_BOT_TOKEN", text)
+
 if __name__ == "__main__":
     unittest.main()
