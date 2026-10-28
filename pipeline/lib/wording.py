@@ -17,10 +17,12 @@
 """
 
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
+
+from pipeline.lib import constants
 
 __all__ = ["esc", "num", "pct", "signed", "ru_day", "ru_month", "plural",
-           "ru_decimals", "hours_minutes", "sentence", "regime_name", "points",
+           "ru_decimals", "hours_minutes", "msk_when", "sentence", "regime_name", "points",
            "KIND", "OPS_KIND", "cell_words", "cell_plain", "render_market",
            "render_ops", "plain_text"]
 
@@ -121,7 +123,34 @@ def hours_minutes(minutes):
         return "н/д"
     if total < 60:
         return f"{total} мин"
+    if total % 60 == 0:
+        return f"{total // 60} ч"
     return f"{total // 60} ч {total % 60} мин"
+
+
+MSK = timezone(timedelta(hours=constants.MSK_OFFSET_HOURS))
+
+
+def msk_when(moment, ref=None):
+    """Момент по Москве для читателя: «17:05 МСК» в тот же день, что `ref`, иначе
+    «13.10, 17:05 МСК»; год — только у прошлых лет. Принимает datetime или ISO-строку."""
+    if not isinstance(moment, datetime):
+        try:
+            moment = datetime.fromisoformat(str(moment).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return "н/д"
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    local = moment.astimezone(MSK)
+    clock = local.strftime("%H:%M") + " МСК"
+    if isinstance(ref, datetime):
+        ref_local = (ref if ref.tzinfo else ref.replace(tzinfo=timezone.utc)).astimezone(MSK)
+        if ref_local.date() == local.date():
+            return clock
+        day = local.strftime("%d.%m" if ref_local.year == local.year else "%d.%m.%Y")
+    else:
+        day = local.strftime("%d.%m")
+    return f"{day}, {clock}"
 
 
 # --------------------------------------------------------------- виды событий

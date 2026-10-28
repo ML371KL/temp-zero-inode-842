@@ -120,6 +120,8 @@ def load_state():
         _fix_deposit_sign(data[key])
     if not isinstance(data.get("last"), dict):
         data.pop("last", None)
+    if not isinstance(data.get("source_down"), dict):
+        data.pop("source_down", None)
     return data
 
 
@@ -623,18 +625,73 @@ def _deposit(payload, prev, state, now):
                 meaning=meaning)]
 
 
-def _sources(payload, prev, now):
+# ВЫДЕРЖКА санитарной тревоги об источнике — только на интрадей-такте.
+#
+# С 02.10 по 28.10.2026 в ops-канал ушло ≈20 санитарных сообщений 842, и почти
+# половина — пары «протух → снова отвечает» интрадей-такта через 2–10 минут:
+# 13.10 (ISS, один такт), 20.10 (ЦБ, один такт), 21.10 (Polymarket, два такта).
+# За месяц у интрадей-такта всего 4 неудачных прогона, самый длинный сбой — два
+# такта подряд. Такая пара ничего не просит у владельца: следующий такт уже
+# починил сам, а панель между ними считала по кэшу. Выдержка — та же, что у
+# ops-моста (dash-notify, 15 минут): сбой короче — тишина, дольше — одна тревога
+# с исходным временем начала и одна отбивка.
+#
+# ПОЧЕМУ НЕ ПО lag_min. fetched_at пишется и при ОШИБКЕ опроса (fetch.make_meta
+# кладёт его в meta всегда), поэтому у источника в ошибке lag_min ≈ 0 на каждом
+# такте. Выдержка «lag_min ≥ 15» заглушила бы долгий отказ навсегда. Начало сбоя
+# своё — `source_down` в состоянии алертов: оно переживает перезапуск процесса и
+# не зависит от того, что источник пишет о себе.
+#
+# ПОЧЕМУ ТОЛЬКО ИНТРАДЕЙ. Интрадей идёт раз в 5 минут, и следующий такт сам
+# скажет, был ли сбой коротким. У суточного (16:05, 20:55 UTC), месячного (три
+# раза в сутки) и недельного тактов следующий прогон — через 5 часов и больше:
+# выдержка там — это часы немоты, поэтому тревога сразу.
+#
+# Такт плавает на ±20 с (RandomizedDelaySec), а `now` берётся в начале прогона:
+# четвёртый подряд неудачный такт приходит через 14:40–15:20 после первого.
+# Допуск в минуту делает границу устойчивой: сбой в три такта (до 10 минут) —
+# тишина, четвёртый неудачный такт — тревога.
+SOURCE_HOLD = timedelta(minutes=15)
+SOURCE_HOLD_SLACK = timedelta(minutes=1)
+BAD_SOURCE = ("stale", "error")
+
+
+def _parse_ts(text):
+    try:
+        moment = datetime.fromisoformat(str(text).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def _source_down(state, current):
+    """Записи «источник сломан с …» для источников, которые ещё есть в сводке."""
+    raw = state.get("source_down")
+    if not isinstance(raw, dict):
+        return {}
+    return {name: dict(rec) for name, rec in raw.items()
+            if name in current and isinstance(rec, dict) and _parse_ts(rec.get("since"))}
+
+
+def _sources(payload, prev, state, now):
     out = []
     old = prev.get("sources") or {}
-    for name, meta in sorted((payload.get("sources") or {}).items()):
-        if not isinstance(meta, dict):
-            continue
+    current = {name: meta for name, meta in (payload.get("sources") or {}).items()
+               if isinstance(meta, dict)}
+    down = _source_down(state, current)
+    hold = payload.get("run_mode") == "intraday"
+    for name, meta in sorted(current.items()):
         st = meta.get("status")
-        was_bad = old.get(name) in ("stale", "error")
+        was_bad = old.get(name) in BAD_SOURCE
         series = meta.get("series")
         who = f"{name} ({series})" if series and series != name else name
         day = wording.ru_day(meta.get("asof") or payload.get("asof_trading_day"))
-        if st not in ("stale", "error"):
+        if st not in BAD_SOURCE:
+            # Источник в порядке: запись о сбое больше не нужна. Если сбой был
+            # коротким и тревога выдерживалась, снимок держал прежний «ok», и
+            # was_bad здесь ложно — отбивки без тревоги не бывает.
+            rec = down.pop(name, None)
+            since = _parse_ts((rec or {}).get("since"))
             # ОТБИВКА О ВЫЗДОРОВЛЕНИИ. Её здесь не было, и молчание после тревоги
             # оказывалось двусмысленным: «уже починилось» и «до сих пор лежит»
             # выглядят одинаково — никак. Оплачено 08.09.2026: ISS отвалился на
@@ -650,20 +707,39 @@ def _sources(payload, prev, now):
             # ключ quotes-agent, август 2026): ключ без ветки выздоровления
             # превращает канал в источник тревоги без разрядки.
             if was_bad:
+                lasted = (f" Сбой длился {wording.hours_minutes((now - since).total_seconds() / 60)}"
+                          f" (с {wording.msk_when(since, now)})."
+                          if since and now > since else "")
                 out.append(_ev(f"source_ok:{name}:{payload.get('asof_trading_day')}",
                                "source_ok", f"источник {who} снова отвечает",
                                "info", now,
                                fact=(f"Ряд {series}: данные от " if series and series != name
-                                     else "Данные в панели от ") + f"{day}.",
+                                     else "Данные в панели от ") + f"{day}." + lasted,
                                meaning="Жёлтая точка с тайлов этого источника снята — "
                                        "панель снова считает по свежим числам.",
                                where="Смотреть: раздел «Источники» на панели."))
             continue
         if was_bad:
             continue  # уже сообщали, повторять каждый прогон нельзя
+        # Начало сбоя — из записи прошлых тактов, иначе этот прогон. Время из
+        # будущего (часы машины перевели назад) считаем началом сейчас: иначе
+        # выдержка не кончилась бы никогда.
+        since = _parse_ts((down.get(name) or {}).get("since")) or now
+        since = min(since, now)
+        held = hold and now - since < SOURCE_HOLD - SOURCE_HOLD_SLACK
+        down[name] = {"since": _iso(since), "status": st, "held": held}
+        if held:
+            continue  # выдержка: снимок держит прежний статус (_snapshot_keeping_undelivered)
+        # «Последний удачный опрос» — только у протухшего по возрасту: у источника в
+        # ошибке fetched_at свежий (make_meta пишет его и при отказе), и «0 мин назад»
+        # про неудачный опрос читалось как «всё хорошо».
         age = meta.get("lag_min")
         age_txt = (f" Последний удачный опрос {wording.hours_minutes(age)} назад."
-                   if isinstance(age, (int, float)) else "")
+                   if isinstance(age, (int, float)) and st != "error" else "")
+        waited = now - since
+        if waited >= timedelta(minutes=1):
+            age_txt = (f" Сбой с {wording.msk_when(since, now)}, длится "
+                       f"{wording.hours_minutes(waited.total_seconds() / 60)}.") + age_txt
         # Две разные протухшести чинятся в разных местах: «не опрашивался» — это
         # конвейер или расписание, «отдаёт старое» — сам источник. Одно слово на
         # обе посылало владельца искать не там.
@@ -681,8 +757,10 @@ def _sources(payload, prev, now):
         # ISS сломал расчёт доходности ВДО, панель сказала «данные от 13.08», а
         # индекс был свежий).
         # (series/who/day посчитаны выше — их же использует отбивка о выздоровлении.)
+        # Время события — НАЧАЛО сбоя, а не конец выдержки: тревога, дождавшаяся
+        # четвёртого такта, говорит о том, что сломалось пятнадцать минут назад.
         out.append(_ev(f"source_stale:{name}:{payload.get('asof_trading_day')}",
-                       "source_stale", f"источник {who} {word}", "warn", now,
+                       "source_stale", f"источник {who} {word}", "warn", since,
                        fact=(f"Ряд {series}: данные от " if series and series != name
                              else "Данные в панели от ")
                             + f"{day}."
@@ -691,7 +769,14 @@ def _sources(payload, prev, now):
                                "рабочей — тайлы этого источника помечены жёлтой точкой.",
                        where=f"Смотреть: journalctl -u moex-radar-daily -n 50 "
                              f"и раздел «Источники» на панели."))
+    state["source_down"] = down
     return out
+
+
+def held_sources(state):
+    """Источники, тревога о которых сейчас выдерживается."""
+    return sorted(name for name, rec in (state.get("source_down") or {}).items()
+                  if isinstance(rec, dict) and rec.get("held"))
 
 
 def _health(payload, prev, now):
@@ -875,7 +960,7 @@ def detect(payload, state, now=None, merge=True):
     events += _orfr(payload, prev, now)
     events += _auction(payload, prev, now)
     events += _deposit(payload, prev, state, now)
-    events += _sources(payload, prev, now)
+    events += _sources(payload, prev, state, now)
     events += _health(payload, prev, now)
     events += _core_missing(payload, prev, now)
     return merge_regime(events) if merge else events
@@ -1053,9 +1138,26 @@ LATCH_FIELDS = {
 }
 
 
-def _snapshot_keeping_undelivered(payload, prev_last, batch, now):
-    """Снимок текущего состояния, но защёлки недоставленных событий откатываются назад."""
+def _keep_prev_source(snap, prev_last, name):
+    prev_sources = prev_last.get("sources") or {}
+    if name in prev_sources:
+        snap.setdefault("sources", {})[name] = prev_sources[name]
+    else:
+        # Источник впервые появился уже сломанным: раньше его в снимке не
+        # было — убираем и сейчас, чтобы переход случился заново.
+        (snap.get("sources") or {}).pop(name, None)
+
+
+def _snapshot_keeping_undelivered(payload, prev_last, batch, now, held=()):
+    """Снимок текущего состояния, но защёлки недоставленных событий откатываются назад.
+
+    `held` — источники на выдержке: о сбое ещё не сообщали, поэтому снимок держит их
+    прежний статус. Иначе следующий такт увидел бы «уже сломан» и промолчал как
+    «уже сообщали», а выздоровление прислало бы отбивку без тревоги.
+    """
     snap = snapshot(payload, now)
+    for name in held:
+        _keep_prev_source(snap, prev_last, name)
     for event in batch:
         if event.get("delivered"):
             continue
@@ -1068,13 +1170,8 @@ def _snapshot_keeping_undelivered(payload, prev_last, batch, now):
             # sources; имя достаётся из ключа события (source_stale:<имя>:<день>).
             parts = str(event.get("key") or "").split(":")
             name = parts[1] if len(parts) > 2 else None
-            prev_sources = prev_last.get("sources") or {}
-            if name and name in prev_sources:
-                snap.setdefault("sources", {})[name] = prev_sources[name]
-            elif name:
-                # Источник впервые появился уже сломанным: раньше его в снимке не
-                # было — убираем и сейчас, чтобы переход случился заново.
-                (snap.get("sources") or {}).pop(name, None)
+            if name:
+                _keep_prev_source(snap, prev_last, name)
     return snap
 
 
@@ -1109,7 +1206,8 @@ def run(payload, dry_run=False, enabled=True, now=None, seed_payload=None, log=N
     dispatch(batch, dry_run=dry_run, enabled=enabled)
 
     _feed_add(state, events)
-    state["last"] = _snapshot_keeping_undelivered(payload, prev_last, batch, now)
+    state["last"] = _snapshot_keeping_undelivered(payload, prev_last, batch, now,
+                                                  held=held_sources(state))
     state["pending"] = _requeue(batch)
     if not dry_run:
         # В dry-run состояние НЕ трогаем: иначе прогон «на посмотреть» съедает
