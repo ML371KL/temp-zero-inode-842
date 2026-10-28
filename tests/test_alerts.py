@@ -393,7 +393,9 @@ class TestCbHold(AlertsCase):
         ev = self.fire()[0]
         self.assertIn("сохранил", ev["title"])
         self.assertIn("14,00%", ev["detail"])
-        self.assertIn("11.09.2026", ev["detail"])
+        # Год текущий — не пишется (стандарт сообщений §3).
+        self.assertIn("Заседание 11.09.", ev["detail"])
+        self.assertNotIn("2026", ev["detail"])
         # «было → стало» у сохранения одинаковы и в сообщение не идут.
         self.assertFalse(ev.get("before"))
         self.assertFalse(ev.get("after"))
@@ -423,8 +425,12 @@ class TestCbHold(AlertsCase):
         self.assertEqual(ev["severity"], "warn")
 
     def test_без_консенсуса_не_выдумываем_сюрприз(self):
+        # Сюрприза нет, и фразы «сказать нечем» тоже нет: пустое не печатается
+        # (стандарт сообщений §1).
         ev = self.fire(cons=None)[0]
-        self.assertIn("не внесён", ev["meaning"])
+        self.assertFalse(ev.get("meaning"))
+        self.assertNotIn("ожидани", ev["text"])
+        self.assertEqual(ev["severity"], "info")
 
     def test_без_заседания_в_окне_молчим(self):
         # last_meeting гаснет через неделю (тайл), и событие не должно оживать.
@@ -477,7 +483,8 @@ class TestCbDecision(AlertsCase):
         # нечем» лучше сюрприза от чужих ожиданий.
         ev = self.decide(16.0, 15.0, consensus=14.0, last_consensus=None)
         self.assertEqual(ev["severity"], "info")
-        self.assertIn("нечем", ev["meaning"])
+        self.assertFalse(ev.get("meaning"), "сюрприз от чужих ожиданий")
+        self.assertNotIn("14,00", ev["text"])
 
     def test_совпадение_с_ожиданиями_спокойное(self):
         ev = self.decide(16.0, 15.0, last_consensus=15.0)
@@ -819,9 +826,9 @@ class TestTexts(AlertsCase):
         внутри сообщения, а между сообщением и всем остальным, что видит владелец.
         """
         for ev in self.all_kinds():
-            # Даты (11.08.2026) из проверки вычёркиваем: точка там разделитель
+            # Даты (11.08.2026, 11.08) из проверки вычёркиваем: точка там разделитель
             # частей даты, а не дробной части, и пишется она так намеренно.
-            body = re.sub(r"\b\d{2}\.\d{2}\.\d{4}\b", " ", ev["text"])
+            body = re.sub(r"\b\d{2}\.\d{2}(?:\.\d{4})?\b", " ", ev["text"])
             self.assertIsNone(re.search(r"\d\.\d", body),
                               f"{ev['kind']}: точка как десятичный разделитель — {ev['text']}")
 
@@ -950,7 +957,7 @@ class TestRequeueKeepsStructure(AlertsCase):
         ops = "\n".join(self.by_channel.get("ops") or [])
         self.assertIn("journalctl", ops, "повтор потерял «куда смотреть»")
         self.assertIn("не отвечает", ops, "повтор потерял заголовок события")
-        self.assertIn("05.08.2026", ops, "повтор потерял факт с датой данных")
+        self.assertIn("от 05.08.", ops, "повтор потерял факт с датой данных")
 
     def test_повтор_рыночного_не_слипается_в_жирный_ком(self):
         self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
@@ -1007,7 +1014,7 @@ class TestSourceStaleNamesSeries(AlertsCase):
         ev = self.fire(series="rucbhycp_yield")
         self.assertIn("rucbhycp_yield", ev["title"])
         self.assertIn("rucbhycp_yield", ev["fact"])
-        self.assertIn("13.08.2026", ev["fact"])
+        self.assertIn("от 13.08.", ev["fact"])
 
     def test_без_имени_ряда_текст_прежний(self):
         # Семья может не знать ряда (старое состояние, чужой писатель) — тогда
@@ -1058,7 +1065,7 @@ class TestSourceRecovery(AlertsCase):
         self.assertIn("iss", ev["title"])
         self.assertIn("снова", ev["title"])
         self.assertEqual(ev["severity"], "info")
-        self.assertIn("11.08.2026", ev["fact"])
+        self.assertIn("от 11.08.", ev["fact"])
 
     def test_отбивка_санитарная(self):
         # Тревога уходит в ops-канал — отбивке место там же, иначе она осядет в
@@ -1601,7 +1608,8 @@ class HealthReviewWordingCase(AlertsCase):
         ev = self.fire()
         self.assertIn("интервал", ev["fact"])
         self.assertIn("12 месяцев подряд", ev["fact"])
-        self.assertIn("сентябрь 2025", ev["fact"])
+        # «с сентября», а не «с сентябрь» (аудит 28.10.2026, B5).
+        self.assertIn("(с сентября 2025)", ev["fact"])
 
     def test_смысл_называет_реколибровку_а_не_позицию(self):
         ev = self.fire()
@@ -1622,19 +1630,21 @@ class TestPositionChange(AlertsCase):
         self.seed(payload(position="long"))
         evs = self.alerts.run(payload(position="flat"), dry_run=False, now=NOW)
         ev = next(e for e in evs if e["kind"] == "position_change")
-        self.assertEqual(ev["title"], "Позиция: акции → деньги")
+        # Заголовок называет действие; движение со ставкой — строкой ниже. Прежний
+        # заголовок повторял её дословно (аудит 28.10.2026, B5).
+        self.assertEqual(ev["title"], "Позиция: переход в деньги")
         self.assertEqual(ev["before"], "акции")
         self.assertEqual(ev["after"], "деньги (ставка 12,9%)")
         self.assertIn("ворота закрылись", ev["detail"].lower())
         self.assertIn("следующем закрытии", ev["detail"])
-        self.assertIn("07.08.2026", ev["detail"])
+        self.assertIn("Решение от 07.08,", ev["detail"])
         self.assertEqual(ev["severity"], "warn")
 
     def test_переход_в_акции(self):
         self.seed(payload(position="flat"))
         evs = self.alerts.run(payload(position="long"), dry_run=False, now=NOW)
         ev = next(e for e in evs if e["kind"] == "position_change")
-        self.assertEqual(ev["title"], "Позиция: деньги → акции")
+        self.assertEqual(ev["title"], "Позиция: переход в акции")
         self.assertEqual((ev["before"], ev["after"]), ("деньги (ставка 12,9%)", "акции"))
         self.assertEqual(ev["severity"], "info")
 

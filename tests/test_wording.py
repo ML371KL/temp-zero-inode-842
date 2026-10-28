@@ -126,27 +126,33 @@ class TestRender(WordingCase):
     def event(self, **kw):
         base = {"kind": "cb_decision", "title": "Банк России снизил ключевую ставку",
                 "before": "15,00%", "after": "14,00%",
-                "detail": "Шаг −100 базисных пунктов."}
+                "detail": "Шаг −100 б.п.", "ts": "2026-08-12T09:00:00Z"}
         base.update(kw)
         return base
 
     def test_рыночное_сообщение_собрано_как_у_соседей(self):
         got = self.w.render_market(self.event(comment="Ставка идёт к нейтральной."))
         lines = got.split("\n")
-        self.assertEqual(lines[0], "📊 <b>Банк России снизил ключевую ставку</b>")
+        # Пометка панели — первым словом заголовка, значок — по направлению.
+        self.assertEqual(lines[0], "📉 <b>Рынок РФ · Банк России снизил ключевую ставку</b>")
         self.assertEqual(lines[1], "15,00% → <b>14,00%</b>")
-        self.assertEqual(lines[-2], "", "разбор модели отбивается пустой строкой")
-        self.assertTrue(lines[-1].startswith("💬 "))
+        comment = next(i for i, line in enumerate(lines) if line.startswith("💬 "))
+        self.assertEqual(lines[comment - 1], "", "разбор модели отбивается пустой строкой")
+        # Подвал — последней строкой после пустой: ссылка и время события по Москве.
+        self.assertEqual(lines[-2], "")
+        self.assertEqual(lines[-1], '<a href="https://tzi-842.pages.dev">Открыть панель</a>'
+                                    " · 12.08, 12:00 МСК")
 
     def test_без_комментария_пустой_строки_нет(self):
         got = self.w.render_market(self.event())
         self.assertNotIn("💬", got)
         self.assertFalse(got.endswith("\n"))
+        self.assertEqual(got.count("\n\n"), 1, "пустая строка — только перед подвалом")
 
     def test_данные_экранируются_а_разметка_нет(self):
         got = self.w.render_market(self.event(title="ЦБ <b>поднял</b> ставку"))
         self.assertIn("&lt;b&gt;поднял&lt;/b&gt;", got)
-        self.assertTrue(got.startswith("📊 <b>"), "своя разметка не должна экранироваться")
+        self.assertIn("<b>Рынок РФ · ЦБ &lt;b&gt;", got, "своя разметка не должна экранироваться")
 
     def test_санитарное_в_формате_общего_мостика(self):
         """Тот же вид, что шлёт /usr/local/sbin/dash-notify для 837, 838 и 839."""
@@ -155,10 +161,11 @@ class TestRender(WordingCase):
                                  "meaning": "Похоже на неполный набор рядов.",
                                  "where": "Смотреть: карточку «Здоровье модели»."})
         lines = got.split("\n")
-        self.assertEqual(lines[0], "🔴 <b>842 · панель потеряла оценку</b>")
-        self.assertEqual(len(lines), 4, "факт, следствие и «куда смотреть» — три строки")
-        self.assertTrue(lines[-1].startswith("Смотреть:"),
+        self.assertEqual(lines[0], "🔴 <b>Рынок РФ · Панель потеряла оценку</b>")
+        self.assertEqual(len(lines), 6, "факт, следствие, «куда смотреть», пустая, подвал")
+        self.assertTrue(lines[3].startswith("Смотреть:"),
                         "сообщение о поломке без адреса поломки заставляет искать заново")
+        self.assertTrue(lines[-1].startswith('<a href="https://tzi-842.pages.dev">'))
 
     def test_порог_здоровья_жёлтый_а_не_красный(self):
         # health_review — достигнутый порог плановой ревалидации, а не поломка:
@@ -169,12 +176,15 @@ class TestRender(WordingCase):
         self.assertNotIn("health_dead", self.w.OPS_KIND)
 
     def test_у_смены_позиции_свой_вид(self):
-        self.assertEqual(self.w.KIND["position_change"]["emoji"], "🧭")
+        # Смена позиции — главное событие панели: 🔔 по словарю стандарта §4.
+        self.assertEqual(self.w.KIND["position_change"]["emoji"], "🔔")
 
     def test_длинное_сообщение_режется_под_предел_телеграма(self):
         got = self.w.render_market(self.event(detail="я" * 6000))
         self.assertLessEqual(len(got), self.w.TG_LIMIT)
-        self.assertTrue(got.endswith("…"))
+        self.assertIn("…", got)
+        # Режется тело, подвал со ссылкой остаётся целым.
+        self.assertTrue(got.endswith("12:00 МСК"), got[-80:])
 
     def test_плоский_текст_для_журнала_без_разметки(self):
         got = self.w.plain_text(self.event())

@@ -169,7 +169,8 @@ class TestCompose(NexusCase):
               "title": "Аукцион ОФЗ не состоялся",
               "text": "Аукцион ОФЗ не состоялся 12.08.2026: размещено 0,0 млрд рублей."}
         message = alerts.render(ev)
-        self.assertTrue(message.startswith("⚠️ <b>Аукцион ОФЗ не состоялся</b>"), message)
+        self.assertTrue(message.startswith("⚠️ <b>Рынок РФ · Аукцион ОФЗ не состоялся</b>"),
+                        message)
 
         with self._urlopen():
             self.nexus.deliver(ev)
