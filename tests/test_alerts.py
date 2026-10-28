@@ -967,6 +967,24 @@ class TestRequeueKeepsStructure(AlertsCase):
         self.assertLess(len(head), 120,
                         "повтор завернул весь текст события в одну жирную строку")
 
+    def test_повтор_слитого_поворота_несёт_что_за_этим_стоит(self):
+        """Аудит 28.10.2026: `causes` не было в EVENT_FIELDS.
+
+        Слитый поворот режима (merge_regime) объясняет себя блоком «Что за этим
+        стоит». Первая отправка его несла, а повтор из очереди терял: поле не
+        переживало pending, и читатель получал смену режима без причины.
+        """
+        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
+        self.online = False
+        self.alerts.run(payload(vol=1, bond=0, cell="bear|stress|ok"),
+                        dry_run=False, now=NOW)
+        self.online = True
+        self.alerts.run(payload(vol=1, bond=0, cell="bear|stress|ok"),
+                        dry_run=False, now=NOW + timedelta(hours=1))
+        market = "\n".join(self.by_channel.get("alerts") or [])
+        self.assertIn("Что за этим стоит", market,
+                      "повтор из очереди потерял блок «Что за этим стоит»")
+
 
 class TestSourceStaleNamesSeries(AlertsCase):
     """Сообщение об отставшем источнике называет КОНКРЕТНЫЙ ряд.
