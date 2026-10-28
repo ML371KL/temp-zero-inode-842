@@ -86,13 +86,22 @@ def daily_usd():
     return _float_env("LLM_DAILY_USD", DAILY_USD_DEFAULT)
 
 
+def _now():
+    """Часы модуля одной точкой: тесты подменяют их, а не читают текущее время."""
+    return datetime.now(timezone.utc)
+
+
+def _epoch():
+    return time.time()
+
+
 def deadline_left():
     """Сколько секунд осталось до LLM_DEADLINE_AT; None — обвязка срока не ставила."""
     raw = (os.environ.get("LLM_DEADLINE_AT") or "").strip()
     if not raw:
         return None
     try:
-        return float(raw) - time.time()
+        return float(raw) - _epoch()
     except ValueError:
         return None
 
@@ -282,7 +291,7 @@ def parse(text, count):
 
 
 def today_msk(now=None):
-    return (now or datetime.now(timezone.utc)).astimezone(MSK).strftime("%d.%m.%Y")
+    return (now or _now()).astimezone(MSK).strftime("%d.%m.%Y")
 
 
 def request_body(events, payload):

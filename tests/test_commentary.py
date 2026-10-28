@@ -27,9 +27,15 @@ import threading
 import time
 import unittest
 import urllib.error
+from datetime import datetime, timezone
 from unittest import mock
 
 from tests import need
+
+# Часы набора заморожены — правило CI: тесты не смотрят на текущее время.
+NOW = datetime(2026, 10, 28, 12, 0, tzinfo=timezone.utc)
+EPOCH = NOW.timestamp()
+TODAY = "28.10.2026"
 
 ANSWER = ("===0===\n"
           "Рынок отыгрывает смягчение ставки: длинные ОФЗ дорожают первыми, и это "
@@ -87,9 +93,12 @@ class CommentaryCase(unittest.TestCase):
         self.calls = []
         self.log = []
         self.sleeps = []
-        patcher = mock.patch.object(self.mod.time, "sleep", self.sleeps.append)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for target, name, value in ((self.mod.time, "sleep", self.sleeps.append),
+                                    (self.mod, "_now", lambda: NOW),
+                                    (self.mod, "_epoch", lambda: EPOCH)):
+            patcher = mock.patch.object(target, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def _restore(self):
         for key, val in self.prev.items():
@@ -157,8 +166,7 @@ class TestHappyPath(CommentaryCase):
         with self._urlopen(message(ANSWER)):
             self.mod.comments(self.events(), self.panel())
         user = json.loads(self.calls[0]["body"]["messages"][0]["content"])
-        self.assertRegex(user["сегодня"], r"^\d{2}\.\d{2}\.\d{4}$")
-        self.assertEqual(user["сегодня"], self.mod.today_msk())
+        self.assertEqual(user["сегодня"], TODAY)
 
     def test_model_and_effort_can_be_overridden(self):
         os.environ["MOEX_LLM_MODEL"] = "claude-opus-5-5"
@@ -266,14 +274,14 @@ class TestTimeAndMoney(CommentaryCase):
         self.assertLess(time.monotonic() - started, 4.0, "ожидание ответа не ограничено по часам")
 
     def test_run_deadline_leaves_no_time_for_the_model(self):
-        os.environ["LLM_DEADLINE_AT"] = str(time.time() + 5)
+        os.environ["LLM_DEADLINE_AT"] = str(EPOCH + 5)
         with self._urlopen(message(ANSWER)):
             self.assertIsNone(self.mod.comments(self.events(), self.panel(), log=self.log.append))
         self.assertEqual(self.calls, [], "запрос начат, когда до дедлайна прогона не хватает времени")
         self.assertTrue(any("дедлайн" in m for m in self.log))
 
     def test_request_timeout_follows_the_budget(self):
-        os.environ["LLM_DEADLINE_AT"] = str(time.time() + 40)
+        os.environ["LLM_DEADLINE_AT"] = str(EPOCH + 40)
         with self._urlopen(message(ANSWER)):
             self.mod.comments(self.events(), self.panel())
         self.assertLessEqual(self.calls[0]["timeout"], 40)
@@ -298,13 +306,13 @@ class TestTimeAndMoney(CommentaryCase):
             self.mod.comments(self.events(), self.panel())
         with open(os.path.join(self.state, self.mod.SPEND_FILE), encoding="utf-8") as fh:
             spent = json.load(fh)
-        self.assertEqual(spent["day"], self.mod.today_msk())
+        self.assertEqual(spent["day"], TODAY)
         self.assertAlmostEqual(spent["usd"], 0.034, places=6)
 
     def test_daily_cap_stops_the_model_not_the_delivery(self):
         os.environ["LLM_DAILY_USD"] = "0.05"
         with open(os.path.join(self.state, self.mod.SPEND_FILE), "w", encoding="utf-8") as fh:
-            json.dump({"day": self.mod.today_msk(), "usd": 0.06}, fh)
+            json.dump({"day": TODAY, "usd": 0.06}, fh)
         with self._urlopen(message(ANSWER)):
             self.assertIsNone(self.mod.comments(self.events(), self.panel(), log=self.log.append))
         self.assertEqual(self.calls, [], "потолок расходов исчерпан, а запрос ушёл")
