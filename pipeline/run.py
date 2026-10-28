@@ -36,7 +36,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from pipeline import alerts, publish as publish_mod             # noqa: E402
-from pipeline.lib import constants, lease, r2, registry, runbudget, telegram  # noqa: E402
+from pipeline.lib import commentary, constants, lease, r2, registry, runbudget, telegram  # noqa: E402
 from pipeline.lib.http import FetchError                        # noqa: E402
 
 MISSING_MODULES = {}
@@ -790,6 +790,13 @@ def main(argv=None):
             alerts.after_publish(res, dry_run=args.dry_run, enabled=True, now=now)
         except Exception as exc:  # noqa: BLE001 — граница изоляции
             journal.warn("alerts", f"санитарные события упали: {type(exc).__name__}: {exc}")
+    # Учёт ИИ-разборов: тревога, если API отказал по доступу (ключ отозван, кончились
+    # кредиты), и раз в неделю строка «показано N из M, отбраковано K, потрачено $X».
+    # Зовётся каждым прогоном, а не только при событиях: неделя без событий тоже неделя,
+    # а сбой отправки повторится следующим тактом.
+    if not args.no_alerts and not args.dry_run:
+        commentary.ops_tick(lambda text: telegram.send(text, channel="ops")[0],
+                            log=lambda m: journal.line("alerts", m))
     try:
         telegram.prune_markers()
     except Exception as exc:  # noqa: BLE001
