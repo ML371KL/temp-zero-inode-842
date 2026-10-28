@@ -121,15 +121,18 @@ def send(text, silent=False, retries=2, channel="alerts"):
     # (dash-notify). Разметка ограничена <b> и <i>: жирным идёт заголовок и «стало»,
     # курсивом — пометки. Данные экранирует lib/wording.esc, собственную разметку
     # экранировать нельзя, иначе она уедет читателю тегами.
-    body = json.dumps({"chat_id": cfg["chat"], "text": text[:4000],
-                       "parse_mode": "HTML",
-                       "disable_web_page_preview": True,
-                       "disable_notification": bool(silent)}, ensure_ascii=False)
-    req = urllib.request.Request(f"{API}/bot{cfg['token']}/sendMessage",
-                                 data=body.encode("utf-8"), method="POST")
-    req.add_header("content-type", "application/json; charset=utf-8")
+    fields = {"chat_id": cfg["chat"], "text": text[:4000],
+              "parse_mode": "HTML",
+              "disable_web_page_preview": True,
+              "disable_notification": bool(silent)}
     last = "неизвестно"
-    for attempt in range(1, retries + 1):
+    attempt = 0
+    while attempt < retries:
+        attempt += 1
+        req = urllib.request.Request(f"{API}/bot{cfg['token']}/sendMessage",
+                                     data=json.dumps(fields, ensure_ascii=False).encode("utf-8"),
+                                     method="POST")
+        req.add_header("content-type", "application/json; charset=utf-8")
         try:
             with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
                 payload = json.loads(resp.read().decode("utf-8", "replace"))
@@ -141,6 +144,16 @@ def send(text, silent=False, retries=2, channel="alerts"):
                 last = exc.read()[:200].decode("utf-8", "replace")
             except OSError:
                 last = f"HTTP {exc.code}"
+            # Сломанная разметка («can't parse entities»: неэкранированный «<» в
+            # данных, обрезка посреди тега) — то же сообщение простым текстом и без
+            # parse_mode. Иначе событие падало бы одинаково на каждом повторе из
+            # очереди (стандарт сообщений §5; у 837/838/843 так уже было).
+            if exc.code == 400 and "can't parse entities" in last.lower() \
+                    and "parse_mode" in fields:
+                fields = {k: v for k, v in fields.items() if k != "parse_mode"}
+                fields["text"] = html_to_plain(text)[:4000]
+                attempt -= 1          # повтор простым текстом попытку не съедает
+                continue
             if exc.code in (400, 401, 403, 404):
                 return False, last  # неверный токен/чат — ретрай не поможет
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
@@ -148,6 +161,15 @@ def send(text, silent=False, retries=2, channel="alerts"):
         if attempt < retries:
             time.sleep(1.5)
     return False, last
+
+
+_TAG = re.compile(r"<[^>]*>")
+
+
+def html_to_plain(text):
+    """HTML телеграма -> тот же текст без разметки: для повтора без parse_mode."""
+    return (_TAG.sub("", str(text or "")).replace("&lt;", "<").replace("&gt;", ">")
+            .replace("&quot;", '"').replace("&#39;", "'").replace("&amp;", "&"))
 
 
 def deliver(key, text, silent=False, cooldown_hours=None, channel="alerts"):

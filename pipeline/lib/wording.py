@@ -24,7 +24,8 @@ from pipeline.lib import constants
 __all__ = ["esc", "num", "pct", "signed", "ru_day", "ru_month", "plural",
            "ru_decimals", "hours_minutes", "msk_when", "sentence", "regime_name", "points",
            "KIND", "OPS_KIND", "cell_words", "cell_plain", "render_market",
-           "render_ops", "plain_text"]
+           "render_ops", "plain_text", "pp", "bp", "ru_date", "emoji", "footer",
+           "PANEL_LABEL", "PANEL_URL"]
 
 TG_LIMIT = 4000          # предел телеграма 4096; запас на служебные хвосты
 MINUS = "−"         # типографский минус: в тексте рядом стоят дефисы переносов
@@ -45,14 +46,42 @@ def num(value, digits=1, plus=False, dash="н/д"):
     """
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return dash
-    text = f"{value:{'+' if plus else ''},.{digits}f}"
-    return (text.replace(",", " ").replace(".", ",")
-                .replace("-", MINUS).replace("+", "+"))
+    # Единый стандарт сообщений (29.10.2026): разряды — неразрывным пробелом с
+    # 10 000, четырёхзначные слитно («2391,72», а не «2 391,72»). Порог — по
+    # округлённому числу: 9999,96 с одним знаком — это уже «10 000,0».
+    rounded = round(float(value), digits)
+    if rounded == 0:
+        rounded = 0.0          # «−0,00» после округления читается как падение
+    group = "," if abs(rounded) >= 10000 else ""
+    text = f"{rounded:{'+' if plus else ''}{group}.{digits}f}"
+    return text.replace(",", NBSP).replace(".", ",").replace("-", MINUS)
+
+
+NBSP = "\u00a0"          # неразрывный пробел: телеграм не рвёт по нему число и единицу
 
 
 def pct(value, digits=1, plus=False, dash="н/д"):
     out = num(value, digits, plus, dash)
     return out if out == dash else out + "%"
+
+
+def pp(value, digits=2, plus=True, dash="н/д"):
+    """Процентные пункты: «+0,06 п.п.» — знак у изменения всегда, единица через
+    неразрывный пробел."""
+    out = num(value, digits, plus, dash)
+    return out if out == dash else out + NBSP + "п.п."
+
+
+def bn_rub(value, digits=1, plus=False, dash="н/д"):
+    """Миллиарды рублей: «−7,1 млрд ₽» — единицы через неразрывный пробел."""
+    out = num(value, digits, plus, dash)
+    return out if out == dash else out + NBSP + "млрд" + NBSP + "₽"
+
+
+def bp(value, plus=True, dash="н/д"):
+    """Базисные пункты: «−25 б.п.»."""
+    out = num(value, 0, plus, dash)
+    return out if out == dash else out + NBSP + "б.п."
 
 
 def signed(value, digits=2, dash="н/д"):
@@ -81,6 +110,22 @@ def ru_day(value, with_year=True):
     except ValueError:
         return raw or "н/д"
     return when.strftime("%d.%m.%Y" if with_year else "%d.%m")
+
+
+def ru_date(value, ref=None):
+    """Дата для сообщения: «15.10» в год `ref` (момента события), «15.10.2025» — для
+    прошлых лет. Без `ref` год пишется всегда: угадывать «текущий» по часам машины
+    модуль не берётся."""
+    raw = str(value or "")[:10]
+    try:
+        when = date.fromisoformat(raw)
+    except ValueError:
+        return raw or "н/д"
+    if isinstance(ref, datetime):
+        ref_local = (ref if ref.tzinfo else ref.replace(tzinfo=timezone.utc)).astimezone(MSK)
+        if ref_local.year == when.year:
+            return when.strftime("%d.%m")
+    return when.strftime("%d.%m.%Y")
 
 
 _MONTHS = ("января", "февраля", "марта", "апреля", "мая", "июня", "июля",
@@ -155,27 +200,70 @@ def msk_when(moment, ref=None):
 
 # --------------------------------------------------------------- виды событий
 #
-# Эмодзи несёт вид события, а не эмоцию: читатель на телефоне отличает их раньше,
-# чем прочитает заголовок. Набор и роль — те же, что у 837/838.
+# Эмодзи — одна в начале заголовка, по словарю единого стандарта сообщений
+# (TELEGRAM-STYLE-2026-10-29, §4): 🔔 смена позиции или режима — главное событие,
+# 📈/📉 движение показателя строго по направлению, ⚠️ риск, 🗓 календарь и выход
+# статистики. Направление у 📈/📉 несёт поле события `direction` ("up"/"down"):
+# у разворота оценки, решения ЦБ и вкладов оно своё в каждом событии.
 KIND = {
     # Позиция — итог ворот и наклона, отдельный слой поверх обоих: своё событие,
     # в семейство режима не сливается (alerts.REGIME_FAMILY).
-    "position_change":   {"emoji": "🧭", "label": "смена позиции"},
-    "core_flip":         {"emoji": "🎯", "label": "смена оценки рынка"},
-    "state_cell_change": {"emoji": "🔀", "label": "смена признаков рынка"},
+    "position_change":   {"emoji": "🔔", "label": "смена позиции"},
+    "core_flip":         {"emoji": "📈", "label": "смена оценки рынка"},
+    "state_cell_change": {"emoji": "🔔", "label": "смена признаков рынка"},
     "bond_flag_on":      {"emoji": "⚠️", "label": "сигнал риска"},
-    "bond_flag_off":     {"emoji": "✅", "label": "сигнал риска снят"},
-    "buy_window_open":   {"emoji": "🎯", "label": "окно входа"},
-    "cb_reminder":       {"emoji": "📅", "label": "событие календаря"},
-    "cb_decision":       {"emoji": "📊", "label": "решение Банка России"},
-    # Сохранение ставки — то же решение, тот же значок: читателю важно, что
-    # заседание состоялось и чем кончилось, а не изменилась ли цифра.
-    "cb_hold":           {"emoji": "📊", "label": "решение Банка России"},
-    "orfr_published":    {"emoji": "📊", "label": "вышли новые данные"},
+    # Сигнал риска включился — ⚠️, снялся — 🔔: это возврат режима к норме, а не
+    # движение цены (то же правило у 843 — юаневое фондирование, паритет ставок).
+    "bond_flag_off":     {"emoji": "🔔", "label": "сигнал риска снят"},
+    "buy_window_open":   {"emoji": "🔔", "label": "окно входа"},
+    "cb_reminder":       {"emoji": "🗓", "label": "событие календаря"},
+    "cb_decision":       {"emoji": "📈", "label": "решение Банка России"},
+    # Сохранение ставки — то же заседание, но без движения: значок календаря.
+    "cb_hold":           {"emoji": "🗓", "label": "решение Банка России"},
+    "orfr_published":    {"emoji": "🗓", "label": "вышли новые данные"},
     "auction_failed":    {"emoji": "⚠️", "label": "сигнал риска"},
-    "deposit_uptick":    {"emoji": "📊", "label": "вышли новые данные"},
+    "deposit_uptick":    {"emoji": "📈", "label": "вышли новые данные"},
 }
-DEFAULT_KIND = {"emoji": "📊", "label": "событие"}
+DEFAULT_KIND = {"emoji": "ℹ️", "label": "событие"}
+DIRECTION_EMOJI = {"up": "📈", "down": "📉"}
+
+# Пометка панели — первым словом заголовка в каждом сообщении (стандарт §1): 837 и
+# 838 пишут одним ботом, ops-канал общий у всех панелей. Имя — как на карточке хаба.
+PANEL_LABEL = "Рынок РФ"
+PANEL_URL = "https://tzi-842.pages.dev"
+# Досылка из очереди повторов: событие старше этого к моменту отправки помечается ⏳.
+LATE_AFTER_MIN = 30
+
+
+_FIRST_NUM = re.compile(r"[+−-]?\d+(?:[.,]\d+)?")
+
+
+def _first_num(text):
+    match = _FIRST_NUM.search(str(text or ""))
+    if not match:
+        return None
+    try:
+        return float(match.group(0).replace("−", "-").replace(",", "."))
+    except ValueError:
+        return None
+
+
+def emoji(event):
+    """Значок события: направление, если оно у события есть, иначе значок вида.
+
+    У события без поля `direction` (лежало в очереди повторов до 29.10.2026)
+    направление выводится из «было → стало»: значок обязан совпадать с движением,
+    «📈» у снижения ставки — брак (стандарт §4).
+    """
+    kind = KIND.get(event.get("kind"), DEFAULT_KIND)
+    if kind["emoji"] not in DIRECTION_EMOJI.values():
+        return kind["emoji"]
+    direction = event.get("direction")
+    if direction not in DIRECTION_EMOJI:
+        old, new = _first_num(event.get("before")), _first_num(event.get("after"))
+        if old is not None and new is not None and old != new:
+            direction = "up" if new > old else "down"
+    return DIRECTION_EMOJI.get(direction, kind["emoji"])
 
 # Санитарные виды: те же три состояния, что у общего мостика панелей
 # (`/usr/local/sbin/dash-notify`): 🔴 сломалось, 🟡 подозрительно, 🟢 починилось.
@@ -308,30 +396,100 @@ def cell_plain(stats):
 
 
 # ------------------------------------------------------------- сборка сообщения
+#
+# Каркас — единый стандарт сообщений всех панелей (TELEGRAM-STYLE-2026-10-29, §1):
+#
+#   <эмодзи> <b>Рынок РФ · Заголовок</b>
+#   было → <b>стало</b>
+#   подробность, что это значит
+#
+#   <b>Что за этим стоит</b>  • …
+#
+#   💬 разбор
+#
+#   <a href="…">Открыть панель</a> · 28.10, 14:05 МСК
+#
+# Подвал несёт время СОБЫТИЯ по Москве, а не время отправки: досылка из очереди
+# повторов помечается строкой ⏳ под заголовком, иначе вчерашний поворот читался бы
+# как сегодняшний. Пустые разделы не печатаются вовсе — ни «—», ни «нет данных».
 
-def _cut(text, limit=TG_LIMIT):
-    return text if len(text) <= limit else text[: limit - 1] + "…"
+def _cap(text):
+    text = str(text or "").strip()
+    return text[:1].upper() + text[1:]
 
 
-def render_market(event):
+def footer(event):
+    """«Открыть панель · 28.10, 14:05 МСК» — ссылка и время события по Москве."""
+    link = f'<a href="{PANEL_URL}">Открыть панель</a>'
+    when = msk_when(event.get("ts")) if event.get("ts") else ""
+    return f"{link} · {when}" if when and when != "н/д" else link
+
+
+def _late_line(event, now):
+    """⏳ — событие пришло из очереди повторов заметно позже, чем случилось."""
+    if not isinstance(now, datetime) or not event.get("ts"):
+        return None
+    try:
+        ts = datetime.fromisoformat(str(event["ts"]).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    if (now - ts).total_seconds() < LATE_AFTER_MIN * 60:
+        return None
+    return f"⏳ <i>Досылка: событие от {esc(msk_when(ts, now))}</i>"
+
+
+def _assemble(lines, tail, limit=TG_LIMIT):
+    """Сообщение не длиннее предела: режется тело по границе строки, подвал остаётся.
+
+    Резать посреди строки — значит рвать тег или число; режем целыми строками с
+    конца, а если не влезает и первая строка тела — её одну, с многоточием.
+    """
+    tail_text = "\n\n" + tail if tail else ""
+    room = limit - len(tail_text)
+    body = list(lines)
+    while len(body) > 1 and len("\n".join(body)) > room:
+        body.pop()
+    text = "\n".join(body)
+    if len(text) > room:
+        text = text[: room - 1] + "…"
+    elif len(body) < len(lines):
+        text = text + "\n…"
+        if len(text) > room:
+            text = text[: room - 1] + "…"
+    return text + tail_text
+
+
+def _move_line(before, after):
+    if before and after:
+        return f"{esc(before)} → <b>{esc(after)}</b>"
+    if after:
+        return f"<b>{esc(after)}</b>"
+    return esc(before) if before else None
+
+
+def render_market(event, now=None):
     """Рыночное событие -> HTML для телеграма.
 
     Порядок блоков тот же, что у 837/838, и он не случаен: сначала ЧТО (заголовок),
     потом НАСКОЛЬКО (было → стало), потом подробности, и только затем разбор модели
     за отбивкой. Читатель, пролиставший ленту, получает смысл из первой строки.
     """
-    kind = KIND.get(event.get("kind"), DEFAULT_KIND)
     title = event.get("title") or event.get("text") or ""
-    lines = [f"{kind['emoji']} <b>{esc(title)}</b>"]
+    lines = [f"{emoji(event)} <b>{esc(PANEL_LABEL)} · {esc(_cap(title))}</b>"]
+    late = _late_line(event, now)
+    if late:
+        lines.append(late)
 
-    before, after = event.get("before"), event.get("after")
-    if before or after:
-        lines.append(f"{esc(before or '—')} → <b>{esc(after or '—')}</b>")
+    move = _move_line(event.get("before"), event.get("after"))
+    if move:
+        lines.append(move)
 
-    for move in event.get("moves") or []:
-        row = f"• {esc(move.get('name'))}: {esc(move.get('before'))} → <b>{esc(move.get('after'))}</b>"
-        if move.get("note"):
-            row += f" <i>({esc(move['note'])})</i>"
+    for item in event.get("moves") or []:
+        row = f"• {esc(item.get('name'))}: {_move_line(item.get('before'), item.get('after'))}"
+        if item.get("note"):
+            row += f" <i>({esc(item['note'])})</i>"
         lines.append(row)
 
     if event.get("detail"):
@@ -354,39 +512,43 @@ def render_market(event):
     comment = (event.get("comment") or "").strip()
     if comment:
         lines += ["", "💬 " + esc(comment)]
-    return _cut("\n".join(lines))
+    return _assemble(lines, footer(event))
 
 
-def render_ops(event, panel="842"):
-    """Санитарное событие -> HTML в том же виде, что шлёт общий мостик панелей.
+def render_ops(event, panel=None, now=None):
+    """Санитарное событие -> HTML в виде общего мостика панелей.
 
-    Формат подсмотрен не на глаз, а взят у `/usr/local/sbin/dash-notify`, через
-    который об отказах сообщают 837, 838 и 839: значок состояния, жирный заголовок
-    вида «842 · что сломалось», затем тело из трёх строк — ФАКТ, ЧТО ЭТО ЗНАЧИТ и
-    КУДА СМОТРЕТЬ. Последняя строка обязательна: сообщение о поломке без адреса
-    поломки заставляет искать заново каждый раз.
+    Форма — как у `/usr/local/sbin/dash-notify`: значок состояния (🔴 🟡 🟢), жирный
+    заголовок «Рынок РФ · что сломалось», затем ФАКТ, ЧТО ЭТО ЗНАЧИТ и КУДА
+    СМОТРЕТЬ. Последняя строка тела обязательна: сообщение о поломке без адреса
+    поломки заставляет искать заново каждый раз. Время в подвале — время события:
+    у тревоги об источнике это начало сбоя.
     """
     icon = OPS_KIND.get(event.get("kind"), "🟡")
     title = event.get("title") or event.get("kind") or "отказ"
-    lines = [f"{icon} <b>{esc(panel)} · {esc(title)}</b>"]
+    lines = [f"{icon} <b>{esc(panel or PANEL_LABEL)} · {esc(_cap(title))}</b>"]
     for key in ("fact", "meaning", "where"):
         if event.get(key):
             lines.append(esc(event[key]))
-    return _cut("\n".join(lines))
+    return _assemble(lines, footer(event))
 
 
 def plain_text(event):
     """Тот же факт без разметки — для журнала витрины и ленты хаба.
 
-    Журнал показывает событие как строку ленты, поэтому разметка ему не нужна, а
-    вот полнота нужна: заголовок и подробности склеиваются в одну фразу.
+    Каждая часть — самостоятельное предложение: заголовок с точкой, «было → стало»
+    отдельной фразой. Раньше части склеивались пробелом, и лента читала
+    «Позиция: деньги → акции деньги (ставка 13,1%) → акции» — заголовок налезал на
+    строку движения (аудит 28.10.2026, B5).
     """
     parts = [event.get("title") or ""]
     before, after = event.get("before"), event.get("after")
-    if before or after:
-        parts.append(f"{before or '—'} → {after or '—'}.")
+    if before and after:
+        parts.append(f"{before} → {after}")
+    elif before or after:
+        parts.append(before or after)
     for move in event.get("moves") or []:
-        parts.append(f"{move.get('name')}: {move.get('before')} → {move.get('after')}.")
+        parts.append(f"{move.get('name')}: {move.get('before')} → {move.get('after')}")
     # Санитарные поля тоже: у отказов обвязки нет before/after, весь факт лежит
     # в `fact`, и без него плоский текст выходил без единого числа.
     for key in ("fact", "detail", "meaning", "where"):
@@ -394,6 +556,6 @@ def plain_text(event):
             parts.append(event[key])
     for cause in event.get("causes") or []:
         if str(cause).strip():
-            parts.append(sentence(cause))
-    text = " ".join(p.strip() for p in parts if p)
+            parts.append(cause)
+    text = " ".join(sentence(p) for p in parts if str(p or "").strip())
     return re.sub(r"\s+", " ", text).strip()

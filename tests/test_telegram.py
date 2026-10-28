@@ -131,6 +131,48 @@ class TestChannels(TelegramCase):
         self.assertNotIn("TELEGRAM_BOT_TOKEN", err)
 
 
+class TestPlainFallback(TelegramCase):
+    """«can't parse entities» — повтор тем же сообщением простым текстом (стандарт §5).
+
+    мутация: убрать ветку -> сломанная разметка теряет событие на каждом повторе.
+    """
+
+    def _broken_markup_once(self):
+        calls = {"n": 0}
+
+        def fake(req, timeout=None):
+            body = json.loads(req.data.decode("utf-8"))
+            self.calls.append({"url": req.full_url, "body": body})
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise urllib.error.HTTPError(
+                    req.full_url, 400, "Bad Request", {},
+                    __import__("io").BytesIO(b'{"ok":false,"description":"Bad Request: '
+                                             b"can't parse entities: Unsupported start tag\"}"))
+            return FakeResponse()
+        return fake
+
+    def test_сломанная_разметка_уходит_простым_текстом(self):
+        with mock.patch.object(self.tg.urllib.request, "urlopen", self._broken_markup_once()):
+            ok, err = self.tg.send("🟡 <b>Рынок РФ · Сбой &amp; ремонт</b>\nхвост <i>обрезан", retries=1)
+        self.assertTrue(ok, err)
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(self.calls[0]["body"]["parse_mode"], "HTML")
+        second = self.calls[1]["body"]
+        self.assertNotIn("parse_mode", second)
+        self.assertEqual(second["text"], "🟡 Рынок РФ · Сбой & ремонт\nхвост обрезан")
+
+    def test_прочие_400_без_повтора(self):
+        def bad(req, timeout=None):
+            self.calls.append({"url": req.full_url})
+            raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {},
+                                         __import__("io").BytesIO(b'{"description":"chat not found"}'))
+        with mock.patch.object(self.tg.urllib.request, "urlopen", bad):
+            ok, _ = self.tg.send("текст")
+        self.assertFalse(ok)
+        self.assertEqual(len(self.calls), 1)
+
+
 class TestMarkers(TelegramCase):
     def test_один_ключ_в_разных_каналах_не_гасит_себя(self):
         # мутация: общий каталог маркеров -> санитарное событие с тем же ключом,
