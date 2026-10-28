@@ -117,6 +117,10 @@ started=$(date -u +%s)
 # Резерв 150 с померен по журналу: расчёт+публикация+алерты укладываются в 40–60 с
 # даже с походом комментатора к модели.
 export RADAR_FETCH_BUDGET_S="${RADAR_FETCH_BUDGET_S:-$(( deadline > 300 ? deadline - 150 : deadline / 2 ))}"
+# Срок разбора событий моделью (pipeline/lib/commentary.py): разбор идёт ДО публикации,
+# поэтому ему оставлено время до дедлайна минус 60 с на расчёт хвоста, публикацию и
+# рассылку. Модуль сравнивает это с LLM_BUDGET_S и берёт меньшее.
+export LLM_DEADLINE_AT="$(( started + deadline - 60 ))"
 
 log "старт: режим $mode, писатель ${RADAR_WRITER}/${RADAR_WRITER_ID}, дедлайн ${deadline} с, бюджет фетча ${RADAR_FETCH_BUDGET_S} с"
 

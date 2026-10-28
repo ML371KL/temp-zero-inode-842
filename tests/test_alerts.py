@@ -94,14 +94,14 @@ class AlertsCase(unittest.TestCase):
         self.prev_env = {k: os.environ.get(k) for k in
                          ("STATE_DIR", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
                           "NEXUS_EVENTS_URL", "NEXUS_INGEST_TOKEN",
-                          "ERROR_BOT_TOKEN", "ERROR_CHAT_ID", "OPENROUTER_KEY")}
+                          "ERROR_BOT_TOKEN", "ERROR_CHAT_ID", "ANTHROPIC_API_KEY")}
         os.environ.update(STATE_DIR=self.tmp.name, TELEGRAM_BOT_TOKEN="тест",
                           TELEGRAM_CHAT_ID="-100", ERROR_BOT_TOKEN="тест-ops",
                           ERROR_CHAT_ID="-200")
         # Внешние каналы гасим явно (правило 2 набора: в сеть не ходим). На VPS эти
         # переменные заданы, и без снятия набор, запущенный там, постучался бы в хаб
-        # и в OpenRouter настоящими запросами на каждое событие.
-        for key in ("NEXUS_EVENTS_URL", "NEXUS_INGEST_TOKEN", "OPENROUTER_KEY"):
+        # и в Anthropic настоящими (платными) запросами на каждое событие.
+        for key in ("NEXUS_EVENTS_URL", "NEXUS_INGEST_TOKEN", "ANTHROPIC_API_KEY"):
             os.environ.pop(key, None)
         self.addCleanup(self._restore_env)
         self.sent = []
