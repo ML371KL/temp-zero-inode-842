@@ -151,6 +151,92 @@ class TestTelegramFallback(unittest.TestCase):
         self.assertIn("telegram", meta["note"])
 
 
+class TestTelegramSearch(unittest.TestCase):
+    """Бюджет ищется в канале поиском, а не только лентой.
+
+    Оплачено 09.11.2026: лента в 4 страницы кончалась 19.10, сентябрьский релиз
+    (09.10) уже ушёл за горизонт, октябрьский ещё не вышел. Фетчер не находил
+    ничего, писал error, и владелец получил «источник minfin не отвечает» о
+    канале, который отвечал исправно. Сайт в тестах недоступен, как и с VPS.
+    """
+
+    EMPTY_FEED = "<html><body>лента без релизов о бюджете</body></html>"
+
+    def setUp(self):
+        self.minfin = need(self, "pipeline.fetch.minfin", "budget", "ngd",
+                           "BUDGET_TG_QUERY")
+        self.tg = need(self, "pipeline.fetch.tg", "find")
+        self.page = fixture_text("tg_minfin.html")
+        self.urls = []
+
+    def serve(self, feed, search):
+        def fake(url, **_kw):
+            self.urls.append(url)
+            if "?q=" in url:
+                return search(url) if callable(search) else search
+            return feed(url) if callable(feed) else feed
+        return mock.patch.object(self.minfin, "press_items", return_value=[]), \
+            mock.patch.object(self.tg, "get_text", side_effect=fake)
+
+    def test_прошлый_релиз_находится_поиском_когда_лента_его_потеряла(self):
+        # мутация: убрать поиск из _candidates -> points == {} и status error,
+        # то есть ровно ложная тревога 09.11.2026
+        p1, p2 = self.serve(self.EMPTY_FEED, self.page)
+        with p1, p2:
+            _sid, points, meta = self.minfin.budget()
+        self.assertEqual(meta["status"], "ok")
+        self.assertEqual(points, {"2026-07-31": -6455.0})
+        self.assertTrue(meta["mirror"])
+        searched = [u for u in self.urls if "?q=" in u]
+        self.assertTrue(searched, "поиск по каналу не вызывался")
+        self.assertIn("q=", searched[0])
+
+    def test_поиск_ищет_по_заголовку_релиза(self):
+        from urllib.parse import unquote
+        p1, p2 = self.serve(self.EMPTY_FEED, self.page)
+        with p1, p2:
+            self.minfin.budget()
+        query = unquote([u for u in self.urls if "?q=" in u][0].split("q=", 1)[1])
+        self.assertIn(self.minfin.BUDGET_TG_QUERY, query.replace("+", " "))
+
+    def test_нет_ни_в_ленте_ни_в_поиске__ошибка_с_понятной_заметкой(self):
+        p1, p2 = self.serve(self.EMPTY_FEED, self.EMPTY_FEED)
+        with p1, p2:
+            _sid, points, meta = self.minfin.budget()
+        self.assertEqual(points, {})
+        self.assertEqual(meta["status"], "error")
+        self.assertIn("нет сообщения", meta["note"])
+
+    def test_отказ_поиска_не_мешает_ленте(self):
+        def down(url):
+            raise self.tg.FetchError("поиск t.me недоступен")
+        p1, p2 = self.serve(self.page, down)
+        with p1, p2:
+            _sid, points, meta = self.minfin.budget()
+        self.assertEqual(points, {"2026-07-31": -6455.0})
+        self.assertEqual(meta["status"], "ok")
+
+    def test_свежий_релиз_из_ленты_важнее_старого_из_поиска(self):
+        # Лента и поиск пересекаются; первым в разбор должен идти самый свежий
+        # релиз. Подменяем дату в выдаче поиска на прошлый год: если бы порядок
+        # был «сначала поиск», в ряд лёг бы он.
+        old = re.sub(r'datetime="2026-', 'datetime="2025-', self.page)
+        old = old.replace("2026 года", "2025 года").replace("2026 г", "2025 г")
+        old = re.sub(r'data-post="minfin/(\d+)"', lambda m: 'data-post="minfin/1%s"'
+                     % m.group(1)[1:], old)
+        p1, p2 = self.serve(self.page, old)
+        with p1, p2:
+            _sid, points, _meta = self.minfin.budget()
+        self.assertEqual(list(points), ["2026-07-31"])
+
+    def test_нгд_поиском_не_пользуется(self):
+        # Поиск включён только там, где задан запрос; остальные ряды — как были.
+        p1, p2 = self.serve(self.page, self.EMPTY_FEED)
+        with p1, p2:
+            self.minfin.ngd()
+        self.assertFalse([u for u in self.urls if "?q=" in u])
+
+
 class TestMoexFeedDepth(unittest.TestCase):
     """Глубина обхода ленты ISS: месячный релиз в трёх страницах не живёт.
 
