@@ -26,7 +26,9 @@
    диапазонам датацентров, TLS при этом в порядке. Поэтому у пресс-центра появился
    запасной транспорт: телеграм-канал ведомства (`fetch/tg.py`). Он включается
    ТОЛЬКО когда сайт не дал ни одного кандидата, и что число пришло из зеркала,
-   видно в `meta.source`/`meta.mirror`.
+   видно в `meta.source`/`meta.mirror`. Бюджет ищется в канале ещё и ПОИСКОМ
+   (`?q=`): лента в 4 страницы покрывает три недели, и между релизами фетчер
+   иначе докладывал «не отвечает» о живом канале (ложная тревога 09.11.2026).
    Чего зеркало НЕ закрывает (проверено на живых релизах):
      * `fnb` — в телеграме печатают ОБЩИЙ объём фонда, а ряд хранит ЛИКВИДНУЮ часть
        (12 720,8 против 3 692,8 млрд руб.). Шаблоны требуют слова «ликвидн», поэтому
@@ -86,7 +88,13 @@ PRESS_URL = "https://minfin.gov.ru/ru/press-center/"
 MINFIN_BASE = "https://minfin.gov.ru"
 # Запасной транспорт: канал ведомства в телеграме (см. грабля 4 в шапке модуля).
 TG_CHANNEL = "minfin"
-TG_PAGES = 4          # ~80 сообщений ≈ месяц ленты: месячный релиз укладывается
+# Лента: 4 страницы. Замер 09.11.2026 — это 67 сообщений и всего три недели
+# (19.10–09.11), а не месяц: прошлый релиз о бюджете (09.10) уже за горизонтом.
+TG_PAGES = 4
+# Поиск по каналу (`?q=`) индексирует историю на годы назад: первая страница
+# выдачи начинается с самого свежего совпадения, одной хватает.
+TG_SEARCH_PAGES = 1
+BUDGET_TG_QUERY = "Предварительная оценка исполнения федерального бюджета"
 AUCTION_URL = ("https://minfin.gov.ru/ru/perfomance/public_debt/internal/"
                "operations/ofz/auction/")
 
@@ -202,7 +210,7 @@ def _press_article(url):
     return text, pub
 
 
-def _candidates(keywords):
+def _candidates(keywords, tg_query=None):
     """(кандидаты, заметки): новости, чей ЗАГОЛОВОК содержит все ключевые слова.
 
     Порядок жёсткий: сначала пресс-центр, и только если он не дал НИ ОДНОГО
@@ -212,6 +220,14 @@ def _candidates(keywords):
 
     text=None означает «текст ещё не скачан» — статью пресс-центра открываем
     только когда до неё дошла очередь: у Минфина по десятку похожих заголовков.
+
+    `tg_query` добавляет к ленте ПОИСК по каналу. Без него месячный релиз виден
+    только первые три недели: 09.11.2026 лента (4 страницы) кончалась 19.10,
+    сентябрьский релиз (09.10) в неё уже не попадал, а октябрьский ещё не вышел.
+    Фетчер не находил ничего, писал error, и владелец получал «источник не
+    отвечает» о канале, который отвечал исправно. С поиском до выхода нового
+    релиза в руках остаётся прошлый: статус ok, а настоящее протухание ловит
+    норма возраста данных (registry.data_age_norm).
     """
     items = press_items()
     out = [{"src": "minfin", "url": url, "title": title, "text": None, "pub": None}
@@ -222,19 +238,36 @@ def _candidates(keywords):
              else "в пресс-центре нет новости по ключам %s" % (keywords,)]
     if tg is None:
         return out, notes
-    try:
-        for msg in tg.find(TG_CHANNEL, keywords, pages=TG_PAGES):
-            # Текст сообщения разложен по строкам, а шаблоны писались под сплошной
-            # текст статьи: «[^.]{0,120}» не должен спотыкаться о перевод строки.
-            out.append({"src": "minfin_tg", "url": msg["url"], "title": msg["head"],
-                        "text": msg["text"].replace("\n", " "), "pub": msg["published"]})
-    except FetchError as exc:
-        notes.append("telegram-зеркало: %s" % exc)
+    routes = [("telegram-зеркало", TG_PAGES, None)]
+    if tg_query:
+        routes.append(("поиск по telegram-каналу", TG_SEARCH_PAGES, tg_query))
+    found, seen, answered = [], set(), False
+    for label, pages, query in routes:
+        try:
+            batch = tg.find(TG_CHANNEL, keywords, pages=pages, query=query)
+        except FetchError as exc:
+            notes.append("%s: %s" % (label, exc))
+            continue
+        answered = True
+        for msg in batch:
+            if msg["url"] not in seen:
+                seen.add(msg["url"])
+                found.append(msg)
+    # Лента и выдача поиска пересекаются; разбор берёт ПЕРВОГО подходящего —
+    # значит, первым должен стоять самый свежий релиз, откуда бы он ни пришёл.
+    found.sort(key=lambda m: (m.get("at") is not None, m.get("at")), reverse=True)
+    for msg in found:
+        # Текст сообщения разложен по строкам, а шаблоны писались под сплошной
+        # текст статьи: «[^.]{0,120}» не должен спотыкаться о перевод строки.
+        out.append({"src": "minfin_tg", "url": msg["url"], "title": msg["head"],
+                    "text": msg["text"].replace("\n", " "), "pub": msg["published"]})
+    if answered and not out:
+        notes.append("в t.me/%s нет сообщения с ключами %s" % (TG_CHANNEL, keywords))
     return out, notes
 
 
 def _press_number(keywords, series_id, patterns, sign_words=None, month_hint=None,
-                  derive=None):
+                  derive=None, tg_query=None):
     """Общий каркас ngd/budget/fnb: найти новость по заголовку и число в тексте.
 
     patterns — список регулярок с группой 1 = число (в млрд руб). Необязательная
@@ -244,8 +277,9 @@ def _press_number(keywords, series_id, patterns, sign_words=None, month_hint=Non
     релизов, где месяц значения не совпадает с месяцем публикации.
     derive(текст) -> (значение, позиция, пояснение) — последняя попытка, когда сам
     показатель в тексте не назван, но однозначно считается из соседних (бюджет).
+    tg_query — строка поиска по телеграм-каналу (см. `_candidates`).
     """
-    items, misses = _candidates(keywords)
+    items, misses = _candidates(keywords, tg_query=tg_query)
     if not items:
         return series_id, {}, _meta("minfin", PRESS_URL, "error", "; ".join(misses))
     for item in items:
@@ -669,7 +703,7 @@ def budget():
          r"(?P<num>[\d\s.,]+)\s*млрд",
          r"(?P<word>дефицит|профицит)[а-яё]*[^.]{0,60}?в размере\s*"
          r"(?P<num>[\d\s.,]+)\s*млрд"],
-        derive=_budget_from_parts)
+        derive=_budget_from_parts, tg_query=BUDGET_TG_QUERY)
 
 
 def _fnb_month(text_before):

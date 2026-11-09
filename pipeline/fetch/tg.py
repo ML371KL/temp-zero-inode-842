@@ -202,15 +202,17 @@ def messages(channel, pages=1, timeout=25, query=None):
     return collected
 
 
-def find(channel, keywords, pages=MAX_PAGES, skip_reprints=True):
+def find(channel, keywords, pages=MAX_PAGES, skip_reprints=True, query=None):
     """Сообщения канала, у которых В ЗАГОЛОВКЕ есть все ключевые слова.
 
     Заголовок — первая строка сообщения: у релизов ведомств это ровно то же самое,
     что заголовок новости на сайте, а у дайджестов — имя перепечатанного издания.
+    `query` — поиск по каналу вместо ленты (см. `messages`): фильтр по заголовку
+    остаётся тем же, поиск лишь достаёт сообщения, ушедшие за горизонт ленты.
     """
     keys = [k.lower() for k in keywords]
     out = []
-    for msg in messages(channel, pages=pages):
+    for msg in messages(channel, pages=pages, query=query):
         if skip_reprints and is_reprint(msg["text"]):
             continue
         if all(k in msg["head"].lower() for k in keys):

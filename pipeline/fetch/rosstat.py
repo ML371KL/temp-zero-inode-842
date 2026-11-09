@@ -21,6 +21,14 @@
    поэтому ссылку каждый раз ищем на странице раздела, а не хардкодим.
 4. xlsx читаем сами (zipfile+ElementTree): это стандартная библиотека, а openpyxl
    — внешняя зависимость, запрещённая CONTRACT.md §0.
+5. С НОЯБРЯ 2026 xlsx РОСТАТА НЕ КАЧАЮТСЯ ВОВСЕ (замер 09.11.2026): все файлы
+   `/storage/mediabank/*.xlsx` отдают 404 — и с VPS, и с ноутбука, и не только
+   ИПЦ, — а PDF и картинки из того же каталога отдаются. Страница «Цены» застыла
+   на 13.03.2026 и ссылается на `ipc_mes_02-2026.xlsx`. Свежие релизы Росстат
+   теперь вешает в ленту новостей ФАЙЛОМ PDF («Об индексе потребительских цен в
+   октябре 2026 года»), страница `/central-news/document/N` лишь перенаправляет
+   на него. Поэтому месячный ИПЦ берётся из релиза, а xlsx остаётся запасным
+   путём на случай, если Росстат его вернёт.
 """
 
 import io
@@ -28,6 +36,15 @@ import re
 import zipfile
 import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta, timezone
+from html import unescape as _unescape
+
+try:                                       # текст PDF: тот же извлекатель, что у ОРФР
+    from .orfr import pdf_text as _pdf_text
+except ImportError:
+    try:
+        from orfr import pdf_text as _pdf_text
+    except ImportError:                    # автономная отладка без пакета
+        _pdf_text = None
 
 try:                                       # чтение xlsx по адресам ячеек (lib/xlsx)
     from lib import xlsx as _xlsx
@@ -68,7 +85,16 @@ _UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.
 
 ROSSTAT_MAIN = "https://rosstat.gov.ru/"
 ROSSTAT_PRICE = "https://rosstat.gov.ru/statistics/price"
+ROSSTAT_NEWS = "https://rosstat.gov.ru/central-news"
 MIRROR_WEEKLY = "https://inflation-monitor.ru/weekly_inflation/"
+# Где искать месячный релиз (порядок = приоритет): лента новостей держит ссылки
+# на PDF недели две, главная — только последние публикации.
+RELEASE_PAGES = (ROSSTAT_NEWS, ROSSTAT_MAIN)
+# Месячный ИПЦ Росстат публикует 10–16 числа (16.01, 13.02, 13.03 в 2026). Если к
+# 17-му релиза за прошлый месяц в ленте нет, это уже не «ещё не вышел», а поломка
+# (сменился заголовок, ссылка, формат) — и молчать до нормы возраста нельзя.
+RELEASE_DUE_DAY = 17
+MSK = timezone(timedelta(hours=3))
 
 _MONTHS = {"январ": 1, "феврал": 2, "март": 3, "апрел": 4, "ма": 5, "июн": 6,
            "июл": 7, "август": 8, "сентябр": 9, "октябр": 10, "ноябр": 11,
@@ -367,8 +393,8 @@ def parse_cpi_monthly(rows):
     return out
 
 
-def cpi_monthly():
-    """-> ("cpi_monthly", {последний день месяца: прирост м/м, %}, meta)."""
+def _cpi_monthly_xlsx():
+    """Прежний путь: файл ipc_mes со страницы «Цены» (с 11.2026 отдаёт 404, грабля 5)."""
     try:
         page = get_text(ROSSTAT_PRICE, headers=_UA)
     except FetchError as exc:
@@ -400,3 +426,178 @@ def cpi_monthly():
     return "cpi_monthly", points, _meta(
         "rosstat", url, "ok", "месяцев в ряду: %d (файл за %s.%s)"
         % (len(points), month, year), {"asof": asof})
+
+
+# ------------------------------------------------- месячный ИПЦ (релиз, PDF/HTML)
+
+_LINK = re.compile(r'<a\b[^>]*?\bhref="([^"]+)"[^>]*>(.*?)</a>', re.S | re.I)
+_MONTHLY_TITLE = re.compile(
+    r"^об\s+индексе\s+потребительских\s+цен\s+в\s+([а-яё]+)\s+(20\d\d)\s+год", re.I)
+_MONTH_STEM = "(январ|феврал|март|апрел|ма|июн|июл|август|сентябр|октябр|ноябр|декабр)[а-я]*"
+# Лид релиза: «В январе 2026 г. по сравнению с декабрем 2025 г. индекс потребительских
+# цен составил 101,62%». Ищем в тексте БЕЗ ПРОБЕЛОВ: извлечённый из PDF текст рвёт
+# слова и числа переводами строк («10\n0,08%», «ок\nтября»). Месяцы названы
+# основами, а не «[а-я]+»: иначе «в» из соседнего слова съедает начало совпадения.
+_RELEASE_LEAD = re.compile(
+    r"в" + _MONTH_STEM + r"(20\d\d)(?:года|г\.?)?посравнениюс" + _MONTH_STEM
+    + r"(20\d\d)(?:года|г\.?)?индекспотребительскихцен[^%]{0,40}?составил"
+    r"(\d{2,3},\d{1,2})%")
+
+
+def _today_msk():
+    return datetime.now(MSK).date()
+
+
+def _abs_url(href):
+    href = _unescape(href.strip())
+    if href.startswith("//"):
+        return "https:" + href
+    if href.startswith("http"):
+        return href
+    return "https://rosstat.gov.ru" + ("" if href.startswith("/") else "/") + href
+
+
+def monthly_releases(html):
+    """[(url, год, месяц)] релизов «Об индексе потребительских цен в <месяце> <года>».
+
+    Недельные «Об ОЦЕНКЕ индекса…» сюда не попадают по построению: у них другое
+    начало заголовка.
+    """
+    out, seen = [], set()
+    for href, inner in _LINK.findall(html or ""):
+        m = _MONTHLY_TITLE.match(_plain(inner))
+        if not m:
+            continue
+        month = _month_num(m.group(1))
+        if not month:
+            continue
+        url = _abs_url(href)
+        if url in seen:
+            continue
+        seen.add(url)
+        out.append((url, int(m.group(2)), month))
+    return out
+
+
+def parse_cpi_release(text):
+    """Текст месячного релиза -> (последний день месяца, прирост м/м, %) или None.
+
+    Берётся ТОЛЬКО сравнение с ПРЕДЫДУЩИМ месяцем: в том же лиде стоят «по сравнению
+    с декабрем» (с начала года) и справочно прошлогодний месяц, и любое из них,
+    взятое по ошибке, проходит стражу диапазона, а на графике неотличимо от правды.
+    """
+    squeezed = re.sub(r"\s+", "", (text or "").lower()).replace("ё", "е")
+    for m in _RELEASE_LEAD.finditer(squeezed):
+        month, prev = _month_num(m.group(1)), _month_num(m.group(3))
+        year, prev_year = int(m.group(2)), int(m.group(4))
+        if not month or not prev:
+            continue
+        want = (year - 1, 12) if month == 1 else (year, month - 1)
+        if (prev_year, prev) != want:
+            continue                      # база — не прошлый месяц
+        value = _num(m.group(5))
+        if value is None or not 80.0 < value < 130.0:
+            continue
+        return _month_end(year, month), round(value - 100.0, 4)
+    return None
+
+
+def _is_pdf(data):
+    return b"%PDF-" in (data or b"")[:1024]
+
+
+def _release_text(url):
+    """Текст релиза по ссылке из ленты: PDF или HTML (с переходом на PDF)."""
+    data = get_bytes(url, headers=_UA)
+    if not _is_pdf(data):
+        page = data.decode("utf-8", "replace")
+        # страница документа, которая не перенаправила сама, а лишь назвала файл
+        hop = re.search(r'href="([^"]+\.pdf)"', page, re.I)
+        if "потребительских цен" not in _plain(page).lower() and hop:
+            data = get_bytes(_abs_url(hop.group(1)), headers=_UA)
+        else:
+            return _plain(page)
+    if not _is_pdf(data):
+        return _plain(data.decode("utf-8", "replace"))
+    if _pdf_text is None:
+        raise FetchError("релиз в PDF, а извлекателя текста нет (fetch/orfr.pdf_text)")
+    try:
+        return _pdf_text(data)
+    except Exception as exc:              # noqa: BLE001 — битый PDF не роняет прогон
+        raise FetchError("PDF релиза не читается: %s" % exc) from exc
+
+
+def cpi_monthly():
+    """-> ("cpi_monthly", {последний день месяца: прирост м/м, %}, meta).
+
+    Первоисточник — месячный релиз Росстата в ленте новостей (грабля 5), запас —
+    прежний xlsx. Статус различает три случая, которые раньше сливались в error и
+    будили владельца зря:
+      * релиз за прошлый месяц ЕЩЁ НЕ ВЫШЕЛ (до RELEASE_DUE_DAY) или уже в ряду —
+        ok без новых точек, asof = последняя точка ряда; протухание, если оно
+        случится, поймает норма возраста данных;
+      * релиз найден, но число не разобралось, или к RELEASE_DUE_DAY его нет —
+        error: это поломка разбора или публикации;
+      * лента Росстата не открылась — error.
+    """
+    today = _today_msk()
+    known = _stored_last("cpi_monthly")
+    exp_year, exp_month = ((today.year - 1, 12) if today.month == 1
+                           else (today.year, today.month - 1))
+    expected = _month_end(exp_year, exp_month)
+    notes, releases, listed = [], [], False
+    for page_url in RELEASE_PAGES:
+        try:
+            html = get_text(page_url, headers=_UA)
+        except FetchError as exc:
+            notes.append("%s: %s" % (page_url, exc))
+            continue
+        listed = True
+        releases = monthly_releases(html)
+        if releases:
+            break
+    broken = None
+    if releases:
+        url, year, month = max(releases, key=lambda r: (r[1], r[2]))
+        label = "%02d.%d" % (month, year)
+        try:
+            got = parse_cpi_release(_release_text(url))
+        except FetchError as exc:
+            got, broken = None, "релиз за %s не скачался: %s" % (label, exc)
+        if got is not None and got[0] == _month_end(year, month):
+            day, value = got
+            late = (day < expected and not (known and known >= expected)
+                    and today.day >= RELEASE_DUE_DAY)
+            if not late:
+                return "cpi_monthly", {day: value}, _meta(
+                    "rosstat", url, "ok", "релиз за %s: %+.2f%% м/м" % (label, value),
+                    {"asof": max(day, known or day), "release": label})
+            # в ленте только прошлый релиз, а срок нового прошёл — это не «ок»
+            notes.append("в ленте только релиз за %s" % label)
+        elif broken is None:
+            broken = ("релиз за %s открылся, но строки «по сравнению с <прошлым месяцем> "
+                      "… составил N%%» в нём нет — сменился формат?" % label)
+    # Нового числа из релиза нет — запасной путь, вдруг Росстат вернул xlsx.
+    sid, xpoints, xmeta = _cpi_monthly_xlsx()
+    if xmeta.get("status") == "ok":
+        xmeta["note"] = "%s; релиз: %s" % (xmeta.get("note"), broken or "нового нет")
+        return sid, xpoints, xmeta
+    notes.append("xlsx: %s" % xmeta.get("note"))
+    if broken:
+        return "cpi_monthly", {}, _meta("rosstat", url, "error",
+                                        "; ".join([broken] + notes))
+    if not listed:
+        return "cpi_monthly", {}, _meta("rosstat", ROSSTAT_NEWS, "error",
+                                        "лента Росстата не открылась: " + "; ".join(notes))
+    have = bool(known and known >= expected)
+    if have or today.day < RELEASE_DUE_DAY:
+        why = ("за %02d.%d уже в ряду" % (exp_month, exp_year) if have else
+               "релиз за %02d.%d ещё не вышел (Росстат публикует 10–16 числа)"
+               % (exp_month, exp_year))
+        return "cpi_monthly", {}, _meta("rosstat", ROSSTAT_NEWS, "ok",
+                                        "новых данных нет: " + why,
+                                        {"asof": known, "failed": notes})
+    return "cpi_monthly", {}, _meta(
+        "rosstat", ROSSTAT_NEWS, "error",
+        "релиза за %02d.%d нет в ленте Росстата к %d числу; %s"
+        % (exp_month, exp_year, today.day, "; ".join(notes)))
