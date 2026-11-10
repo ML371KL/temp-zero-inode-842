@@ -190,6 +190,27 @@ class TestPanelLinksGuide(unittest.TestCase):
         self.assertIn("пятниц", text)
 
 
+class TestLabPage(unittest.TestCase):
+    """Вторая страница (аудит 10.11.2026, этап 2): существует, рисуется тем же app.js
+    в режиме lab и связана с главной. Мутация: убрать data-page — lab.html покажет
+    главную, и переехавшие блоки пропадут с обеих страниц."""
+
+    def test_lab_page_wired(self):
+        lab = read(ROOT / "web" / "lab.html")
+        self.assertIn('data-page="lab"', lab)
+        self.assertIn('src="app.js"', lab)
+        self.assertIn('src="charts.js"', lab)
+        self.assertIn('href="./"', lab)
+        index = read(INDEX)
+        self.assertIn('data-page="main"', index)
+        self.assertIn('href="lab.html"', index)
+        app = read(ROOT / "web" / "app.js")
+        # Блоки второй страницы рисуются только в режиме lab, а главные — вне его.
+        for fn in ("renderCore(d)", "renderStates(d)", "renderMonitors(d)", "renderShadow(d)"):
+            self.assertIn(fn, app)
+        self.assertIn("PAGE === 'lab'", app)
+
+
 class TestGuideMatchesConstants(unittest.TestCase):
     """Числа руководства обязаны совпадать с тем, что реально считает конвейер."""
 
@@ -325,6 +346,24 @@ class TestGuideMatchesConstants(unittest.TestCase):
             self.assertIn(ru, pos, f"версия {ed['version']} от {ru} не названа")
             self.assertIn(ed["what"], pos, f"суть версии {ed['version']} не совпадает")
         self.assertIn("простая кривая", pos.lower())
+
+    def test_div_gap_zones_match_constants(self):
+        """Таблица зон «дивиденды минус вклад» в руководстве = constants.DIV_GAP_ZONES.
+
+        Мутация: пересчитать зоны в constants и не тронуть руководство — читатель
+        видит одни границы на панели и другие в объяснении.
+        """
+        z = self.K.DIV_GAP_ZONES
+        m = re.search(r'<table[^>]*id="divgap-table".*?</table>', self.html, re.S)
+        self.assertIsNotNone(m, "в руководстве нет таблицы зон")
+        text = strip_tags(m.group(0))
+        lo, hi = (f"{c:+.1f}".replace(".", ",").replace("-", "−").lstrip("+") for c in z["cuts"])
+        self.assertIn(lo, text)
+        self.assertIn(hi, text)
+        for zone in z["zones"]:
+            self.assertIn(ru_pct(zone["excess_pct"], 1), text)
+            self.assertIn(f"{round(zone['hit'] * 100)}%", text)
+            self.assertIn(str(zone["months"]), text)
 
     def test_health_review_months_in_guide(self):
         """Порог ревалидации (×12) — словами в разделе о здоровье модели."""

@@ -43,6 +43,7 @@
 const THEME_SCRIPT_HASHES = [
   "sha256-PA8O/+/oTkckcd/QPa19vldLqOXpYDStFgytBGbPYIg=", // web/index.html
   "sha256-4COtdqL63LhN3YXNnAJwaSWYBx/Qn6WXFR268NuVrKA=", // web/guide.html
+  "sha256-hjyo61B3NmrYJn/pjnaaksTnpuGpKKxLoPVK2kZpqL4=", // web/lab.html (с 10.11.2026)
 ];
 
 // 'unsafe-inline' в style-src — вынужденно и осознанно: web/charts.js ставит атрибут
