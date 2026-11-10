@@ -365,6 +365,17 @@ class TestGuideMatchesConstants(unittest.TestCase):
             self.assertIn(f"{round(zone['hit'] * 100)}%", text)
             self.assertIn(str(zone["months"]), text)
 
+    def test_priced_detente_status_in_guide(self):
+        """Раздел «Что в цене» говорит о разрядке то же, что код (priced.DETENTE).
+
+        Мутация: включить разрядку и не переписать руководство — читатель прочтёт, что
+        её нет, а на панели появится столбец."""
+        from pipeline.compute import priced
+        sec = strip_tags(section(self.html, "priced"))
+        self.assertIn("252", sec)
+        said_off = "Разрядка отдельной частью не выделяется" in sec
+        self.assertEqual(said_off, not priced.DETENTE)
+
     def test_health_review_months_in_guide(self):
         """Порог ревалидации (×12) — словами в разделе о здоровье модели."""
         words = {6: "шесть", 12: "двенадцать"}

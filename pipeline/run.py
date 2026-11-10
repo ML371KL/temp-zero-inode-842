@@ -559,6 +559,20 @@ def _live_journal(panel, decision, journal):
         journal.warn("journal", f"живой журнал упал: {type(exc).__name__}: {exc}")
 
 
+def _priced(panel, decision, journal):
+    """Что в цене (compute/priced.py): разложение хода индекса. Изолировано: справка не
+    имеет права ронять публикацию позиции."""
+    priced = _optional("pipeline.compute.priced")
+    if priced is None or not isinstance(decision, dict):
+        return
+    try:
+        res = priced.block(store, panel)
+        if res:
+            decision.setdefault("skills", {})["priced"] = res
+    except Exception as exc:  # noqa: BLE001 — граница изоляции
+        journal.warn("compute", f"«что в цене» упало: {type(exc).__name__}: {exc}")
+
+
 def build_full(now, journal):
     """Полный пересчёт: панель → ядро → состояния → решение → тень.
 
@@ -573,6 +587,7 @@ def build_full(now, journal):
         mf = core_mod.monthly_frame(panel)
         decision = decision_mod.compute_decision(panel, mf, states)
         _live_journal(panel, decision, journal)
+        _priced(panel, decision, journal)
     shadow = _shadow(panel, states, decision, now, journal)
     dates = (panel or {}).get("dates") or []
     pos = ((decision or {}).get("position") or {})

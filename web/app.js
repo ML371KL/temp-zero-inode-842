@@ -827,7 +827,7 @@
     return section('Что панель умеет', 'на истории: правило нынешней версии, волны рынка от 20% с ' + fmtMon(w.since), [
       h('article', { 'class': 'card' }, [
         head,
-        rows.length ? h('div', { 'class': 'tablewrap', style: 'margin-top:16px' }, [
+        rows.length ? h('div', { 'class': 'tablewrap tablewrap--tight', style: 'margin-top:16px' }, [
           h('table', { 'class': 'data' }, [
             h('caption', { text: 'Последние волны роста: когда правило вошло после дна и какую долю взяло.' }),
             h('thead', null, [h('tr', null, [
@@ -840,6 +840,49 @@
         h('p', { 'class': 'card__foot' }, [
           document.createTextNode('Падения правило обходит, рост берёт наполовину и поздно; подъёмы на новостях не видит. '),
           h('a', { href: 'guide.html#skills', text: 'Как считается' })
+        ])
+      ])
+    ]);
+  }
+
+  /* «Что в цене» (compute/priced.py, аудит 10.11.2026, этап 3): ход индекса за 5, 21 и
+   * 63 сессии, разложенный на ставки, нефть в рублях и остальное. Коэффициенты — по
+   * данным до вчерашнего дня, вклады складываются в ход индекса точно. Разрядка как
+   * отдельная часть не выделяется: приёмка 10.11.2026 её не пропустила, она внутри
+   * «остального». Как считается — в руководстве. */
+  function renderPriced(d) {
+    var q = (d.verdict || {}).priced;
+    if (!q || !Array.isArray(q.windows) || !q.windows.length) return null;
+    var lp = function (v) { return isNum(v) ? fmtNum(v, 1, true) : '—'; };
+    var month = q.windows.filter(function (w) { return w.sessions === 21; })[0];
+    var label = { 5: 'неделя', 21: 'месяц', 63: 'квартал' };
+    var det = q.detente === true;
+    var head = ['Окно', 'Индекс', 'Ставки', 'Нефть'].concat(det ? ['Разрядка'] : []).concat(['Остальное', 'Объяснено']);
+    return section('Что в цене', 'ход индекса по частям; в решение не входит', [
+      h('article', { 'class': 'card' }, [
+        month ? h('p', { 'class': 'priced__lead', text: 'За месяц индекс ' + fmtNum(month.index_pct, 1, true) + '% (' +
+          lp(month.index_lp) + ' лог-пункта): ' +
+          (det ? 'разрядка ' + lp(month.detente_lp) + ', ' : '') + 'ставки ' + lp(month.rates_lp) +
+          ', нефть ' + lp(month.oil_lp) + ', остальное ' + lp(month.other_lp) + '.' }) : null,
+        h('div', { 'class': 'tablewrap tablewrap--tight' }, [
+          h('table', { 'class': 'data' }, [
+            h('caption', { text: 'Вклады в лог-пунктах; объяснено — доля дневных колебаний, совпавшая с ходом ставок и нефти.' }),
+            h('thead', null, [h('tr', null, head.map(function (t) { return h('th', { scope: 'col', text: t }); }))]),
+            h('tbody', null, q.windows.map(function (w) {
+              return h('tr', null, [
+                h('th', { scope: 'row', text: (label[w.sessions] || w.sessions + ' сессий') }),
+                h('td', { 'class': toneOf(w.index_lp), text: lp(w.index_lp) }),
+                h('td', { text: lp(w.rates_lp) }), h('td', { text: lp(w.oil_lp) }),
+                det ? h('td', { text: lp(w.detente_lp) }) : null,
+                h('td', { text: lp(w.other_lp) }),
+                h('td', { text: isNum(w.explained) ? Math.round(w.explained * 100) + '%' : '—' })
+              ]);
+            }))
+          ])
+        ]),
+        h('p', { 'class': 'card__foot' }, [
+          document.createTextNode('Остальное — новости о переговорах и санкциях, потоки, дивиденды: три показателя оценки рынка их не видят. '),
+          h('a', { href: 'guide.html#priced', text: 'Как считается' })
         ])
       ])
     ]);
@@ -2263,7 +2306,7 @@
       if (shd) app.appendChild(shd);
     } else {
       app.appendChild(renderHero(d));
-      [renderGuides(d), renderSkills(d), renderEvents(d), renderLabLink()].forEach(function (x) {
+      [renderGuides(d), renderSkills(d), renderPriced(d), renderEvents(d), renderLabLink()].forEach(function (x) {
         if (x) app.appendChild(x);
       });
     }

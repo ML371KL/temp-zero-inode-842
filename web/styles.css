@@ -583,6 +583,9 @@ table.data tbody tr:last-child th, table.data tbody tr:last-child td { border-bo
   .position__journal table.data th, .position__journal table.data td { overflow-wrap: normal; padding: 8px 3px; }
   .position__journal table.data thead th { font-size: 11px; text-transform: none; }
   .position__journal table.data td, .position__journal table.data thead th { white-space: nowrap; }
+  /* Те же правила у коротких числовых таблиц главной: «Что в цене», волны роста. */
+  .tablewrap--tight table.data th, .tablewrap--tight table.data td { overflow-wrap: normal; white-space: nowrap; padding: 8px 3px; }
+  .tablewrap--tight table.data thead th { font-size: 11px; text-transform: none; }
 }
 /* Самые узкие телефоны: разница видна из двух соседних колонок, а таблица обязана
    помещаться без горизонтальной прокрутки (см. комментарий к .tablewrap). */
@@ -617,6 +620,7 @@ table.data tbody tr:last-child th, table.data tbody tr:last-child td { border-bo
 .lablink { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; text-decoration: none; color: inherit; }
 .lablink:hover .card__title { text-decoration: underline; }
 .card__foot a { color: var(--s1); text-decoration: none; white-space: nowrap; }
+.priced__lead { font-size: 15px; line-height: 1.45; margin-bottom: 12px; text-wrap: pretty; }
 .card__foot a:hover { text-decoration: underline; }
 
 /* Свёрнутый пересчёт под живым следом и свёрнутые блоки второго ряда. */
