@@ -282,10 +282,21 @@ for _sid, _label in SHADOW_SIGNALS.items():
                                     note="пишется compute/shadow.py, источника нет")
 del _sid, _label
 
+# Живой журнал позиции (аудит 10.11.2026, compute/track.py): что панель ГОВОРИЛА в
+# каждый день, и какая версия правила это решила. Пишет сам расчёт, источника нет;
+# записанные дни не переписываются. Ряд не пересчитывается из сырья — его потеря
+# невосстановима иначе как из зеркала raw/ в R2.
+for _sid, _label in (("said_position", "Журнал: позиция, которую панель публиковала"),
+                     ("said_rule", "Журнал: версия правила, решившая день")):
+    SERIES[_sid] = dict(fetcher=None, args={}, cadence="derived", pub_lag_days=0, sla=None,
+                        required=False, role="journal", label=_label,
+                        note="пишется compute/track.py, источника нет")
+del _sid, _label
+
 # Возраст точки теневого ряда — не дефект источника (источника нет): норму не
 # проверяем, как и у аукционов. Множество пополняется здесь, а не литералом выше,
 # чтобы список теней жил в одном месте.
-DATA_AGE_EXEMPT.update(k for k, v in SERIES.items() if v.get("role") == "shadow")
+DATA_AGE_EXEMPT.update(k for k, v in SERIES.items() if v.get("role") in ("shadow", "journal"))
 
 # Что тянет каждый режим прогона.
 #

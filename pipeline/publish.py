@@ -72,6 +72,38 @@ def _cell_code(cur):
     return "|".join(parts)
 
 
+def _num(v, nd=2):
+    return f"{v:+.{nd}f}".replace("-", "−").replace(".", ",")
+
+
+def _day(iso):
+    s = str(iso or "")[:10]
+    return f"{s[8:10]}.{s[5:7]}" if len(s) == 10 else ""
+
+
+def _holds_text(p, cell_rule):
+    """Строка «что держит позицию сейчас» по блоку позиции (decision.held_by)."""
+    held = (p or {}).get("held_by") or {}
+    by = held.get("by")
+    thr = p.get("comp_threshold") or constants.DECISION["comp_threshold"]
+    comp = p.get("comp_daily")
+    now = f", сейчас {_num(comp)}" if isinstance(comp, (int, float)) else ""
+    since = _day(p.get("comp_state_since"))
+    if by == "comp":
+        return (f"Деньги держит оценка рынка: она за деньги" + (f" с {since}" if since else "")
+                + now + f"; для акций нужна выше {_num(thr, 1)} в день решения. "
+                "Ворота открыты и на позицию сейчас не влияют.")
+    if by == "both":
+        return f"Деньги держат и ворота, и оценка рынка{now}. {cell_rule}"
+    if by == "gate":
+        return cell_rule
+    if by == "open":
+        return (f"Акции: ворота открыты, оценка рынка за акции" + (f" с {since}" if since else "")
+                + now + f". Выход — если закроются ворота или оценка уйдёт ниже "
+                f"{_num(-thr, 1)} в день решения.")
+    return cell_rule
+
+
 def build_verdict(core, states, decision=None):
     """Вердикт витрины: ячейка и ядро (как раньше) + позиция и режим (02.09.2026).
 
@@ -120,6 +152,12 @@ def build_verdict(core, states, decision=None):
     dec = decision if isinstance(decision, dict) else {}
     if dec.get("position"):
         verdict["position"] = dec["position"]
+        # «Правило дня» называет то, что держит позицию СЕЙЧАС (аудит 10.11.2026,
+        # §3.8): 09.11 оно говорило про флаг ОФЗ ячейки «бык с долговой тенью», а
+        # деньги держала оценка рынка при открытых воротах. Текст сочетания ворот —
+        # только когда держат ворота; сам он остаётся в cell_rule.
+        verdict["cell_rule"] = verdict["rule"]
+        verdict["rule"] = _holds_text(dec["position"], verdict["rule"])
     if dec.get("position_prev_rule"):
         verdict["position_prev_rule"] = dec["position_prev_rule"]
     return verdict

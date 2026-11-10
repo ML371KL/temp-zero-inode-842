@@ -614,6 +614,15 @@ def _legs_line(dist, head):
             + " — это ориентир, а не прогноз: показатели двигаются вместе")
 
 
+def _held_by(state, gate_is_open, cs):
+    """{"by": "open" | "gate" | "comp" | "both"} — что держит позицию сейчас."""
+    if state == LONG:
+        return {"by": "open"}
+    if not gate_is_open:
+        return {"by": "both" if cs != 1 else "gate"}
+    return {"by": "comp"}
+
+
 def _position_block(dates, cols, states, hyst, gate_open, comp_live, comp_state,
                     is_dec, pos, reasons, dist=None):
     n = len(dates)
@@ -662,8 +671,20 @@ def _position_block(dates, cols, states, hyst, gate_open, comp_live, comp_state,
         "history": _rle(dates, pos),
         "switches_per_year": round(switches / 5.0, 1),
         "start": START,
-        # Что правило дало в деньгах с заморозки и за 12/24 месяца (compute/track.py).
-        "journal": track.journal(dates, pos, reasons, cols.get("mcftr"), cols.get("deposit")),
+        # Версия замороженного правила (constants.RULE_EDITIONS): рядом с позицией на
+        # витрине. Новые поля только добавляются — имена прежних не меняются.
+        "rule_version": constants.RULE_VERSION,
+        "rule_since": constants.RULE_SINCE,
+        # Что держит позицию сейчас: ворота, оценка рынка или и то и другое (у акций —
+        # «open»). Строка витрины «что держит позицию» и плашки цикла и тормоза
+        # читают это поле, а не выводят его каждая по-своему.
+        "held_by": _held_by(state, bool(gate_open[last]), comp_state[last]),
+        # Что правило дало в деньгах за 12/24 месяца — ПЕРЕСЧЁТ нынешней версией, со
+        # столбцом простой кривой (compute/track.py). Живой след (journal.live)
+        # дописывает run.build_full: ему нужен стор.
+        "journal": track.journal(dates, pos, reasons, cols.get("mcftr"), cols.get("deposit"),
+                                 curve=track.curve_positions(dates, cols.get("slope_10_2"),
+                                                             is_dec, START)),
     }
 
 

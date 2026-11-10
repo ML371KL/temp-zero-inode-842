@@ -312,6 +312,20 @@ class TestGuideMatchesConstants(unittest.TestCase):
         self.assertIn(f"±{band}%", text, "полоса гистерезиса тренда не названа")
         self.assertIn("пятниц", text.lower(), "день решения по наклону не назван")
 
+    def test_rule_editions_match_constants(self):
+        """Таблица версий правила в руководстве = constants.RULE_EDITIONS (аудит 10.11.2026).
+
+        Мутация: поднять RULE_VERSION и не дописать строку в руководство — читатель
+        не узнает, что поменялось и с какого дня живой счёт начат заново.
+        """
+        pos = strip_tags(section(self.html, "position"))
+        for ed in self.K.RULE_EDITIONS:
+            day = ed["since"]
+            ru = f"{day[8:10]}.{day[5:7]}.{day[:4]}"
+            self.assertIn(ru, pos, f"версия {ed['version']} от {ru} не названа")
+            self.assertIn(ed["what"], pos, f"суть версии {ed['version']} не совпадает")
+        self.assertIn("простая кривая", pos.lower())
+
     def test_health_review_months_in_guide(self):
         """Порог ревалидации (×12) — словами в разделе о здоровье модели."""
         words = {6: "шесть", 12: "двенадцать"}

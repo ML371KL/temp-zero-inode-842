@@ -304,7 +304,7 @@ def fetch_live_quotes(journal, now=None):
             if uid:
                 mapping["live_brent_moex"] = uid
                 extra["live_brent_moex"] = {"secid": secid, "secid_since": since}
-            results = _normalize(tinvest.live_quotes(mapping, extra))
+            results = _normalize(tinvest.live_quotes(mapping, extra, now=now))
             origin = "tinvest"
     except Exception as exc:  # noqa: BLE001 — граница изоляции
         journal.warn("fetch", f"живые котировки T-Invest: {type(exc).__name__}: {exc} "
@@ -529,6 +529,36 @@ def _shadow(panel, states, decision, now, journal):
         return {"error": f"{type(exc).__name__}: {exc}"}
 
 
+def _live_journal(panel, decision, journal):
+    """Живой журнал позиции (compute/track.py): дописать последний день и посчитать
+    verdict.position.journal.live — что дало то, что панель ГОВОРИЛА.
+
+    Изолирован, как тень: журнал не имеет права ронять публикацию позиции.
+    """
+    track = _optional("pipeline.compute.track")
+    pos_block = (decision or {}).get("position")
+    daily = (decision or {}).get("daily") or {}
+    if track is None or not pos_block or not daily.get("dates"):
+        return
+    try:
+        dates, cols = daily["dates"], (panel or {}).get("cols") or {}
+        said, rep = track.said_record(store, dates, daily["pos"])
+        if rep.get("error"):
+            journal.warn("journal", f"живой журнал: {rep['error']}")
+        elif rep.get("seeded"):
+            journal.line("journal", f"живой журнал заведён затравкой: {len(said)} дней")
+        elif rep.get("appended"):
+            journal.line("journal", f"живой журнал: дописан {', '.join(rep['appended'])}")
+        curve = track.curve_positions(dates, cols.get("slope_10_2"),
+                                      daily.get("is_decision_day") or [False] * len(dates))
+        live = track.live_journal(dates, said, cols.get("mcftr"), cols.get("deposit"),
+                                  curve=curve, pos_now=daily["pos"])
+        if live and isinstance(pos_block.get("journal"), dict):
+            pos_block["journal"]["live"] = live
+    except Exception as exc:  # noqa: BLE001 — граница изоляции
+        journal.warn("journal", f"живой журнал упал: {type(exc).__name__}: {exc}")
+
+
 def build_full(now, journal):
     """Полный пересчёт: панель → ядро → состояния → решение → тень.
 
@@ -542,6 +572,7 @@ def build_full(now, journal):
     if decision_mod is not None:
         mf = core_mod.monthly_frame(panel)
         decision = decision_mod.compute_decision(panel, mf, states)
+        _live_journal(panel, decision, journal)
     shadow = _shadow(panel, states, decision, now, journal)
     dates = (panel or {}).get("dates") or []
     pos = ((decision or {}).get("position") or {})

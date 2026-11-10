@@ -225,12 +225,15 @@ class TestHysteresis(CoreCase):
 class TestLabels(CoreCase):
     def test_label_boundaries(self):
         # Границы шкалы из constants.CORE_LABELS: интервалы полуоткрытые [lo, hi).
+        # Полоса «нейтрально» — порог решения ±0,2 (10.11.2026; до того ±0,3, и
+        # «−0,28 · нейтрально» стояло рядом с «деньги: оценка ниже −0,2»).
+        # Мутация: вернуть полосу ±0,3 → −0,28 снова «нейтрально», тест краснеет.
         self.assertEqual(self.core.core_label(0.0), "нейтрально")
-        self.assertEqual(self.core.core_label(0.29), "нейтрально")
-        self.assertEqual(self.core.core_label(0.3), "умеренно за акции")
+        self.assertEqual(self.core.core_label(0.19), "нейтрально")
+        self.assertEqual(self.core.core_label(0.21), "умеренно за акции")
         self.assertEqual(self.core.core_label(1.0), "сильно за акции")
-        self.assertEqual(self.core.core_label(-0.3), "нейтрально")
-        self.assertEqual(self.core.core_label(-0.31), "умеренно за деньги")
+        self.assertEqual(self.core.core_label(-0.2), "нейтрально")
+        self.assertEqual(self.core.core_label(-0.28), "умеренно за деньги")
         self.assertEqual(self.core.core_label(-1.0), "умеренно за деньги")
         self.assertEqual(self.core.core_label(-1.01), "сильно за деньги")
         self.assertEqual(self.core.core_label(None), "нет данных")

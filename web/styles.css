@@ -584,10 +584,9 @@ table.data tbody tr:last-child th, table.data tbody tr:last-child td { border-bo
 }
 /* Самые узкие телефоны: разница видна из двух соседних колонок, а таблица обязана
    помещаться без горизонтальной прокрутки (см. комментарий к .tablewrap). */
-@media (max-width: 389px) {
-  .position__journal table.data th:nth-child(5), .position__journal table.data td:nth-child(5) { display: none; }
-  .position__journal .journal__diff { display: none; }
-}
+/* Свёрнутый пересчёт под живым следом и свёрнутые блоки второго ряда. */
+.journal__hist { margin-top: 10px; }
+.journal__hist > .tablewrap, .journal__hist > .health, .journal__hist > div { margin-top: 8px; }
 @media (max-width: 359px) {
   .position__journal table.data th, .position__journal table.data td { padding: 8px 2px; }
 }

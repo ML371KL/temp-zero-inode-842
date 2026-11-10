@@ -199,13 +199,35 @@ def front_futures(store_mod, daily_sid="brent_moex", live_sid="live_brent_moex",
     return uid, secid, (today if cached.get("secid") else None)
 
 
-def live_quotes(mapping=None, extra_meta=None):
+def _msk_day(iso):
+    """'2026-11-09T15:49:59Z' -> '2026-11-09': московский день СДЕЛКИ. Пусто -> None."""
+    from datetime import datetime, timedelta, timezone
+    try:
+        stamp = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=timezone.utc)
+    return (stamp.astimezone(timezone.utc) + timedelta(hours=MSK_OFFSET_HOURS)).date().isoformat()
+
+
+def live_quotes(mapping=None, extra_meta=None, now=None):
     """[(series_id, {дата: цена}, meta)] — тот же контракт, что у iss.intraday_quote.
 
-    Дата точки — МОСКОВСКИЙ день сделки: витрина живёт по биржевому календарю, а
-    после полуночи UTC «сегодня» у нас и у биржи разные.
+    Дата точки — МОСКОВСКИЙ день СДЕЛКИ (время из GetLastPrices), а не день опроса.
+    До 10.11.2026 здесь стоял день опроса: последний такт в 00:00 МСК записывал
+    вчерашнюю цену сегодняшним числом, витрина считала изменение от неё самой, и с
+    полуночи до 10:00 и все выходные у индекса, RGBI, RVI, юаня и золота стояло
+    «0,00 %» (аудит 10.11.2026, §3.8). Теперь ночью и в выходные точка остаётся днём
+    последней сессии, и строка показывает изменение этой сессии.
+
+    Цена без времени сделки или со временем дальше завтрашнего дня по Москве не
+    датируется вовсе: подставить день опроса — та самая ошибка.
+    now — момент опроса (UTC), параметром ради тестов с замороженными часами.
     """
     from datetime import datetime, timedelta, timezone
+    now = now or datetime.now(timezone.utc)
+    horizon = ((now + timedelta(hours=MSK_OFFSET_HOURS)).date() + timedelta(days=1)).isoformat()
     ids = dict(mapping or LIVE_UIDS)
     prices = last_prices(ids.values())
     if not prices:
@@ -216,10 +238,11 @@ def live_quotes(mapping=None, extra_meta=None):
         if not got:
             continue
         price, when = got
-        msk = datetime.now(timezone.utc) + timedelta(hours=MSK_OFFSET_HOURS)
-        day = msk.date().isoformat()
+        day = _msk_day(when) if when else None
+        if not day or day > horizon:
+            continue
         meta = {"source": "tinvest", "url": BASE, "asof": day, "status": "ok",
-                "fetched_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "fetched_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "intraday": True, "delay_min": 0, "uid": uid,
                 "updatetime": _msk_time(when),
                 "note": "T-Invest: цена без задержки"}
