@@ -206,9 +206,35 @@ class TestLabPage(unittest.TestCase):
         self.assertIn('href="lab.html"', index)
         app = read(ROOT / "web" / "app.js")
         # Блоки второй страницы рисуются только в режиме lab, а главные — вне его.
-        for fn in ("renderCore(d)", "renderStates(d)", "renderMonitors(d)", "renderShadow(d)"):
+        for fn in ("renderCore(d)", "renderStates(d)", "renderShadow(d)"):
             self.assertIn(fn, app)
         self.assertIn("PAGE === 'lab'", app)
+
+    def test_context_on_main(self):
+        """Мониторы и расстояние до переключения — на главной, в «Контексте рынка»
+        (10.11.2026, по слову владельца), между «Что в цене» и журналом событий, и только
+        там. Ссылки между страницами — в шапке обеих. Мутация: вернуть renderContext в
+        ветку lab или убрать из главной — тест падает."""
+        app = read(ROOT / "web" / "app.js")
+        body = re.search(r"function render\(d, force\) \{(.*?)\n  \}\n", app, re.S)
+        self.assertIsNotNone(body, "в app.js не нашлась функция render")
+        lab_branch, main_branch = re.search(r"if \(PAGE === 'lab'\) \{(.*?)\} else \{(.*?)\}", body.group(1), re.S).groups()
+        self.assertNotIn("renderContext", lab_branch)
+        self.assertNotIn("renderDistances", lab_branch)
+        order = [m.group(1) for m in re.finditer(r"(render(?:Priced|Context|Events))\(d\)", main_branch)]
+        self.assertEqual(order, ["renderPriced", "renderContext", "renderEvents"])
+        ctx = re.search(r"function renderContext\(d\) \{(.*?)\n  \}\n", app, re.S).group(1)
+        self.assertIn("'Контекст рынка'", ctx)
+        self.assertIn("'в решение не входит'", ctx)
+        self.assertIn("renderDistances(d)", ctx)
+        self.assertIn("monitorTiles(d)", ctx)
+        states = re.search(r"function renderStates\(d\) \{(.*?)\n  \}\n", app, re.S).group(1)
+        self.assertNotIn("text: 'Расстояние до переключения'", states)
+        self.assertIn("text: 'Сигналы второго ряда'", states)
+        self.assertIn("text: 'Расстояние до переключения'", app)
+        tools = lambda html: re.search(r'<div class="top__tools">(.*?)</header>', html, re.S).group(1)
+        self.assertIn('href="lab.html"', tools(read(INDEX)))
+        self.assertIn('href="./"', tools(read(ROOT / "web" / "lab.html")))
 
 
 class TestGuideMatchesConstants(unittest.TestCase):

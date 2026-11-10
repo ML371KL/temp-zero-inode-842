@@ -888,16 +888,6 @@
     ]);
   }
 
-  /* Ссылка на вторую страницу — всё, что не нужно для решения, но нужно для разбора. */
-  function renderLabLink() {
-    return h('section', { 'class': 'section' }, [
-      h('a', { 'class': 'card lablink', href: 'lab.html' }, [
-        h('span', { 'class': 'card__title', text: 'Контекст и лаборатория →' }),
-        h('span', { 'class': 'card__note', text: 'ядро и его показатели, ворота и три режима, восемь сочетаний, сигналы второго ряда, 16 мониторов, тень, ранговая связь' })
-      ])
-    ]);
-  }
-
   /* Статистика режима — одной таблицей: две меры стоят строками, медиана, среднее и
    * доля плюсовых — колонками, и числа второй меры попадают точно под первые.
    * Прежде это были два ряда карточек, каждый со своей шириной колонок: «среднее»
@@ -1413,31 +1403,6 @@
       ])
     ]) : null;
 
-    // Расстояние до переключения считается от ТОГО порога, который сработает
-    // следующим: у включённого бита это порог выключения (вола — тот же p80, RGBI −3%,
-    // тренд −2% от MA200), у выключенного — порог включения. Витрина без
-    // гистерезиса (старый data.json) присылает один порог — берём его.
-    var gateSrc = st.gate && typeof st.gate === 'object' ? st.gate : (st.current || {});
-    var dists = (st.distances || []).map(function (x) {
-      var bit = gateSrc[x.id];
-      var on = bit === 1 || bit === true;
-      var useOff = on && isNum(x.off_threshold);
-      var thr = useOff ? x.off_threshold : (isNum(x.on_threshold) ? x.on_threshold : x.threshold);
-      var text = useOff ? (x.text_off || x.text) : x.text;
-      var which = x.id === 'trend' ? (on ? 'смена на медведя' : 'смена на быка') : (on ? 'снятие флага' : 'включение флага');
-      return h('div', { 'class': 'dist' }, [
-        h('div', { 'class': 'dist__row' }, [
-          h('span', { 'class': 'dist__k', text: x.label || x.id }),
-          h('span', { 'class': 'dist__v', text: fmtNum(x.value, 1, true) + ' → ' + fmtNum(thr, 1, true) })
-        ]),
-        // Полярность объявлена у ВСЕХ трёх строк, как требует контракт thresholdBar
-        // (charts.js: «либо у всех, либо ни у одной»). Тренд: плохо НИЖЕ MA200;
-        // облигации: плохо ГЛУБЖЕ порога просадки; волатильность: плохо ВЫШЕ порога.
-        C.thresholdBar(x.value, thr, { bad: x.id === 'vol' ? 'above' : 'below' }),
-        h('p', { 'class': 'dist__t', text: ruText(text) + (isNum(x.off_threshold) ? ' · порог: ' + which : '') })
-      ]);
-    });
-
     var sigs = (st.active_signals || []).map(function (s) {
       var pos = /за лонг/.test(s.verdict || '');
       var neg = /против/.test(s.verdict || '');
@@ -1471,28 +1436,59 @@
       ]);
     });
 
-    return section('Машина состояний', 'Слой 2 · ворота риска, восемь сочетаний и сигналы второго ряда', [
+    // Расстояние до переключения живёт на главной, в «Контексте рынка» (10.11.2026):
+    // карточка сигналов осталась одна и стоит во всю ширину, а сами сигналы на
+    // широком экране — в две колонки, как стояли в половине ряда.
+    return section('Машина состояний', 'Слой 2 · лента ячеек, сигналы второго ряда и восемь сочетаний', [
       ribbon,
-      h('div', { 'class': 'two', style: 'margin-top:16px' }, [
-        h('article', { 'class': 'card' }, [
-          h('div', { 'class': 'card__head' }, [
-            h('h3', { 'class': 'card__title', text: 'Расстояние до переключения' }),
-            gateSrc === st.gate ? h('span', { 'class': 'card__note', text: 'до порога, который сработает следующим' }) : null
-          ]),
-          dists.length ? h('div', null, dists) : h('p', { 'class': 'empty', text: 'Расстояния ещё не рассчитаны' })
+      // В решение не входят (аудит 10.11.2026): «за лонг» у трёх из четырёх при
+      // позиции «деньги» читалось как спор с позицией — поэтому свёрнуто.
+      h('article', { 'class': 'card', style: 'margin-top:16px' }, [
+        h('div', { 'class': 'card__head' }, [
+          h('h3', { 'class': 'card__title', text: 'Сигналы второго ряда' }),
+          h('span', { 'class': 'card__note', text: 'в решение не входят' })
         ]),
-        // В решение не входят (аудит 10.11.2026): «за лонг» у трёх из четырёх при
-        // позиции «деньги» читалось как спор с позицией — поэтому свёрнуто.
-        h('article', { 'class': 'card' }, [
-          h('div', { 'class': 'card__head' }, [
-            h('h3', { 'class': 'card__title', text: 'Сигналы второго ряда' }),
-            h('span', { 'class': 'card__note', text: 'в решение не входят' })
-          ]),
-          sigs.length ? h('div', null, sigs)
-            : h('p', { 'class': 'empty', text: 'В текущем сочетании сигналы второго ряда не включены' })
-        ])
+        sigs.length ? h('div', { 'class': 'sigs' }, sigs)
+          : h('p', { 'class': 'empty', text: 'В текущем сочетании сигналы второго ряда не включены' })
       ]),
       cellsCard
+    ]);
+  }
+
+  /* Расстояние до переключения — на главной, в «Контексте рынка»: в решение не входит
+   * само, но показывает, насколько близко каждый флаг ворот к смене. Считается от ТОГО
+   * порога, который сработает следующим: у включённого бита это порог выключения (вола —
+   * тот же p80, RGBI −3%, тренд −2% от MA200), у выключенного — порог включения. Витрина
+   * без гистерезиса (старый data.json) присылает один порог — берём его. На широком
+   * экране три строки стоят в ряд, на узком — столбиком (.dists). */
+  function renderDistances(d) {
+    var st = d.states || {};
+    var gateSrc = st.gate && typeof st.gate === 'object' ? st.gate : (st.current || {});
+    var dists = (st.distances || []).map(function (x) {
+      var bit = gateSrc[x.id];
+      var on = bit === 1 || bit === true;
+      var useOff = on && isNum(x.off_threshold);
+      var thr = useOff ? x.off_threshold : (isNum(x.on_threshold) ? x.on_threshold : x.threshold);
+      var text = useOff ? (x.text_off || x.text) : x.text;
+      var which = x.id === 'trend' ? (on ? 'смена на медведя' : 'смена на быка') : (on ? 'снятие флага' : 'включение флага');
+      return h('div', { 'class': 'dist' }, [
+        h('div', { 'class': 'dist__row' }, [
+          h('span', { 'class': 'dist__k', text: x.label || x.id }),
+          h('span', { 'class': 'dist__v', text: fmtNum(x.value, 1, true) + ' → ' + fmtNum(thr, 1, true) })
+        ]),
+        // Полярность объявлена у ВСЕХ трёх строк, как требует контракт thresholdBar
+        // (charts.js: «либо у всех, либо ни у одной»). Тренд: плохо НИЖЕ MA200;
+        // облигации: плохо ГЛУБЖЕ порога просадки; волатильность: плохо ВЫШЕ порога.
+        C.thresholdBar(x.value, thr, { bad: x.id === 'vol' ? 'above' : 'below' }),
+        h('p', { 'class': 'dist__t', text: ruText(text) + (isNum(x.off_threshold) ? ' · порог: ' + which : '') })
+      ]);
+    });
+    return h('article', { 'class': 'card' }, [
+      h('div', { 'class': 'card__head' }, [
+        h('h3', { 'class': 'card__title', text: 'Расстояние до переключения' }),
+        gateSrc === st.gate ? h('span', { 'class': 'card__note', text: 'до порога, который сработает следующим' }) : null
+      ]),
+      dists.length ? h('div', { 'class': 'dists' }, dists) : h('p', { 'class': 'empty', text: 'Расстояния ещё не рассчитаны' })
     ]);
   }
 
@@ -1738,8 +1734,8 @@
     return 'данные: ' + (asof.length > 7 ? fmtDay(asof) : fmtMon(asof + '-01'));
   }
 
-  function renderMonitors(d) {
-    var tiles = (d.monitors || []).map(function (m) {
+  function monitorTiles(d) {
+    return (d.monitors || []).map(function (m) {
       var body = tileBody(m);
       var note = ruText(trimNote(m.note));
       return h('article', { 'class': 'card tile' + (m.tier === 'dead' ? ' tile--dead' : '') }, [
@@ -1752,8 +1748,18 @@
         h('div', { 'class': 'tile__foot' }, [h('span', { text: tileAsof(m, d) })])
       ]));
     });
-    return section('Мониторы', 'Слой 3 · наблюдение без предиктивных претензий', [
-      tiles.length ? h('div', { 'class': 'tiles' }, tiles) : h('p', { 'class': 'empty', text: 'Тайлы ещё не собраны' })
+  }
+
+  /* Контекст рынка — на главной, после «Что в цене» (10.11.2026, по слову владельца):
+   * панель читают и как картину рынка, поэтому расстояние до переключения и все
+   * плитки мониторов стоят рядом с решением, но отдельным разделом с подписью «в
+   * решение не входит». Содержимое — то же, что было на lab.html, без правок. */
+  function renderContext(d) {
+    var tiles = monitorTiles(d);
+    return section('Контекст рынка', 'в решение не входит', [
+      renderDistances(d),
+      tiles.length ? h('div', { 'class': 'tiles', style: 'margin-top:16px' }, tiles)
+        : h('p', { 'class': 'empty', text: 'Тайлы ещё не собраны' })
     ]);
   }
 
@@ -2297,16 +2303,16 @@
     app.innerHTML = '';
     renderBanners(d);
     if (PAGE === 'lab') {
-      // Вторая страница: всё, что не нужно для решения, — без потерь и на тех же данных.
+      // Вторая страница: всё, что не нужно ни для решения, ни для картины рынка, — на
+      // тех же данных. Мониторы и расстояние до переключения — на главной.
       app.appendChild(section('Ворота и наклон', 'три режима, флаги с гистерезисом, оценка рынка за 24 месяца', [renderHero(d)]));
       app.appendChild(renderCore(d));
       app.appendChild(renderStates(d));
-      app.appendChild(renderMonitors(d));
       var shd = renderShadow(d);
       if (shd) app.appendChild(shd);
     } else {
       app.appendChild(renderHero(d));
-      [renderGuides(d), renderSkills(d), renderPriced(d), renderEvents(d), renderLabLink()].forEach(function (x) {
+      [renderGuides(d), renderSkills(d), renderPriced(d), renderContext(d), renderEvents(d)].forEach(function (x) {
         if (x) app.appendChild(x);
       });
     }

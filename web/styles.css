@@ -246,6 +246,8 @@ button { font: inherit; color: inherit; }
 .pill:hover { border-color: var(--hair-strong); color: var(--ink); }
 .pill[aria-pressed="true"] { background: var(--inset); color: var(--ink); border-color: var(--hair-strong); }
 .pill__ico { width: 15px; height: 15px; display: block; flex: none; }
+/* Плашка-ссылка между страницами (главная ↔ лаборатория) — та же кнопка шапки, но <a>. */
+a.pill { text-decoration: none; }
 
 .age {
   font-size: 13px; color: var(--ink-3); white-space: nowrap;
@@ -463,6 +465,22 @@ button { font: inherit; color: inherit; }
 .dist__k { font-size: 15px; font-weight: 600; }
 .dist__v { font-size: 15px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
 .dist__t { font-size: 13px; color: var(--ink-3); margin-top: 6px; line-height: 1.45; max-width: 68ch; }
+/* «Контекст рынка» на главной: карточка во всю ширину, поэтому на широком экране
+ * три показателя стоят в ряд — разделитель между ними вертикальный, а не над
+ * строкой. На узком экране — столбиком, как прежде. */
+@media (min-width: 900px) {
+  .dists { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .dists > .dist { border-top: 0; padding: 0 24px; border-left: 1px solid var(--hair); }
+  .dists > .dist:first-child { padding-left: 0; border-left: 0; }
+  .dists > .dist:last-child { padding-right: 0; }
+}
+
+/* Сигналы второго ряда на lab.html — одной карточкой во всю ширину; на широком
+ * экране в две колонки, чтобы строка «название — z» не растягивалась на 1100px. */
+@media (min-width: 900px) {
+  .sigs { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 32px; }
+  .sigs > .sig:nth-child(2) { border-top: 0; padding-top: 0; }
+}
 
 .sig { padding: 14px 0; border-top: 1px solid var(--hair); }
 .sig:first-child { border-top: 0; padding-top: 0; }
@@ -616,9 +634,6 @@ table.data tbody tr:last-child th, table.data tbody tr:last-child td { border-bo
   border-left: 3px solid var(--accent); background: var(--surface-2); color: var(--ink-2);
 }
 .against b { color: var(--ink); font-weight: 600; }
-/* Ссылка на вторую страницу — карточкой во всю ширину. */
-.lablink { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; text-decoration: none; color: inherit; }
-.lablink:hover .card__title { text-decoration: underline; }
 .card__foot a { color: var(--s1); text-decoration: none; white-space: nowrap; }
 .priced__lead { font-size: 15px; line-height: 1.45; margin-bottom: 12px; text-wrap: pretty; }
 .card__foot a:hover { text-decoration: underline; }
@@ -692,12 +707,20 @@ table.data tbody tr:last-child th, table.data tbody tr:last-child td { border-bo
   .brand__sub { display: none; }
   .pill__label { display: none; }
   .pill { padding: 0 10px; }
+  /* Кнопок в шапке три (ссылка на соседнюю страницу, таблица, тема), и при сжатии
+   * по умолчанию место отдавала строка возраста: на lab.html шириной 400 px она
+   * обрезалась до «16 ми…». Сжимается название — оно переносится на вторую строку. */
+  .top__tools { flex-shrink: 0; gap: 6px; }
   .wrap { padding: 0 16px 56px; }
   .card, .hero__cell, .hero__gauge { padding: 16px; }
   .rule { padding: 16px; }
   .stats { gap: 16px 20px; }
   .section { margin-top: 32px; }
 }
+/* Совсем узкий экран: названию не хватит места и на две строки — тогда снова
+ * сжимается строка возраста (многоточием), а не вылезает название. Стоит после
+ * блока 620 px, иначе проиграл бы ему по порядку. */
+@media (max-width: 359px) { .top__tools { flex-shrink: 1; } }
 
 body { overflow-x: hidden; }
 /* text-wrap: pretty — против висячих строк-сирот: на 1280px семь блоков
