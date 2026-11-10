@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>MOEX Radar — контекст и лаборатория</title>
-<meta name="description" content="MOEX Radar, вторая страница: ядро, ворота и режимы, восемь сочетаний, сигналы второго ряда, мониторы, тень.">
+<title>MOEX Radar — лаборатория</title>
+<meta name="description" content="MOEX Radar, вторая страница: ядро, ворота и режимы, восемь сочетаний, сигналы второго ряда, тень.">
 <meta name="color-scheme" content="light dark">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="styles.css">
@@ -57,6 +57,14 @@
     <span class="top__spacer"></span>
     <div class="top__tools">
       <span class="age" id="age"></span>
+      <!-- На узком экране, как у соседних кнопок, остаётся иконка: подпись уходит в aria-label. -->
+      <a class="pill" href="./" aria-label="Главная страница панели" title="Главная страница панели">
+        <svg class="pill__ico" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round">
+          <path d="M1.8 7.6 8 2.2l6.2 5.4"/>
+          <path d="M3.6 6.3v7.5h3.2V10h2.4v3.8h3.2V6.3"/>
+        </svg>
+        <span class="pill__label">Главная</span>
+      </a>
       <button class="pill" id="table-toggle" type="button" aria-pressed="false"
               aria-label="Показать те же ряды таблицей"
               title="Показать те же ряды таблицей">
@@ -89,11 +97,11 @@
       <span class="section__sub">всё, что не нужно для решения, но нужно для разбора</span>
     </div>
     <article class="card howto__card">
-      <p class="howto__cta-note">Позиция, цикл ставки и тормоз, живой след, ориентиры и то, что
-        панель умеет, — на <a href="./">главной</a>. Здесь, на тех же данных, — ядро и его
-        показатели, ворота и три режима, лента и таблица восьми сочетаний, сигналы второго
-        ряда, шестнадцать мониторов, тень и ранговая связь. В решение из этого входят только
-        три показателя ядра и три флага ворот. <a href="guide.html">Руководство</a>.</p>
+      <p class="howto__cta-note">Позиция, цикл ставки и тормоз, живой след, ориентиры, то, что
+        панель умеет, мониторы и расстояние до переключения — на <a href="./">главной</a>.
+        Здесь, на тех же данных, — ядро и его показатели, ворота и три режима, лента и таблица
+        восьми сочетаний, сигналы второго ряда, тень и ранговая связь. В решение из этого
+        входят только три показателя ядра и три флага ворот. <a href="guide.html">Руководство</a>.</p>
     </article>
   </section>
 
