@@ -696,6 +696,36 @@ def _deposit(payload, prev, state, now):
                 meaning=meaning, direction="up")]
 
 
+def _against(payload, prev, state, now):
+    """«Рынок растёт вопреки оценке» — одно событие на эпизод (аудит 10.11.2026, этап 2).
+
+    Условие считает конвейер (compute/skills.against): позиция «деньги» исполнена, а
+    индекс полной доходности за 20 сессий вырос больше чем на 10 %. Эпизод — сигналы
+    не дальше 30 дней друг от друга, его начало — ключ дедупа: сообщаем один раз за
+    эпизод, сколько бы дней подряд условие ни держалось. Это повод посмотреть, а не
+    сигнал: позиция по правилу от него не меняется.
+    """
+    a = (payload.get("verdict") or {}).get("against") or {}
+    start = a.get("episode_start")
+    if not a.get("active") or not start or state.get("against_alerted") == start:
+        return []
+    state["against_alerted"] = start
+    rise = a.get("rise_20_pct")
+    st = a.get("stats") or {}
+    hist = ""
+    if st.get("with_fwd"):
+        hist = (f"На истории с {str(a.get('since') or '')[:4]} года таких эпизодов "
+                f"{st.get('episodes')}; через {a.get('fwd_sessions')} сессий рынок был выше в "
+                f"{st.get('higher')} из {st.get('with_fwd')}, в среднем "
+                f"{_pct(st.get('fwd_avg_pct'), 1, plus=True)} против "
+                f"{_pct(st.get('flat_fwd_avg_pct'), 1, plus=True)} по всем дням в деньгах.")
+    return [_ev(f"against:{start}", "against_rally", "Рынок растёт вопреки оценке", "info", now,
+                detail=(f"Индекс полной доходности за {a.get('window')} сессий "
+                        f"{_pct(rise, 1, plus=True)}, а позиция — деньги. " + hist).strip(),
+                meaning="Повод посмотреть, а не сигнал: позиция по правилу не меняется.",
+                direction="up")]
+
+
 # ВЫДЕРЖКА санитарной тревоги об источнике — только на интрадей-такте.
 #
 # С 02.10 по 28.10.2026 в ops-канал ушло ≈20 санитарных сообщений 842, и почти
@@ -1034,6 +1064,7 @@ def detect(payload, state, now=None, merge=True):
     events += _orfr(payload, prev, now)
     events += _auction(payload, prev, now)
     events += _deposit(payload, prev, state, now)
+    events += _against(payload, prev, state, now)
     events += _sources(payload, prev, state, now)
     events += _health(payload, prev, now)
     events += _core_missing(payload, prev, now)

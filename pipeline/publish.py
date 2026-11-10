@@ -160,6 +160,10 @@ def build_verdict(core, states, decision=None):
         verdict["rule"] = _holds_text(dec["position"], verdict["rule"])
     if dec.get("position_prev_rule"):
         verdict["position_prev_rule"] = dec["position_prev_rule"]
+    # Что панель умеет и ориентиры (compute/skills.py): на позицию не влияют.
+    for key in ("waves", "div_gap", "against"):
+        if (dec.get("skills") or {}).get(key):
+            verdict[key] = dec["skills"][key]
     return verdict
 
 

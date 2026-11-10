@@ -229,6 +229,8 @@ button { font: inherit; color: inherit; }
 }
 .brand { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
 .brand__name { font-size: 15px; font-weight: 600; letter-spacing: -.01em; }
+.brand__link { color: inherit; text-decoration: none; }
+.brand__link:hover { text-decoration: underline; }
 .brand__sub { font-size: 13px; color: var(--ink-3); white-space: nowrap; }
 .top__spacer { flex: 1 1 auto; }
 .top__tools { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -584,6 +586,39 @@ table.data tbody tr:last-child th, table.data tbody tr:last-child td { border-bo
 }
 /* Самые узкие телефоны: разница видна из двух соседних колонок, а таблица обязана
    помещаться без горизонтальной прокрутки (см. комментарий к .tablewrap). */
+/* Плашки «Цикл ставки» и «Тормоз» под позицией (аудит 10.11.2026, этап 2): две
+   равные части одного ответа, поэтому одна сетка и одинаковый порядок строк. */
+.plaques { display: grid; gap: 16px; margin-top: 16px; }
+@media (min-width: 900px) { .plaques { grid-template-columns: 1fr 1fr; } }
+.plaque {
+  border: 1px solid var(--hair); border-radius: var(--radius-sm);
+  background: var(--surface-2); padding: 14px 16px;
+}
+.plaque__head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; }
+.plaque__head .kicker { margin-bottom: 8px; }
+.plaque__badge {
+  font-size: 11px; font-weight: 600; letter-spacing: .07em; text-transform: uppercase;
+  color: var(--ink); border: 1px solid var(--ink-3); border-radius: 999px; padding: 1px 8px;
+}
+.plaque__main { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-bottom: 12px; }
+.plaque__word { font-size: 21px; font-weight: 700; letter-spacing: -.015em; line-height: 1.2; }
+.plaque__meta { font-size: 13px; color: var(--ink-2); }
+.plaque__legs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 16px; }
+.plaque__num { font-size: 21px; font-weight: 600; letter-spacing: -.015em; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.plaque__lines { margin-top: 12px; }
+.plaque__lines li { font-size: 13px; line-height: 1.45; color: var(--ink-2); margin-top: 4px; text-wrap: pretty; }
+/* «Рынок растёт вопреки оценке» — строка-повод под позицией, только когда сработала. */
+.against {
+  margin-top: 14px; padding: 10px 14px; font-size: 13px; line-height: 1.45;
+  border-left: 3px solid var(--accent); background: var(--surface-2); color: var(--ink-2);
+}
+.against b { color: var(--ink); font-weight: 600; }
+/* Ссылка на вторую страницу — карточкой во всю ширину. */
+.lablink { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; text-decoration: none; color: inherit; }
+.lablink:hover .card__title { text-decoration: underline; }
+.card__foot a { color: var(--s1); text-decoration: none; white-space: nowrap; }
+.card__foot a:hover { text-decoration: underline; }
+
 /* Свёрнутый пересчёт под живым следом и свёрнутые блоки второго ряда. */
 .journal__hist { margin-top: 10px; }
 .journal__hist > .tablewrap, .journal__hist > .health, .journal__hist > div { margin-top: 8px; }

@@ -21,6 +21,9 @@
   var h = C.h, isNum = C.isNum, fmtNum = C.fmtNum, fmtDay = C.fmtDay, fmtMon = C.fmtMon, tok = C.tok;
 
   var DATA_URL = '/data/data.json';
+  // Две страницы на одних данных (аудит 10.11.2026, этап 2): главная — решение,
+  // lab.html — контекст и лаборатория. Страница объявляет себя атрибутом body.
+  var PAGE = (document.body && document.body.getAttribute('data-page')) || 'main';
   var REFRESH_MS = 60000;
 
   // Хвосты, которые конвейер добавляет к заметке тайла по тиру. На экране их несёт
@@ -470,14 +473,17 @@
       facts.push(stat('Следующее решение', ruDay(p.next_decision) + (wd ? ' (' + wd + ')' : ''),
         'по наклону, порог ±' + fmtNum(thr, 1, false)));
     }
-    if (p.gate_open === true || p.gate_open === false) {
+    // Ворота и знак решения переехали в плашки «Тормоз» и «Цикл ставки» ниже
+    // (аудит 10.11.2026, этап 2); на старой витрине без плашек — прежние факты.
+    var plaques = renderPlaques(d);
+    if (!plaques && (p.gate_open === true || p.gate_open === false)) {
       var gateWord = p.gate_open ? 'открыты' : 'закрыты';
       // Режим «ворота закрыты» под словом «закрыты» — одно и то же дважды.
       var gateRegime = regimeLabel && regimeLabel.toLowerCase() !== 'ворота ' + gateWord ? regimeLabel : null;
       facts.push(stat('Ворота', gateWord,
         [gateRegime, p.gate_since ? 'с ' + ruDay(p.gate_since) : null].filter(Boolean).join(' · ') || null));
     }
-    if (isNum(p.comp_state)) {
+    if (!plaques && isNum(p.comp_state)) {
       facts.push(stat('Знак решения', COMP_STATE_WORD[String(p.comp_state)] || '—',
         [isNum(p.comp_daily) ? 'наклон ' + fmtNum(p.comp_daily, 2, true) : null,
          p.comp_state_since ? 'с ' + ruDay(p.comp_state_since) : null].filter(Boolean).join(' · ') || null));
@@ -596,12 +602,256 @@
         ]),
         renderSwitch(p, st)
       ]),
+      plaques,
+      renderAgainstLine(d),
       journal,
       Array.isArray(p.history) && p.history.length ? h('div', { 'class': 'position__ribbon' }, [
         h('div', { 'class': 'stat__k', text: 'Акции и деньги с 2004 года' }),
         C.positionRibbon(p.history, { end: p.decision_day || d.asof_trading_day, aria: 'Позиция по правилу панели с 2004 года' }),
         legend
       ]) : null
+    ]);
+  }
+
+  /* Две плашки под позицией (аудит 10.11.2026, этап 2): «Цикл ставки» — оценка
+   * рынка, медленная часть решения, и «Тормоз» — ворота. До этого они были слиты в
+   * одну позицию, и не было видно, что именно держит «деньги». В цикле — две строки
+   * прозрачности: что говорит простая кривая и какой показатель держит знак (09.11:
+   * оценка −0,28, без нефти +0,39 — знак держит нефть). Числа считает конвейер
+   * (verdict.position.held_by, curve), фронт только раскладывает. */
+  var LEG_SHORT = { usd_mom63: 'Курс доллара', slope_10_2: 'Кривая ОФЗ', urals_rub_gap: 'Нефть в рублях' };
+  var LEG_GEN = { usd_mom63: 'него', slope_10_2: 'неё', urals_rub_gap: 'неё' };
+
+  function gateBits(d) {
+    var st = d.states || {}, cur = st.current || {};
+    var gateSrc = st.gate && typeof st.gate === 'object' ? st.gate : null;
+    var bitsSrc = gateSrc || cur;
+    var since = (gateSrc && gateSrc.since) || cur.since || st.since || {};
+    return ['trend', 'vol', 'bond'].map(function (key) {
+      var raw = bitsSrc[key];
+      var known = raw === 0 || raw === 1 || raw === true || raw === false;
+      if (!known) {
+        return h('span', { 'class': 'bit bit--neutral' }, [
+          h('span', { 'class': 'bit__dot' }),
+          h('span', { 'class': 'bit__k', text: BIT_LABEL[key].k }),
+          h('span', { 'class': 'bit__v', text: 'нет данных' })
+        ]);
+      }
+      var on = raw === 1 || raw === true;
+      var bitAsof = (cur.bit_asof || {})[key];
+      var tradingDay = d.asof_trading_day || '';
+      var bitStale = bitAsof && tradingDay &&
+        (Date.parse(tradingDay) - Date.parse(bitAsof)) > 7 * 86400 * 1000;
+      var good = key === 'trend' ? on : !on;
+      var word = key === 'trend' ? (on ? BIT_LABEL.trend.on : BIT_LABEL.trend.off)
+        : (on ? BIT_LABEL[key].on : BIT_LABEL[key].off);
+      return h('span', { 'class': 'bit bit--' + (good ? 'off' : 'on') }, [
+        h('span', { 'class': 'bit__dot' }),
+        h('span', { 'class': 'bit__k', text: BIT_LABEL[key].k }),
+        h('span', { 'class': 'bit__v', text: word }),
+        bitStale
+          ? h('span', { 'class': 'bit__since', title: 'Ряд-источник бита отстал: показано последнее наблюдение',
+              text: 'данные от ' + fmtDay(bitAsof) })
+          : (since[key] ? h('span', { 'class': 'bit__since', text: 'с ' + fmtDay(since[key]) }) : null)
+      ]);
+    });
+  }
+
+  function renderPlaques(d) {
+    var v = d.verdict || {}, p = v.position || {};
+    var held = p.held_by && typeof p.held_by === 'object' ? p.held_by : null;
+    if (!held || !Array.isArray(held.legs)) return null;
+    var by = held.by;
+    var holdsBadge = function (yes) {
+      return yes ? h('span', { 'class': 'plaque__badge', text: 'держит позицию' }) : null;
+    };
+    // ---- цикл ставки
+    var cs = p.comp_state;
+    var csWord = cs === 1 ? 'за акции' : (cs === -1 ? 'за деньги' : 'не определён');
+    var legRows = held.legs.map(function (l) {
+      return h('div', { 'class': 'plaque__leg' }, [
+        h('div', { 'class': 'stat__k', text: LEG_SHORT[l.id] || l.label || l.id }),
+        h('div', { 'class': 'plaque__num ' + toneOf(l.contrib), text: fmtNum(l.contrib, 2, true) })
+      ]);
+    });
+    var lines = [];
+    var holder = held.leg ? held.legs.filter(function (l) { return l.id === held.leg; })[0] : null;
+    if (holder && isNum(holder.without)) {
+      lines.push('Знак держит ' + (LEG_SHORT[holder.id] || holder.label || '').toLowerCase() +
+        ': без ' + (LEG_GEN[holder.id] || 'него') + ' оценка была бы ' + fmtNum(holder.without, 2, true) + '.');
+    } else if (cs === 1 || cs === -1) {
+      lines.push('Знак держат все три показателя вместе: без любого одного он тот же.');
+    }
+    var cv = p.curve;
+    if (cv && POSITION_WORD[cv.state]) {
+      lines.push('Простая кривая: ' + POSITION_WORD[cv.state] + (cv.since ? ' с ' + ruDay(cv.since) : '') +
+        (isNum(cv.slope_pp) ? ' (10 лет минус 2 года ' + fmtNum(cv.slope_pp, 2, true) + ' п.п.)' : '') + '.');
+    }
+    var cycle = h('div', { 'class': 'plaque' }, [
+      h('div', { 'class': 'plaque__head' }, [
+        h('span', { 'class': 'kicker', text: 'Цикл ставки · оценка рынка' }), holdsBadge(by === 'comp' || by === 'both')
+      ]),
+      h('div', { 'class': 'plaque__main' }, [
+        h('span', { 'class': 'plaque__word', text: csWord }),
+        h('span', { 'class': 'plaque__meta', text: [p.comp_state_since ? 'с ' + ruDay(p.comp_state_since) : null,
+          isNum(p.comp_daily) ? 'оценка ' + fmtNum(p.comp_daily, 2, true) : null].filter(Boolean).join(' · ') })
+      ]),
+      h('div', { 'class': 'plaque__legs' }, legRows),
+      h('ul', { 'class': 'plaque__lines' }, lines.map(function (t) { return h('li', { text: t }); }))
+    ]);
+    // ---- тормоз
+    var flags = p.flags || {};
+    var up = [];
+    if (flags.trend === 0) up.push('тренд');
+    if (flags.vol === 1) up.push('волатильность');
+    if (flags.bond === 1) up.push('облигации');
+    var gateLine = up.length === 3 ? 'Стоят все три флага — ворота закрыты.'
+      : (up.length ? 'Стоит ' + up.length + ' ' + plural(up.length, 'флаг', 'флага', 'флагов') + ' из трёх: ' +
+         up.join(', ') + '. Закрываются, только когда стоят все три.' : 'Флагов нет. Закрываются, только когда стоят все три.');
+    var brakeLines = [gateLine];
+    if ((by === 'gate' || by === 'both') && v.cell_rule) brakeLines.push(ruText(v.cell_rule));
+    var brake = h('div', { 'class': 'plaque' }, [
+      h('div', { 'class': 'plaque__head' }, [
+        h('span', { 'class': 'kicker', text: 'Тормоз · ворота' }), holdsBadge(by === 'gate' || by === 'both')
+      ]),
+      h('div', { 'class': 'plaque__main' }, [
+        h('span', { 'class': 'plaque__word', text: p.gate_open ? 'открыты' : 'закрыты' }),
+        h('span', { 'class': 'plaque__meta', text: p.gate_since ? 'с ' + ruDay(p.gate_since) : '' })
+      ]),
+      h('div', { 'class': 'bits', style: 'margin-bottom:0' }, gateBits(d)),
+      h('ul', { 'class': 'plaque__lines' }, brakeLines.map(function (t) { return h('li', { text: t }); }))
+    ]);
+    return h('div', { 'class': 'plaques' }, [cycle, brake]);
+  }
+
+  /* «Рынок растёт вопреки оценке» — строка под позицией, только когда условие
+   * сработало (compute/skills.against): позиция «деньги» исполнена, а индекс полной
+   * доходности за 20 сессий вырос больше чем на 10 %. Повод посмотреть, не сигнал. */
+  function againstHist(a) {
+    var s = a && a.stats;
+    if (!s || !isNum(s.with_fwd)) return '';
+    return 'С ' + String(a.since || '').slice(0, 4) + ' года ' + s.episodes + ' ' +
+      plural(s.episodes, 'эпизод', 'эпизода', 'эпизодов') + '; через ' + a.fwd_sessions +
+      ' сессий рынок был выше в ' + s.higher + ' из ' + s.with_fwd + ', в среднем ' +
+      fmtNum(s.fwd_avg_pct, 1, true) + '% против ' + fmtNum(s.flat_fwd_avg_pct, 1, true) + '% по всем дням в деньгах.';
+  }
+  function renderAgainstLine(d) {
+    var a = (d.verdict || {}).against;
+    if (!a || !a.active) return null;
+    return h('div', { 'class': 'against' }, [
+      h('b', { text: 'Рынок растёт вопреки оценке. ' }),
+      h('span', { text: 'Индекс полной доходности ' + fmtNum(a.rise_20_pct, 1, true) + '% за ' + a.window +
+        ' сессий при позиции «деньги». ' + againstHist(a) + ' Повод посмотреть, не сигнал.' })
+    ]);
+  }
+
+  /* Ориентиры рядом с позицией: «дивиденды минус вклад» (зоны заморожены,
+   * constants.DIV_GAP_ZONES) и «рынок растёт вопреки оценке». Оба — не правило. */
+  var ZONE_WORD = { low: 'нижняя зона', mid: 'средняя зона', high: 'верхняя зона' };
+  function renderGuides(d) {
+    var v = d.verdict || {}, g = v.div_gap, a = v.against;
+    if (!g && !a) return null;
+    var cards = [];
+    if (g && Array.isArray(g.zones) && g.cuts) {
+      var lo = g.cuts[0], hi = g.cuts[1];
+      var range = { low: 'ниже ' + fmtNum(lo, 1, true), mid: fmtNum(lo, 1, true) + '…' + fmtNum(hi, 1, true),
+                    high: 'выше ' + fmtNum(hi, 1, true) };
+      cards.push(h('article', { 'class': 'card' }, [
+        h('div', { 'class': 'card__head' }, [
+          h('h3', { 'class': 'card__title', text: 'Дивиденды минус вклад' }),
+          h('span', { 'class': 'card__note', text: 'ориентир, не правило' })
+        ]),
+        h('div', { 'class': 'plaque__main' }, [
+          h('span', { 'class': 'plaque__word', text: fmtNum(g.value_pp, 1, true) + ' п.п.' }),
+          h('span', { 'class': 'plaque__meta', text: (ZONE_WORD[g.zone] || '') + (g.asof ? ' · на ' + fmtDay(g.asof) : '') })
+        ]),
+        h('div', { 'class': 'tablewrap' }, [
+          h('table', { 'class': 'data' }, [
+            h('caption', { text: 'Акции сверх вкладов за следующий год по зонам спреда, месяцы ' +
+              g.since.slice(5, 7) + '.' + g.since.slice(0, 4) + '–' + '11.2025.' }),
+            h('thead', null, [h('tr', null, [
+              h('th', { scope: 'col', text: 'Спред, п.п.' }), h('th', { scope: 'col', text: 'Сверх вкладов' }),
+              h('th', { scope: 'col', text: 'В плюсе' }), h('th', { scope: 'col', text: 'Мес.' })
+            ])]),
+            h('tbody', null, g.zones.map(function (z) {
+              return h('tr', { 'class': z.id === g.zone ? 'is-current' : null }, [
+                h('th', { scope: 'row', text: range[z.id] + (z.id === g.zone ? ' ◂ сейчас' : '') }),
+                h('td', { 'class': toneOf(z.excess_pct), text: fmtNum(z.excess_pct, 1, true) + '%' }),
+                h('td', { text: share(z.hit) }), h('td', { text: String(z.months) })
+              ]);
+            }))
+          ])
+        ])
+      ]));
+    }
+    if (a) {
+      cards.push(h('article', { 'class': 'card' }, [
+        h('div', { 'class': 'card__head' }, [
+          h('h3', { 'class': 'card__title', text: 'Рынок растёт вопреки оценке' }),
+          h('span', { 'class': 'card__note', text: 'повод посмотреть, не сигнал' })
+        ]),
+        h('div', { 'class': 'plaque__main' }, [
+          h('span', { 'class': 'plaque__word', text: a.active ? 'сейчас да' : 'сейчас нет' }),
+          h('span', { 'class': 'plaque__meta', text: 'индекс полной доходности за ' + a.window + ' сессий ' +
+            (isNum(a.rise_20_pct) ? fmtNum(a.rise_20_pct, 1, true) + '%' : '—') + ', порог +' + a.threshold_pct + '% при позиции «деньги»' })
+        ]),
+        h('p', { 'class': 'card__foot', text: againstHist(a) })
+      ]));
+    }
+    return section('Ориентиры', 'рядом с позицией, в решение не входят', [
+      h('div', { 'class': 'two' }, cards)
+    ]);
+  }
+
+  /* «Что панель умеет» (compute/skills.waves): волны индекса полной доходности от
+   * 20 % с августа 2009 и что из них взяло правило нынешней версии. На истории, на
+   * которой правило выбирали, — так и подписано. */
+  function renderSkills(d) {
+    var w = (d.verdict || {}).waves;
+    if (!w || !w.rises || !w.falls) return null;
+    var days = function (n) { return plural(n, 'торговый день', 'торговых дня', 'торговых дней'); };
+    var head = h('div', { 'class': 'stats stats--cols' }, [
+      stat('Падения от 20%', w.falls.lived_pct + '% пережито', w.falls.n + ' ' + plural(w.falls.n, 'волна', 'волны', 'волн') + ' — средняя доля падения в акциях'),
+      stat('Волны роста', w.rises.taken_pct_avg + '% взято', w.rises.n + ' ' + plural(w.rises.n, 'волна', 'волны', 'волн') + ' — средняя доля волны'),
+      stat('Вход после дна', isNum(w.rises.entry_days_avg) ? 'через ' + w.rises.entry_days_avg : '—',
+        isNum(w.rises.entry_days_avg) ? days(w.rises.entry_days_avg) + '; рынок к этому дню +' + w.rises.missed_pct_avg + '%' : null)
+    ]);
+    var rows = (w.last_rises || []).map(function (r) {
+      return h('tr', null, [
+        h('th', { scope: 'row', text: ruDay(r.from) + '.' + r.from.slice(2, 4) + ' – ' + (r.open ? 'сейчас' : ruDay(r.to) + '.' + r.to.slice(2, 4)) }),
+        h('td', { 'class': toneOf(r.move_pct), text: fmtNum(r.move_pct, 0, true) + '%' }),
+        h('td', { text: isNum(r.entry_days) ? 'через ' + r.entry_days + ' дн.' : 'не вошло' }),
+        h('td', { text: r.taken_pct + '%' })
+      ]);
+    });
+    return section('Что панель умеет', 'на истории: правило нынешней версии, волны рынка от 20% с ' + fmtMon(w.since), [
+      h('article', { 'class': 'card' }, [
+        head,
+        rows.length ? h('div', { 'class': 'tablewrap', style: 'margin-top:16px' }, [
+          h('table', { 'class': 'data' }, [
+            h('caption', { text: 'Последние волны роста: когда правило вошло после дна и какую долю взяло.' }),
+            h('thead', null, [h('tr', null, [
+              h('th', { scope: 'col', text: 'Волна' }), h('th', { scope: 'col', text: 'Рынок' }),
+              h('th', { scope: 'col', text: 'Вход' }), h('th', { scope: 'col', text: 'Взято' })
+            ])]),
+            h('tbody', null, rows)
+          ])
+        ]) : null,
+        h('p', { 'class': 'card__foot' }, [
+          document.createTextNode('Падения правило обходит, рост берёт наполовину и поздно; подъёмы на новостях не видит. '),
+          h('a', { href: 'guide.html#skills', text: 'Как считается' })
+        ])
+      ])
+    ]);
+  }
+
+  /* Ссылка на вторую страницу — всё, что не нужно для решения, но нужно для разбора. */
+  function renderLabLink() {
+    return h('section', { 'class': 'section' }, [
+      h('a', { 'class': 'card lablink', href: 'lab.html' }, [
+        h('span', { 'class': 'card__title', text: 'Контекст и лаборатория →' }),
+        h('span', { 'class': 'card__note', text: 'ядро и его показатели, ворота и три режима, восемь сочетаний, сигналы второго ряда, 16 мониторов, тень, ранговая связь' })
+      ])
     ]);
   }
 
@@ -670,6 +920,23 @@
   var QUALITY_COLOR = { crit: 'var(--crit)', warn: 'var(--warn)', good: 'var(--good)', flat: 'var(--ink-3)' };
 
   function renderHero(d) {
+    var parts = heroParts(d);
+    if (PAGE === 'lab') {
+      return h('div', { 'class': 'hero' }, [h('div', { 'class': 'hero__grid' }, [parts.left, parts.right]), parts.rule]);
+    }
+    // Главная (аудит 10.11.2026, этап 2): котировки, позиция с плашками цикла и
+    // тормоза и живой след. Ворота, режим и наклон целиком — на lab.html. Строка
+    // «что держит позицию» на главной — в плашках, а без плашек (старая витрина) — как была.
+    var hasPlaques = !!((d.verdict || {}).position || {}).held_by && Array.isArray((((d.verdict || {}).position || {}).held_by || {}).legs);
+    return h('div', { 'class': 'hero' }, [
+      renderQuotes(d),
+      renderPosition(d),
+      hasPlaques ? null : h('div', { 'class': 'hero__grid' }, [parts.left, parts.right]),
+      hasPlaques ? null : parts.rule
+    ]);
+  }
+
+  function heroParts(d) {
     var v = d.verdict || {}, st = d.states || {}, core = d.core || {};
     var cur = st.current || {};
     // Ворота с гистерезисом (states.gate) главнее сырых битов: именно по ним
@@ -858,10 +1125,7 @@
     ]);
 
     var ruleIco = ico('info', 'rule__ico');
-    return h('div', { 'class': 'hero' }, [
-      renderQuotes(d),
-      renderPosition(d),
-      h('div', { 'class': 'hero__grid' }, [left, right]),
+    return { left: left, right: right, rule:
       v.rule ? h('div', { 'class': 'rule' }, [
         ruleIco,
         h('div', null, [
@@ -875,10 +1139,13 @@
           // гистерезису. Числа поэтому не совпадают, и без этой строки они
           // читаются как ошибка на одной карточке.
           regime && regime.label && !(p && p.held_by && (p.held_by.by === 'comp' || p.held_by.by === 'open')) ? h('p', { 'class': 'rule__fine',
-            text: 'Числа правила — из таблицы сочетаний по сырым признакам (раздел «Машина состояний»); статистика режима выше считается по воротам с гистерезисом, поэтому выборки разные.' }) : null
+            text: 'Числа правила — из таблицы сочетаний по сырым признакам (раздел «Машина состояний»); статистика режима выше считается по воротам с гистерезисом, поэтому выборки разные.' }) : null,
+          // Текст сочетания ворот не теряется, когда позицию держит оценка: на
+          // главной его нет (аудит 10.11.2026), здесь — справочно.
+          v.cell_rule && v.cell_rule !== v.rule ? h('p', { 'class': 'rule__fine',
+            text: 'Сочетание ворот: ' + ruText(v.cell_rule) }) : null
         ])
-      ]) : null
-    ]);
+      ]) : null };
   }
 
   /* ────────────────────────────────────────────────────────── ядро */
@@ -994,8 +1261,8 @@
         h('span', { 'class': 'card__note', text: 'правило против вкладов и простой кривой; через 12 месяцев — сверка' })
       ]),
       score,
-      h('details', { 'class': 'evt__more journal__hist' }, [
-        h('summary', null, [h('span', { text: 'Ранговая связь с рынком за 24 месяца' }), chevron('chev')]),
+      h('div', { 'class': 'stat__k', style: 'margin-top:18px', text: 'Ранговая связь с рынком за 24 месяца' }),
+      h('div', { 'class': 'journal__hist' }, [
       h('div', { 'class': 'health' }, [
         /* Интервал ПОД самим числом, а не в примечании: при окне 24 месяца он
            шириной около ±0,41, то есть шире любого значения, какое здесь может
@@ -1178,12 +1445,8 @@
             h('h3', { 'class': 'card__title', text: 'Сигналы второго ряда' }),
             h('span', { 'class': 'card__note', text: 'в решение не входят' })
           ]),
-          h('details', { 'class': 'evt__more journal__hist' }, [
-            h('summary', null, [h('span', { text: sigs.length ? 'Показать ' + sigs.length + ' ' +
-              plural(sigs.length, 'сигнал', 'сигнала', 'сигналов') : 'Не включены' }), chevron('chev')]),
-            sigs.length ? h('div', null, sigs)
-              : h('p', { 'class': 'empty', text: 'В текущем сочетании сигналы второго ряда не включены' })
-          ])
+          sigs.length ? h('div', null, sigs)
+            : h('p', { 'class': 'empty', text: 'В текущем сочетании сигналы второго ряда не включены' })
         ])
       ]),
       cellsCard
@@ -1990,14 +2253,20 @@
     var kbFig = focusedFigure();
     app.innerHTML = '';
     renderBanners(d);
-    app.appendChild(renderHero(d));
-    app.appendChild(renderCore(d));
-    app.appendChild(renderStates(d));
-    app.appendChild(renderMonitors(d));
-    var shd = renderShadow(d);
-    if (shd) app.appendChild(shd);
-    var ev = renderEvents(d);
-    if (ev) app.appendChild(ev);
+    if (PAGE === 'lab') {
+      // Вторая страница: всё, что не нужно для решения, — без потерь и на тех же данных.
+      app.appendChild(section('Ворота и наклон', 'три режима, флаги с гистерезисом, оценка рынка за 24 месяца', [renderHero(d)]));
+      app.appendChild(renderCore(d));
+      app.appendChild(renderStates(d));
+      app.appendChild(renderMonitors(d));
+      var shd = renderShadow(d);
+      if (shd) app.appendChild(shd);
+    } else {
+      app.appendChild(renderHero(d));
+      [renderGuides(d), renderSkills(d), renderEvents(d), renderLabLink()].forEach(function (x) {
+        if (x) app.appendChild(x);
+      });
+    }
     if (tableOn) app.appendChild(renderTable(d));
     // Всё дерево уже в документе — только теперь у контейнеров графиков есть
     // ширина, и их можно рисовать. Второй вызов в следующем кадре добирает те,
