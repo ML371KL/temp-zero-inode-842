@@ -223,6 +223,8 @@ KIND = {
     "orfr_published":    {"emoji": "🗓", "label": "вышли новые данные"},
     "auction_failed":    {"emoji": "⚠️", "label": "сигнал риска"},
     "deposit_uptick":    {"emoji": "📈", "label": "вышли новые данные"},
+    # Повод посмотреть, а не сигнал (аудит 10.11.2026): рынок растёт при позиции «деньги».
+    "against_rally":     {"emoji": "📈", "label": "рынок растёт вопреки оценке"},
 }
 DEFAULT_KIND = {"emoji": "ℹ️", "label": "событие"}
 DIRECTION_EMOJI = {"up": "📈", "down": "📉"}

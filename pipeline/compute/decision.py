@@ -40,10 +40,11 @@ except ImportError:
     from lib.wording import plural
 
 try:
-    from . import states as states_mod, track
+    from . import states as states_mod, track, skills as skills_mod
 except ImportError:
     import states as states_mod
     import track
+    import skills as skills_mod
 
 __all__ = ["compute_decision", "daily_composite", "run_automaton", "decision_days",
            "comp_state_series", "next_decision_day", "last_day_decides",
@@ -414,17 +415,12 @@ def _z_with(prev, x):
     return (x - mean) / math.sqrt(var) if var > 0 else None
 
 
-def comp_leg_moves(panel, mf, target):
-    """Сдвиг ОДНОЙ ноги ядра, при котором дневной композит последнего дня равен target.
-
-    Остальные ноги стоят на месте, окна закрытых месяцев те же, что у daily_composite.
-    -> [{"id", "delta"}]: delta — в единицах ноги (лог-ход курса за 63 дня, п.п. наклона,
-    лог-гэп бочки); None — одной этой ногой не достать (нужен z за обрезкой ±3).
-    Это «при прочих равных», а не прогноз: ноги двигаются вместе.
-    """
+def _last_day_legs(panel, mf):
+    """[(id, знак, окно закрытых месяцев, значение дня, вклад знак×z)] на последний день —
+    ровно как daily_composite считает его для этого дня. Ноги без данных пропущены."""
     dates = panel.get("dates") or []
     cols = panel.get("cols") or {}
-    if not dates or not calc.is_num(target):
+    if not dates:
         return []
     t = len(dates) - 1
     month = calc.month_key(dates[t])
@@ -448,6 +444,59 @@ def comp_leg_moves(panel, mf, target):
         z = _z_with(prev, cur) if cur is not None and len(prev) + 1 >= zmin else None
         if z is not None:
             legs.append((cid, sgn, prev, cur, sgn * max(-clip, min(clip, z))))
+    return legs
+
+
+def leg_contribs(panel, mf, comp_state):
+    """Вклады ног в оценку последнего дня и какая нога держит знак решения.
+
+    -> {"legs": [{id, label, contrib, without}], "leg": id | None}. without — оценка
+    без этой ноги (среднее остальных); нога держит знак, если без неё оценка была бы
+    по другую сторону нуля от знака решения (09.11.2026: −0,28, без нефти +0,39 —
+    знак держит нефть). Если таких ног несколько — та, чей вклад больше по модулю;
+    None — знак держат ноги вместе или знак не определён. Не входит в решение.
+    """
+    legs = _last_day_legs(panel, mf)
+    labels = {c["id"]: c.get("label") for c in constants.CORE_COMPONENTS}
+    total = sum(leg[4] for leg in legs)
+    out, holders = [], []
+    for cid, _sgn, _prev, _cur, own in legs:
+        without = (total - own) / (len(legs) - 1) if len(legs) > 1 else None
+        out.append({"id": cid, "label": labels.get(cid), "contrib": round(own, 3),
+                    "without": round(without, 3) if without is not None else None})
+        if comp_state in (1, -1) and without is not None and without * comp_state < 0:
+            holders.append((abs(own), cid))
+    return {"legs": out, "leg": max(holders)[1] if holders else None}
+
+
+def curve_now(dates, cols, is_dec):
+    """Что сейчас говорит простая кривая (track.curve_positions) — справка, не решение."""
+    pos = track.curve_positions(dates, cols.get("slope_10_2"), is_dec, START)
+    j, slope = calc.last_valid(cols.get("slope_10_2") or [])
+    if not pos:
+        return None
+    k = len(pos) - 1
+    while k > 0 and pos[k - 1] == pos[-1]:
+        k -= 1
+    return {"state": LONG if pos[-1] else FLAT, "since": dates[k],
+            "slope_pp": round(slope, 2) if slope is not None else None,
+            "slope_asof": dates[j] if j is not None else None}
+
+
+def comp_leg_moves(panel, mf, target):
+    """Сдвиг ОДНОЙ ноги ядра, при котором дневной композит последнего дня равен target.
+
+    Остальные ноги стоят на месте, окна закрытых месяцев те же, что у daily_composite.
+    -> [{"id", "delta"}]: delta — в единицах ноги (лог-ход курса за 63 дня, п.п. наклона,
+    лог-гэп бочки); None — одной этой ногой не достать (нужен z за обрезкой ±3).
+    Это «при прочих равных», а не прогноз: ноги двигаются вместе.
+    """
+    if not calc.is_num(target):
+        return []
+    legs = _last_day_legs(panel, mf)
+    if not legs:
+        return []
+    clip = constants.Z_CLIP
     out = []
     total = sum(leg[4] for leg in legs)
     for cid, sgn, prev, cur, own in legs:
@@ -735,9 +784,21 @@ def compute_decision(panel, mf, states=None):
     last = n - 1
     dist = switch_distance(panel, mf, LONG if pos[last] else FLAT, comp_state[last],
                            {k: hyst[k][last] for k in ("trend", "vol", "bond")})
+    block = _position_block(dates, cols, states, hyst, gate_open, comp_live,
+                            comp_state, is_dec, pos, reasons, dist)
+    # Прозрачность (аудит 10.11.2026, этап 2): какая нога держит знак решения и что
+    # говорит простая кривая. На позицию не влияют — только добавленные поля.
+    block["held_by"].update(leg_contribs(panel, mf, comp_state[last]))
+    block["curve"] = curve_now(dates, cols, is_dec)
+    try:
+        skills = {"waves": skills_mod.waves(dates, cols.get("mcftr"), pos),
+                  "div_gap": skills_mod.div_gap(dates, cols),
+                  "against": skills_mod.against(dates, cols.get("mcftr"), pos)}
+    except Exception as exc:  # noqa: BLE001 — справка не имеет права ронять позицию
+        skills = {"error": f"{type(exc).__name__}: {exc}"[:200]}
     return {
-        "position": _position_block(dates, cols, states, hyst, gate_open, comp_live,
-                                    comp_state, is_dec, pos, reasons, dist),
+        "skills": skills,
+        "position": block,
         "position_prev_rule": _prev_rule_block(dates, pos0, reasons0),
         "daily": {
             "dates": dates, "comp_live": comp_live, "comp_state": comp_state,
