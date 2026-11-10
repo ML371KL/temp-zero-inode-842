@@ -508,79 +508,82 @@
     var why = reason ? (since ? ' · ' : '') + ruText(reason) : '';
     var now = holds ? ((since || why) ? ' · ' : '') + holds : '';
 
-    /* Что дало правило (compute/track.py, аудит 03.10.2026): позиция в деньгах
-       против удержания индекса полной доходности и вкладов. Здоровье ядра меряет
-       связь композита со следующим месяцем, а не деньги, и на 24 месяцах почти всегда
-       неотличимо от нуля; на вопрос «работает ли правило» отвечает этот блок. Первое
-       окно — с последней смены позиции (с её исполнения), накопленным итогом; второе —
-       с начала года, в годовых, когда прошёл квартал (до того бэкенд годовых не шлёт,
-       и строка остаётся накопленной); 12 и 24 месяца — в годовых. Всё раньше даты
-       действующей редакции правила (journal.rule_since) — расчёт на истории, по
-       которой правило выбирали, а не то, что оно делало вживую. Как считается (мера,
-       комиссия, исполнение) — в руководстве, раздел «Позиция»: на панели остаются
-       числа и одна строка о том, что в них сравнивается. */
-    var jr = p.journal && Array.isArray(p.journal.windows) && p.journal.windows.length ? p.journal : null;
+    /* Что дало правило (compute/track.py, аудит 10.11.2026). Сверху — ЖИВОЙ след:
+       что панель говорила в каждый день (журнал в сторе, записанное не переписывается),
+       окна «с запуска панели» и «при нынешней версии правила». Ниже, свёрнуто, —
+       пересчёт истории нынешней версией за 12 и 24 месяца: до 10.11.2026 он стоял
+       здесь один, и правка правила 21.10 переписала «хуже вкладов» в «лучше». В обоих
+       — четыре столбца: правило, простая кривая (акции, когда 10-летние ОФЗ доходнее
+       2-летних), акции с дивидендами, вклады. Как считается — в руководстве. */
+    var jr = p.journal && typeof p.journal === 'object' ? p.journal : null;
+    var live = jr && jr.live && Array.isArray(jr.live.windows) && jr.live.windows.length ? jr.live : null;
     var journal = null;
-    if (jr) {
-      var jrRow = function (w) {
-        var ann = (w.id === 'm12' || w.id === 'm24' || w.id === 'ytd') && isNum(w.rule_ann_pct);
-        var rule = ann ? w.rule_ann_pct : w.rule_pct, cash = ann ? w.cash_ann_pct : w.cash_pct;
-        var tr = ann ? w.tr_ann_pct : w.tr_pct;
-        var over = isNum(rule) && isNum(cash) ? rule - cash : null;
-        // since_freeze — окно витрин до 21.10.2026 (старый data.json).
-        var label = w.id === 'since_change' ? 'с последней смены' + (w.since_decided ? ' (' + ruDay(w.since_decided) + ')' : '')
-          : w.id === 'ytd' ? 'с начала года' + (ann ? ', годовых' : '')
-          : w.id === 'since_freeze' ? 'с ' + fmtDay(jr.freeze)
-          : ({ m12: '12 мес.', m24: '24 мес.' }[w.id] || w.label || w.id) + (ann ? ', годовых' : '');
-        return h('tr', null, [
-          h('th', { scope: 'row', text: label }),
-          h('td', { 'class': toneOf(rule), text: isNum(rule) ? fmtNum(rule, 1, true) + '%' : '—' }),
-          h('td', { text: isNum(tr) ? fmtNum(tr, 1, true) + '%' : '—' }),
-          h('td', { text: isNum(cash) ? fmtNum(cash, 1, true) + '%' : '—' }),
-          h('td', { 'class': toneOf(over), text: isNum(over) ? fmtNum(over, 1, true) : '—' })
-        ]);
-      };
-      var trades = Array.isArray(jr.trades) ? jr.trades : [];
-      var live = jr.rule_since || jr.freeze;
-      // С rule_since дата редакции и начало сделок — одна дата: называем её один раз.
-      var tradeSince = jr.rule_since ? ' по нынешней редакции правила (с ' + fmtDay(live) + ')' : ' с ' + fmtDay(live);
-      var tradeText = trades.length
-        ? 'Сделки' + tradeSince + ': ' + trades.map(function (t) {
-            return 'решено «' + (POSITION_WORD[t.to] || t.to) + '» ' + fmtDay(t.decided) +
-              (t.executed ? ', исполнено ' + fmtDay(t.executed) : ', исполнение на следующем закрытии') +
-              (REASON_WORD[t.reason] ? ' (' + REASON_WORD[t.reason] + ')' : '');
-          }).join('; ') + '.'
-        : 'Сделок' + tradeSince + ' не было.';
-      journal = h('div', { 'class': 'position__journal' }, [
-        h('div', { 'class': 'stat__k', text: 'Что дало правило' }),
-        h('div', { 'class': 'tablewrap' }, [
-          h('table', { 'class': 'data' }, [
-            // Вторая половина подписи — про колонку «Разница»; на самых узких экранах
-            // колонка скрыта (styles.css), и подпись о ней уходит вместе с ней.
-            h('caption', null, [
-              h('span', { text: 'Индекс — с дивидендами' }),
-              h('span', { 'class': 'journal__diff', text: '; разница — правило минус вклады, в процентных пунктах' }),
-              h('span', { text: '.' })
-            ]),
-            h('thead', null, [h('tr', null, [
-              h('th', { scope: 'col', text: 'Окно' }), h('th', { scope: 'col', text: 'Правило' }),
-              h('th', { scope: 'col', text: 'Индекс' }), h('th', { scope: 'col', text: 'Вклады' }),
-              h('th', { scope: 'col', text: 'Разница' })
-            ])]),
-            h('tbody', null, jr.windows.map(jrRow))
-          ])
-        ]),
-        h('p', { 'class': 'position__note' }, [
-          document.createTextNode(tradeText + (jr.rule_since
-            ? ' Всё раньше — расчёт на истории. '
-            : ' До этой даты — расчёт на истории. ')),
-          h('a', { href: 'guide.html#journal', text: 'Как считается' })
-        ])
+    var pctCell = function (v, tone) {
+      return h('td', { 'class': tone ? toneOf(v) : null, text: isNum(v) ? fmtNum(v, 1, true) + '%' : '—' });
+    };
+    var jrHead = function (first) {
+      return h('thead', null, [h('tr', null, [
+        h('th', { scope: 'col', text: first }), h('th', { scope: 'col', text: 'Правило' }),
+        h('th', { scope: 'col', text: 'Кривая' }), h('th', { scope: 'col', text: 'Акции' }),
+        h('th', { scope: 'col', text: 'Вклады' })
+      ])]);
+    };
+    var jrRow = function (label, w, ann) {
+      var g = function (k) { return ann && isNum(w[k + '_ann_pct']) ? w[k + '_ann_pct'] : w[k + '_pct']; };
+      return h('tr', null, [
+        h('th', { scope: 'row', text: label }),
+        pctCell(g('rule'), true), pctCell(g('curve')), pctCell(g('tr')), pctCell(g('cash'))
       ]);
+    };
+    if (jr && (live || (Array.isArray(jr.windows) && jr.windows.length))) {
+      var kids = [h('div', { 'class': 'stat__k', text: 'Что дало правило' })];
+      if (live) {
+        var liveLabel = function (w) {
+          return w.id === 'launch' ? 'с запуска ' + ruDay(live.launch)
+            : 'версия ' + live.rule_version + ', с ' + ruDay(live.rule_since);
+        };
+        kids.push(h('div', { 'class': 'tablewrap' }, [
+          h('table', { 'class': 'data' }, [
+            h('caption', { text: 'Вживую: что панель говорила в каждый день. Кривая — акции, когда 10-летние ОФЗ доходнее 2-летних; акции — с дивидендами.' }),
+            jrHead('Вживую'),
+            h('tbody', null, live.windows.map(function (w) { return jrRow(liveLabel(w), w, false); }))
+          ])
+        ]));
+        var spells = (live.spells || []).filter(function (sp) { return !sp.start; });
+        var spellText = spells.map(function (sp) {
+          var res = isNum(sp.tr_pct) ? (sp.open ? ' — пока ' : ' — ') +
+            (sp.to === 'long' ? 'акции ' + fmtNum(sp.tr_pct, 1, true) + '%, вклады ' + fmtNum(sp.cash_pct, 1, true) + '%'
+                              : 'вклады ' + fmtNum(sp.cash_pct, 1, true) + '%, акции ' + fmtNum(sp.tr_pct, 1, true) + '%') : '';
+          return '«' + (POSITION_WORD[sp.to] || sp.to) + '» ' + ruDay(sp.decided) +
+            (sp.executed ? ', исполнено ' + ruDay(sp.executed) : '') + res;
+        });
+        kids.push(h('p', { 'class': 'position__note' }, [
+          document.createTextNode((spellText.length ? 'Смены вживую: ' + spellText.join('; ') + '. ' : 'Смен вживую не было. ')),
+          h('a', { href: 'guide.html#journal', text: 'Как считается' })
+        ]));
+      }
+      var hist = (jr.windows || []).filter(function (w) { return w.id === 'm12' || w.id === 'm24'; });
+      if (hist.length) {
+        var histTable = h('div', { 'class': 'tablewrap' }, [
+          h('table', { 'class': 'data' }, [
+            h('caption', { text: 'Пересчёт нынешней версией правила по истории, на которой его выбирали; годовых.' }),
+            jrHead('На истории'),
+            h('tbody', null, hist.map(function (w) {
+              return jrRow(w.id === 'm12' ? '12 мес.' : '24 мес.', w, true);
+            }))
+          ])
+        ]);
+        kids.push(live ? h('details', { 'class': 'evt__more journal__hist' }, [
+          h('summary', null, [h('span', { text: 'На истории — пересчёт нынешней версией' }), chevron('chev')]),
+          histTable
+        ]) : histTable);
+      }
+      journal = h('div', { 'class': 'position__journal' }, kids);
     }
 
     return h('div', { 'class': 'position position--' + p.state }, [
-      h('div', { 'class': 'kicker', text: 'Позиция · итог ворот и наклона' }),
+      h('div', { 'class': 'kicker', text: 'Позиция · итог ворот и наклона' +
+        (isNum(p.rule_version) ? ' · правило, версия ' + p.rule_version + (p.rule_since ? ' от ' + fmtDay(p.rule_since) : '') : '') }),
       h('div', { 'class': 'position__row' }, [
         h('span', { 'class': 'position__name', text: 'Позиция: ' + POSITION_WORD[p.state] }),
         h('span', { 'class': 'position__meta', text: since + why + now })
@@ -862,14 +865,16 @@
       v.rule ? h('div', { 'class': 'rule' }, [
         ruleIco,
         h('div', null, [
-          h('div', { 'class': 'rule__k', text: 'Правило дня' }),
+          // С позицией строка называет то, что держит её СЕЙЧАС (publish._holds_text):
+          // текст сочетания ворот — только когда держат ворота (аудит 10.11.2026).
+          h('div', { 'class': 'rule__k', text: p && p.held_by ? 'Что держит позицию' : 'Правило дня' }),
           h('p', { 'class': 'rule__t', text: ruText(v.rule) }),
           // Правило стоит на ячейке ВОРОТ (publish.build_verdict), а статистика
           // выше — на режиме, и считается она по другим битам: у правила медиана
           // из замороженной таблицы по сырым признакам, у режима — живая по
           // гистерезису. Числа поэтому не совпадают, и без этой строки они
           // читаются как ошибка на одной карточке.
-          regime && regime.label ? h('p', { 'class': 'rule__fine',
+          regime && regime.label && !(p && p.held_by && (p.held_by.by === 'comp' || p.held_by.by === 'open')) ? h('p', { 'class': 'rule__fine',
             text: 'Числа правила — из таблицы сочетаний по сырым признакам (раздел «Машина состояний»); статистика режима выше считается по воротам с гистерезисом, поэтому выборки разные.' }) : null
         ])
       ]) : null
@@ -964,11 +969,33 @@
         'отбор по скользящей результативности проверялся на истории и проиграл.';
     }
 
+    /* Живой счёт вместо «Здоровья модели» (аудит 10.11.2026, §3.7). Ранговая связь
+       за 24 месяца при интервале ±0,41 не может ни подтвердить модель, ни забраковать
+       её; на вопрос «работает ли правило» отвечает живой счёт против вкладов и
+       простой кривой. Контрольная сверка — через 12 месяцев живого счёта: не обыграла
+       кривую — заменить ею (итог аудита, FINAL.md). Ранговая связь, её расчёт и события
+       остаются — свёрнуты ниже. */
+    var pj = ((d.verdict || {}).position || {}).journal || {};
+    var lv = pj.live && Array.isArray(pj.live.windows) ? pj.live : null;
+    var lw = lv ? lv.windows.filter(function (w) { return w.id === 'launch'; })[0] : null;
+    var vw = lv ? lv.windows.filter(function (w) { return w.id === 'version'; })[0] : null;
+    var pp = function (v) { return isNum(v) ? fmtNum(v, 1, true) + ' п.п.' : '—'; };
+    var checkDay = lv && lv.launch ? (Number(lv.launch.slice(0, 4)) + 1) + lv.launch.slice(4) : null;
+    var score = lw ? h('div', { 'class': 'health' }, [
+      stat('Сверх вкладов', pp(lw.excess_pp), 'с запуска ' + ruDay(lv.launch), toneOf(lw.excess_pp)),
+      stat('Против кривой', pp(lw.vs_curve_pp), 'та же мера, кривая без подбора', toneOf(lw.vs_curve_pp)),
+      vw ? stat('Версия ' + lv.rule_version, pp(vw.excess_pp), 'сверх вкладов с ' + ruDay(lv.rule_since), toneOf(vw.excess_pp)) : null,
+      stat('Дней вживую', isNum(lw.days) ? String(lw.days) : '—', checkDay ? 'сверка ' + fmtDay(checkDay) : null)
+    ]) : h('p', { 'class': 'empty', text: 'Живой журнал ещё не заведён' });
+
     var health = h('article', { 'class': 'card' }, [
       h('div', { 'class': 'card__head' }, [
-        h('h3', { 'class': 'card__title', text: 'Здоровье модели' }),
-        h('span', { 'class': 'card__note', text: 'скользящий ранговый IC за 24 месяца' })
+        h('h3', { 'class': 'card__title', text: 'Живой счёт правила' }),
+        h('span', { 'class': 'card__note', text: 'правило против вкладов и простой кривой; через 12 месяцев — сверка' })
       ]),
+      score,
+      h('details', { 'class': 'evt__more journal__hist' }, [
+        h('summary', null, [h('span', { text: 'Ранговая связь с рынком за 24 месяца' }), chevron('chev')]),
       h('div', { 'class': 'health' }, [
         /* Интервал ПОД самим числом, а не в примечании: при окне 24 месяца он
            шириной около ±0,41, то есть шире любого значения, какое здесь может
@@ -995,6 +1022,7 @@
         color: tok('--ink-3'), aria: 'Скользящий IC модели по месяцам'
       }) : null,
       h('p', { 'class': 'card__foot', text: hlFoot })
+      ])
     ]);
 
     return section('Ядро', 'Слой 1 · медленный композит, меняет знак примерно дважды в год', [
@@ -1143,13 +1171,19 @@
           ]),
           dists.length ? h('div', null, dists) : h('p', { 'class': 'empty', text: 'Расстояния ещё не рассчитаны' })
         ]),
+        // В решение не входят (аудит 10.11.2026): «за лонг» у трёх из четырёх при
+        // позиции «деньги» читалось как спор с позицией — поэтому свёрнуто.
         h('article', { 'class': 'card' }, [
           h('div', { 'class': 'card__head' }, [
-            h('h3', { 'class': 'card__title', text: 'Активные сигналы второго ряда' }),
-            h('span', { 'class': 'card__note', text: 'объясняют, а не голосуют; вердикт считается по z-скору' })
+            h('h3', { 'class': 'card__title', text: 'Сигналы второго ряда' }),
+            h('span', { 'class': 'card__note', text: 'в решение не входят' })
           ]),
-          sigs.length ? h('div', null, sigs)
-            : h('p', { 'class': 'empty', text: 'В текущем сочетании сигналы второго ряда не включены' })
+          h('details', { 'class': 'evt__more journal__hist' }, [
+            h('summary', null, [h('span', { text: sigs.length ? 'Показать ' + sigs.length + ' ' +
+              plural(sigs.length, 'сигнал', 'сигнала', 'сигналов') : 'Не включены' }), chevron('chev')]),
+            sigs.length ? h('div', null, sigs)
+              : h('p', { 'class': 'empty', text: 'В текущем сочетании сигналы второго ряда не включены' })
+          ])
         ])
       ]),
       cellsCard
