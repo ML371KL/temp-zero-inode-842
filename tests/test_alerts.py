@@ -35,26 +35,90 @@ ASOF = "2026-08-11"
 PREV_ASOF = "2026-08-10"
 
 
-def position_block(state):
-    """Блок позиции слоя решения (verdict.position) в объёме правила position_change."""
+LEGS = [{"id": "usd_mom63", "label": "Девальвационный моментум",
+         "contrib": -0.15, "without": -0.39},
+        {"id": "slope_10_2", "label": "Наклон кривой ОФЗ (10Y−2Y)",
+         "contrib": 0.82, "without": -0.88},
+        {"id": "urals_rub_gap", "label": "Гэп рублёвой бочки к тренду",
+         "contrib": -1.60, "without": 0.34}]
+
+
+# Те же слагаемые при оценке «за акции» (+0,35): знак держит кривая ОФЗ.
+LEGS_UP = [{"id": "usd_mom63", "label": "Девальвационный моментум",
+            "contrib": 0.15, "without": 0.45},
+           {"id": "slope_10_2", "label": "Наклон кривой ОФЗ (10Y−2Y)",
+            "contrib": 1.40, "without": -0.18},
+           {"id": "urals_rub_gap", "label": "Гэп рублёвой бочки к тренду",
+            "contrib": -0.50, "without": 0.78}]
+
+
+def position_block(state, since=ASOF, comp=None, by_score=False, **extra):
+    """Блок позиции слоя решения (verdict.position) в объёме правил о позиции.
+
+    По умолчанию позицию меняют ворота (как в первых редакциях этих проверок);
+    `by_score=True` — её меняет оценка рынка при открытых воротах, как 06.11.2026.
+    """
     flat = state == "flat"
-    return {"state": state, "since": "2026-08-07",
-            "reason": "gate_close" if flat else "gate_open",
-            "reason_text": ("ворота закрылись: ОФЗ под давлением (просадка RGBI глубже −4%)"
-                            if flat else
-                            "ворота открылись: ОФЗ вышли из стресса (просадка RGBI мельче −3%)"),
-            "cash_rate": 12.9, "execute": "на следующем закрытии"}
+    if by_score:
+        reason = "comp_neg" if flat else "comp_pos"
+        text = ("оценка рынка ушла ниже −0,2 в день решения" if flat
+                else "оценка рынка поднялась выше +0,2 в день решения")
+        held = {"by": "comp" if flat else "open", "legs": LEGS,
+                "leg": "urals_rub_gap" if flat else None}
+        gate_open = True
+    else:
+        reason = "gate_close" if flat else "gate_open"
+        text = ("ворота закрылись: ОФЗ под давлением (просадка RGBI глубже −4%)" if flat
+                else "ворота открылись: ОФЗ вышли из стресса (просадка RGBI мельче −3%)")
+        held = {"by": "gate" if flat else "open", "legs": LEGS_UP, "leg": None}
+        gate_open = not flat
+    if comp is None:
+        comp = -0.31 if (flat and by_score) else 0.35
+    block = {"state": state, "since": since, "reason": reason, "reason_text": text,
+             "cash_rate": 12.9, "execute": "на следующем закрытии",
+             "decision_day": ASOF, "is_decision_day": False, "next_decision": "2026-08-14",
+             "comp_daily": comp, "comp_threshold": 0.2,
+             "comp_state": -1 if (flat and by_score) else 1,
+             "gate_open": gate_open, "held_by": held,
+             "conditions": (
+                 ["оценка рынка выше +0,2 в день решения (сейчас −0,31)"] if flat and by_score
+                 else ["ворота откроются, когда снимется любой из флагов: ОФЗ: просадка "
+                       "RGBI мельче −3% (сейчас −5,1%)"] if flat
+                 else ["любой из: ворота закроются — нужны все три флага сразу; "
+                       "оценка рынка ниже −0,2 в день решения (сейчас +0,35)"])}
+    block.update(extra)
+    return block
+
+
+def gate_block(trend, vol, bond):
+    """Блок ворот (states.gate) с теми же флагами, что у сырых признаков."""
+    return {"trend": trend, "vol": vol, "bond": bond,
+            "open": not (trend == 0 and vol == 1 and bond == 1),
+            "cell_code": "%s|%s|%s" % ("bull" if trend == 1 else "bear",
+                                       "stress" if vol == 1 else "calm",
+                                       "stress" if bond == 1 else "ok")}
 
 
 def payload(core=0.68, trend=0, vol=1, bond=1, asof=ASOF, health="ok",
             cell="bear|stress|stress", monitors=None, sources=None,
-            review_due=False, streak=0, position=None, gate=None):
+            review_due=False, streak=0, position=None, gate="auto",
+            run_mode=None, compute_error=None):
     """Витрина в объёме, который читают правила алертов.
 
-    `gate` — блок ворот с гистерезисом, `{"cell_code": …, "open": …}`. По умолчанию
-    его нет: так выглядит и старый payload, и почти все фикстуры здесь.
+    `gate` — блок ворот с гистерезисом. По умолчанию ("auto") флаги ворот повторяют
+    сырые признаки: события о состоянии рынка стоят на воротах, и фикстура, где
+    слои сошлись, — простейший случай. `gate=None` — блока ворот нет (старый
+    payload), словарь — ворота, которые стоят иначе, чем сырые признаки.
+    `position` — "long"/"flat" (блок по умолчанию) или готовый блок позиции.
     """
+    if gate == "auto":
+        gate = (gate_block(trend, vol, bond)
+                if all(x in (0, 1) for x in (trend, vol, bond)) else None)
+    if isinstance(position, str):
+        position = position_block(position)
     return {
+        **({"run_mode": run_mode} if run_mode else {}),
+        **({"compute_error": compute_error} if compute_error else {}),
         "asof_trading_day": asof,
         "core": {"value": core, "sign": (0 if core is None else (1 if core > 0 else -1)),
                  "health": {"status": health, "n": 24, "ic_24m": -0.02,
@@ -62,15 +126,33 @@ def payload(core=0.68, trend=0, vol=1, bond=1, asof=ASOF, health="ok",
                             "below_since": "2025-09-30" if streak else None,
                             "review_months": 12}},
         "states": {"current": {"trend": trend, "vol": vol, "bond": bond},
-                   "distances": [{"id": "bond", "text": "просадка RGBI −1,2% от максимума"}],
+                   "distances": [{"id": "bond", "text": "просадка RGBI −1,2% от максимума"},
+                                 {"id": "trend", "text": "индекс на 2,6% ниже MA200"},
+                                 {"id": "vol", "text": "реализованная вола 18,1%"}],
                    **({"gate": gate} if gate else {})},
         "verdict": {"cell_code": cell, "cell_label": "токсичная",
                     "core_label": "умеренно за акции",
                     "cell_stats": {"mean_fwd1m_pct": -0.55, "hit": 0.4, "n": 12},
-                    **({"position": position_block(position)} if position else {})},
+                    **({"position": position} if position else {})},
         "monitors": monitors if monitors is not None else [tile_cb()],
         "sources": sources if sources is not None else {"iss": {"status": "ok"}},
     }
+
+
+# РАБОЧЕЕ РЫНОЧНОЕ СОБЫТИЕ для проверок доставки, очереди, зеркала и разбора. До
+# 20.11.2026 им был снятый флаг ОФЗ, но семейство флагов ворот теперь живёт только в
+# журнале страницы и в телеграм не ходит вовсе. Решение ЦБ — обычное рыночное событие
+# без особых правил: ставка в снимке 15 %, в прогоне 14 %.
+RATE_TITLE = "Банк России снизил ключевую ставку"
+RATE_KEY = "cb_decision:%s:14.0" % ASOF
+
+
+def rate_before(**kw):
+    return payload(monitors=[tile_cb(key_rate=15.0)], **kw)
+
+
+def rate_after(**kw):
+    return payload(monitors=[tile_cb(key_rate=14.0)], **kw)
 
 
 def tile_cb(days_left=9, key_rate=14.0, consensus=None):
@@ -185,6 +267,8 @@ class TestCoreFlip(AlertsCase):
 
 
 class TestBuyWindow(AlertsCase):
+    """Окно входа стоит на флагах ВОРОТ: нервная торговля при спокойных ОФЗ."""
+
     def fire(self, prev_state, cur_state):
         self.seed(payload(vol=prev_state[0], bond=prev_state[1], cell="bear|calm|stress"))
         evs = self.alerts.run(payload(vol=cur_state[0], bond=cur_state[1],
@@ -199,47 +283,55 @@ class TestBuyWindow(AlertsCase):
 
     def test_silent_when_previous_state_unknown(self):
         # мутация: убрать защиту от None -> после дня без RGBI приходит «Окно входа»
-        # как о новом переходе, хотя ячейка не менялась неделями.
+        # как о новом переходе, хотя сочетание не менялось неделями.
         self.alerts.save_state({"last": {"cell": "bear|calm|ok", "core_value": 0.68,
                                          "core_sign": 1, "trend": 0, "vol": None,
-                                         "bond": None, "health": "ok"},
+                                         "bond": None, "health": "ok",
+                                         "gate": {"trend": 0, "vol": None, "bond": None,
+                                                  "open": None}},
                                 "core_sign_alerted": 1})
         evs = self.alerts.detect(payload(vol=1, bond=0, cell="bear|stress|ok"),
                                  self.state(), NOW)
         self.assertNotIn("buy_window_open", [e["kind"] for e in evs])
 
+    def test_сырые_признаки_без_ворот_окна_не_дают(self):
+        # мутация: вернуть правило на states.current -> окно входа снова зовёт
+        # добавлять риск по сырому флагу, пока флаг ворот стоит.
+        stays = gate_block(0, 1, 1)
+        self.seed(payload(vol=1, bond=1, gate=stays))
+        evs = self.alerts.run(payload(vol=1, bond=0, cell="bear|stress|ok", gate=stays),
+                              dry_run=False, now=NOW)
+        self.assertEqual(evs, [])
+
 
 class TestDelivery(AlertsCase):
     def test_undelivered_event_waits_in_queue_without_marker(self):
-        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
+        self.seed(rate_before())
         self.online = False
-        evs = self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=False, now=NOW)
+        evs = self.alerts.run(rate_after(), dry_run=False, now=NOW)
         self.assertTrue(evs)
         self.assertFalse(any(e["delivered"] for e in evs))
         self.assertEqual(self.markers(), [], "маркер дедупа не имеет права опережать доставку")
-        self.assertIn("bond_off:" + ASOF, self.pending_keys())
+        self.assertIn(RATE_KEY, self.pending_keys())
 
     def test_repaired_telegram_delivers_pending_exactly_once(self):
-        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
+        self.seed(rate_before())
         self.online = False
-        self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=False, now=NOW)
+        self.alerts.run(rate_after(), dry_run=False, now=NOW)
         self.online = True
-        self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=False,
-                        now=NOW + timedelta(hours=1))
-        self.assertEqual(len([t for t in self.sent if "Долговой рынок вышел из стресса" in t]), 1)
+        self.alerts.run(rate_after(), dry_run=False, now=NOW + timedelta(hours=1))
+        self.assertEqual(len([t for t in self.sent if RATE_TITLE in t]), 1)
         self.assertEqual(self.pending_keys(), [])
         # третий прогон ничего не повторяет
-        self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=False,
-                        now=NOW + timedelta(hours=2))
-        self.assertEqual(len([t for t in self.sent if "Долговой рынок вышел из стресса" in t]), 1)
+        self.alerts.run(rate_after(), dry_run=False, now=NOW + timedelta(hours=2))
+        self.assertEqual(len([t for t in self.sent if RATE_TITLE in t]), 1)
 
     def test_stale_pending_is_dropped_after_a_day(self):
-        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
+        self.seed(rate_before())
         self.online = False
-        self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=False, now=NOW)
+        self.alerts.run(rate_after(), dry_run=False, now=NOW)
         self.online = True
-        self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=False,
-                        now=NOW + timedelta(hours=25))
+        self.alerts.run(rate_after(), dry_run=False, now=NOW + timedelta(hours=25))
         self.assertEqual(self.sent, [], "протухшую новость не повторяем")
 
     def test_duplicate_reminder_never_piles_up_in_queue(self):
@@ -258,29 +350,22 @@ class TestDelivery(AlertsCase):
         old = [{"key": f"info:{i}", "ts": NOW.strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "kind": "info", "severity": "info", "text": f"старое {i}"}
                for i in range(self.alerts.PENDING_MAX)]
-        self.alerts.save_state({"last": {"cell": "bear|stress|stress", "core_value": 0.68,
-                                         "core_sign": 1, "trend": 0, "vol": 1, "bond": 1,
-                                         "health": "ok"},
-                                "core_sign_alerted": 1, "pending": old})
+        self.seed(rate_before())
+        state = self.state()
+        state["pending"] = old
+        self.alerts.save_state(state)
         self.online = False
-        self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=False, now=NOW)
+        self.alerts.run(rate_after(), dry_run=False, now=NOW)
         keys = self.pending_keys()
         self.assertLessEqual(len(keys), self.alerts.PENDING_MAX)
-        self.assertIn("bond_off:" + ASOF, keys)
-        # Свёрнутые в семейство ключи тоже обязаны пережить срез очереди (дубль
-        # первой проверки, стоявший здесь, закреплял присутствие лишь одного
-        # события — аудит 18.08.2026): без merged повтор слал бы слитую тройку
-        # заново по отдельности.
-        queued = next(e for e in self.state()["pending"]
-                      if e["key"] == "bond_off:" + ASOF)
-        self.assertIn("cell:%s:bear|calm|ok" % ASOF, queued.get("merged") or [])
+        self.assertIn(RATE_KEY, keys)
 
     def test_dry_run_does_not_eat_the_transition(self):
-        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
-        self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=True, now=NOW)
+        self.seed(rate_before())
+        self.alerts.run(rate_after(), dry_run=True, now=NOW)
         self.assertEqual(self.sent, [])
-        evs = self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=False, now=NOW)
-        self.assertIn("bond_flag_off", [e["kind"] for e in evs])
+        evs = self.alerts.run(rate_after(), dry_run=False, now=NOW)
+        self.assertIn("cb_decision", [e["kind"] for e in evs])
 
 
 class TestBrokenState(AlertsCase):
@@ -313,10 +398,12 @@ class TestSeedFromPublishedPayload(AlertsCase):
         kinds = [e["kind"] for e in evs]
         for kind in ("buy_window_open", "source_stale", "health_review", "position_change"):
             self.assertIn(kind, kinds)
-        # Снятый облигационный флаг — часть того же поворота, поэтому он не отдельное
-        # сообщение, а подпункт окна входа (см. TestRegimeMerge).
+        # Снятый облигационный флаг — часть того же поворота, поэтому он не отдельная
+        # запись, а подпункт окна входа (см. TestRegimeMerge).
         window = next(e for e in evs if e["kind"] == "buy_window_open")
         self.assertIn("bond_off:" + ASOF, window.get("merged") or [])
+        # Флаги ворот восстановлены из витрины, но в телеграм не идут: журнал.
+        self.assertFalse([t for t in self.sent if "Окно входа" in t])
 
     def test_seeding_does_not_invent_a_core_flip(self):
         evs = self.alerts.run(payload(core=0.68), dry_run=False, now=NOW,
@@ -754,14 +841,21 @@ class TestTexts(AlertsCase):
         prev = {"cell": "bull|calm|ok", "core_value": 0.66, "core_sign": 1, "trend": 1,
                 "vol": 0, "bond": 1, "health": "ok", "key_rate": 15.0, "deposit": 16.0,
                 "orfr_asof": "2026-06-30", "auction_date": "2026-07-29",
+                "gate": {"trend": 1, "vol": 0, "bond": 1, "open": True},
+                "comp_daily": -0.25, "oil_contrib": -1.42, "legs_n": 3,
                 # cbr лежал на прошлом прогоне и в этом ожил: сценарий обязан
                 # порождать и тревогу (iss), и отбивку (cbr), иначе отбивка
-                # ускользает от инвариантов ниже — числа, запятой и минуса.
-                "position": "long", "sources": {"iss": "ok", "cbr": "error"}}
+                # ускользает от инвариантов ниже — числа, запятой и минуса. То же у
+                # рядов решения: zcyc был здоров и отстал, usd_cbr отставал и ожил.
+                "position": "long", "sources": {"iss": "ok", "cbr": "error"},
+                "core_series": {"zcyc": "ok", "usd_cbr": "error"}}
         state = {"last": prev, "core_sign_alerted": 1, "core_value_alerted": 0.66,
                  # Якорь депозитной ставки — уровень, о котором СООБЩАЛИ (не
                  # вчерашний снимок): рост меряется от него.
-                 "deposit_alerted": 16.0}
+                 "deposit_alerted": 16.0,
+                 # Последний сообщённый месяц налоговой цены нефти: прогон ниже
+                 # приносит следующий.
+                 "urals_alerted": {"month": "2026-06-30", "usd": 63.52}}
         mons = [tile_cb(days_left=1, key_rate=14.0, consensus=14.5),
                 {"id": "orfr", "status": "ok", "asof": "2026-07-31",
                  "headline": "физлица купили на 12.3 млрд",
@@ -772,23 +866,63 @@ class TestTexts(AlertsCase):
                              "demand_bn": 88.1}},
                 {"id": "deposit_spread", "status": "ok", "asof": ASOF,
                  "headline": "ставка выросла",
-                 "payload": {"deposit_pct": 16.4, "deposit_asof": ASOF, "spread_pp": 8.1}}]
+                 "payload": {"deposit_pct": 16.4, "deposit_asof": ASOF, "spread_pp": 8.1}},
+                {"id": "rub_barrel", "status": "ok", "asof": "2026-07-31",
+                 "headline": "налоговая бочка",
+                 "payload": {"tax_month": "2026-07-31", "urals_usd": 59.02}}]
+        core_rows = {"zcyc": {"series": "zcyc_y10", "status": "stale", "asof": "2026-08-05",
+                              "lag_min": 4300, "stale_reason": "data",
+                              "label": "Кривая бескупонной доходности ОФЗ"}}
         bad = payload(core=-0.66, trend=0, vol=1, bond=0, cell="bear|stress|ok",
                       health="review", review_due=True, streak=12, position="flat",
-                      monitors=mons,
+                      monitors=mons, run_mode="daily",
                       sources={"iss": {"status": "stale", "lag_min": 4300,
-                                       "asof": "2026-08-05"},
-                               "cbr": {"status": "ok", "asof": ASOF}})
+                                       "asof": "2026-08-05", "series": "rvi",
+                                       "bad_series": [
+                                           {"series": "rvi", "status": "stale",
+                                            "asof": "2026-08-05", "lag_min": 4300,
+                                            "core": False},
+                                           dict(core_rows["zcyc"], core=True)],
+                                       "core_affected": True, "core_series": core_rows},
+                               "cbr": {"status": "ok", "asof": ASOF, "bad_series": [],
+                                       "core_affected": False,
+                                       "core_series": {"usd_cbr": {
+                                           "series": "usd_cbr", "status": "ok",
+                                           "asof": ASOF, "label": "Официальный курс USD"}}}})
         # merge=False — СЫРОЙ выход правил. После слияния семейства режима часть
         # видов в одном прогоне не появляется по построению (заголовком становится
         # один, остальные уходят подпунктами), и «вид недостижим» стало бы
         # неотличимо от «правило сломалось». Слияние проверяется отдельно —
         # TestRegimeMerge.
         events = self.alerts.detect(bad, state, NOW, merge=False)
-        events += self.alerts.detect(payload(core=None, cell=None), {"last": prev},
-                                     NOW, merge=False)
-        events += self.alerts.detect(payload(bond=1, cell="bear|stress|stress"),
-                                     {"last": dict(prev, bond=0)}, NOW, merge=False)
+        # Расчёт упал: пустая оценка и пометка compute_error в витрине.
+        events += self.alerts.detect(
+            payload(core=None, cell=None, compute_error="KeyError @ 2026-08-11T16:05:00Z"),
+            {"last": prev}, NOW, merge=False, crash="KeyError: 'imoex'")
+        events += self.alerts.detect(
+            payload(bond=1, cell="bear|stress|stress"),
+            {"last": dict(prev, bond=0, compute_error="KeyError @ 2026-08-10T20:55:00Z",
+                          gate={"trend": 0, "vol": 1, "bond": 0, "open": True})},
+            NOW, merge=False)
+        # Предупреждение перед днём решения: позиция «акции», оценка ниже порога.
+        events += self.alerts.detect(
+            payload(position=position_block("long", comp=-0.31, by_score=True),
+                    run_mode="daily"), {"last": prev}, NOW, merge=False)
+        # Отбой: предупреждение дошло, день решения наступил, позиция прежняя.
+        events += self.alerts.detect(
+            payload(position=position_block("long", comp=-0.15, by_score=True)),
+            {"last": prev, "watch": {"key": "position_watch:%s:flat" % PREV_ASOF,
+                                     "decision": PREV_ASOF, "to": "flat", "delivered": True}},
+            NOW, merge=False)
+        # Главное событие не доходит до канала рынка — и отбивка, когда дошло.
+        stuck = {"key": "position:x", "kind": "position_change", "title": "Позиция: переход в деньги",
+                 "before": "акции", "after": "деньги (ставка 12,9%)", "exec_day": "2026-08-12",
+                 "ts": (NOW - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                 "outcome": self.telegram.FAIL, "delivered": False}
+        memo = {}
+        events += self.alerts._stuck_events([stuck], memo, NOW)
+        events += self.alerts._stuck_events([dict(stuck, delivered=True)],
+                                            {"stuck": {"position:x": "t"}}, NOW)
         self.online = False
         events += self.alerts.after_publish(
             {"lease_ok": False, "lease_reason": "перо у GHA", "oversize": True,
@@ -803,7 +937,11 @@ class TestTexts(AlertsCase):
                      "buy_window_open", "cb_reminder", "cb_decision", "orfr_published",
                      "auction_failed", "deposit_uptick", "source_stale", "source_ok",
                      "health_review",
-                     "core_missing", "lease_lost", "payload_oversize", "position_change"):
+                     "core_missing", "lease_lost", "payload_oversize", "position_change",
+                     # аудит 20.11.2026
+                     "position_watch", "position_watch_off", "urals_month",
+                     "core_series_stale", "core_series_ok", "compute_failed", "compute_ok",
+                     "delivery_stuck", "delivery_ok"):
             self.assertIn(kind, kinds)
 
     def test_every_event_carries_a_number(self):
@@ -846,8 +984,8 @@ class TestTexts(AlertsCase):
 
 class TestPayloadFeed(AlertsCase):
     def test_feed_keeps_tail_and_shape(self):
-        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
-        self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=False, now=NOW)
+        self.seed(rate_before())
+        self.alerts.run(rate_after(), dry_run=False, now=NOW)
         feed = self.alerts.payload_events()
         self.assertTrue(feed)
         for row in feed:
@@ -861,15 +999,14 @@ class TestOpsSplit(AlertsCase):
     def stale(self, now=NOW):
         """Прогон, который рождает и рыночное событие, и санитарное разом."""
         return self.alerts.run(
-            payload(bond=0, cell="bear|stress|ok",
-                    sources={"iss": {"status": "ok"}, "moex_press": {"status": "error",
-                                                                     "asof": "2026-06-30"}}),
+            rate_after(sources={"iss": {"status": "ok"},
+                                "moex_press": {"status": "error", "asof": "2026-06-30"}}),
             dry_run=False, now=now)
 
     def test_ops_event_goes_to_the_ops_channel_only(self):
         # мутация: слать санитарные тем же каналом -> лента рынка тонет в отказах
         # источников, ровно как это выглядело в проде 12 августа.
-        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
+        self.seed(rate_before())
         events = self.stale()
         kinds = {e["kind"] for e in events}
         self.assertIn("source_stale", kinds, "проверка бессмысленна без санитарного события")
@@ -878,7 +1015,7 @@ class TestOpsSplit(AlertsCase):
         self.assertFalse(any("moex_press" in t for t in self.by_channel.get("alerts") or []))
 
     def test_ops_event_never_reaches_the_feed(self):
-        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
+        self.seed(rate_before())
         self.stale()
         feed = self.alerts.payload_events()
         self.assertTrue(feed, "рыночные события в ленте остаться обязаны")
@@ -888,7 +1025,7 @@ class TestOpsSplit(AlertsCase):
     def test_old_ops_events_are_swept_out_of_a_saved_feed(self):
         # Состояние переживает обновление кода: до разделения санитарные лежали в
         # feed, и без вычистки они висели бы в журнале ещё двадцать событий.
-        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
+        self.seed(rate_before())
         state = self.state()
         state["feed"] = [{"key": "source_stale:iss:x", "kind": "source_stale",
                           "ts": "2026-08-10T00:00:00Z", "severity": "warn", "text": "старьё"}]
@@ -896,7 +1033,7 @@ class TestOpsSplit(AlertsCase):
         self.assertEqual(self.alerts.payload_events(), [])
 
     def test_ops_events_are_not_mirrored_to_the_hub(self):
-        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
+        self.seed(rate_before())
         mirrored = []
         nexus = need(self, "pipeline.lib.nexus", "deliver", "SENT")
         with mock.patch.object(nexus, "deliver",
@@ -909,29 +1046,29 @@ class TestComment(AlertsCase):
     """Комментарий модели: одинаковый во всех трёх местах, необязательный везде."""
 
     def test_comment_reaches_telegram_and_feed(self):
-        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
+        self.seed(rate_before())
         with mock.patch.object(self.alerts.commentary, "annotate",
                                lambda evs, pl, log=None: [e.update(comment="разбор") for e in evs
                                                           if not self.alerts.is_ops(e)]):
-            self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=False, now=NOW)
+            self.alerts.run(rate_after(), dry_run=False, now=NOW)
         self.assertTrue(any("💬 разбор" in t for t in self.sent))
         self.assertTrue(all(e.get("comment") == "разбор" for e in self.alerts.payload_events()))
 
     def test_event_without_comment_is_a_plain_fact(self):
         # Ключа нет — комментатор возвращает None, и это НЕ отказ доставки.
-        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
-        self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=False, now=NOW)
+        self.seed(rate_before())
+        self.alerts.run(rate_after(), dry_run=False, now=NOW)
         self.assertTrue(self.sent)
         self.assertFalse(any("💬" in t for t in self.sent))
         self.assertEqual(self.pending_keys(), [])
 
     def test_dry_run_does_not_call_the_model(self):
         # Прогон «на посмотреть» не должен зависеть от чужого провайдера.
-        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
+        self.seed(rate_before())
         calls = []
         with mock.patch.object(self.alerts.commentary, "annotate",
                                lambda *a, **k: calls.append(1)):
-            self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=True, now=NOW)
+            self.alerts.run(rate_after(), dry_run=True, now=NOW)
         self.assertEqual(calls, [])
 
 
@@ -960,13 +1097,11 @@ class TestRequeueKeepsStructure(AlertsCase):
         self.assertIn("от 05.08.", ops, "повтор потерял факт с датой данных")
 
     def test_повтор_рыночного_не_слипается_в_жирный_ком(self):
-        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
+        self.seed(rate_before())
         self.online = False
-        self.alerts.run(payload(vol=1, bond=0, cell="bear|stress|ok"),
-                        dry_run=False, now=NOW)
+        self.alerts.run(rate_after(), dry_run=False, now=NOW)
         self.online = True
-        self.alerts.run(payload(vol=1, bond=0, cell="bear|stress|ok"),
-                        dry_run=False, now=NOW + timedelta(hours=1))
+        self.alerts.run(rate_after(), dry_run=False, now=NOW + timedelta(hours=1))
         market = "\n".join(self.by_channel.get("alerts") or [])
         self.assertIn("<b>", market)
         # Заголовок закрывается до подробностей: жирным — только он.
@@ -974,23 +1109,20 @@ class TestRequeueKeepsStructure(AlertsCase):
         self.assertLess(len(head), 120,
                         "повтор завернул весь текст события в одну жирную строку")
 
-    def test_повтор_слитого_поворота_несёт_что_за_этим_стоит(self):
+    def test_слитый_поворот_несёт_что_за_этим_стоит_и_в_ленте(self):
         """Аудит 28.10.2026: `causes` не было в EVENT_FIELDS.
 
-        Слитый поворот режима (merge_regime) объясняет себя блоком «Что за этим
-        стоит». Первая отправка его несла, а повтор из очереди терял: поле не
-        переживало pending, и читатель получал смену режима без причины.
+        Слитый поворот (merge_regime) объясняет себя блоком «Что за этим стоит». С
+        20.11.2026 он живёт только в журнале страницы, и блок обязан доехать туда:
+        лента собирается из тех же EVENT_FIELDS, что и очередь повторов.
         """
         self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
-        self.online = False
         self.alerts.run(payload(vol=1, bond=0, cell="bear|stress|ok"),
                         dry_run=False, now=NOW)
-        self.online = True
-        self.alerts.run(payload(vol=1, bond=0, cell="bear|stress|ok"),
-                        dry_run=False, now=NOW + timedelta(hours=1))
-        market = "\n".join(self.by_channel.get("alerts") or [])
-        self.assertIn("Что за этим стоит", market,
-                      "повтор из очереди потерял блок «Что за этим стоит»")
+        saved = self.state()["feed"][-1]
+        self.assertTrue(saved.get("causes"), "запись журнала потеряла подпункты")
+        self.assertIn("Долговой рынок вышел из стресса",
+                      self.alerts.payload_events()[-1]["text"])
 
 
 class TestSourceStaleNamesSeries(AlertsCase):
@@ -1275,7 +1407,7 @@ class TestCommentaryScope(AlertsCase):
 
 
 class TestRegimeMerge(AlertsCase):
-    """Совпавшие переходы машины состояний — одно сообщение, а не три.
+    """Совпавшие переходы машины состояний — одна запись, а не три.
 
     ОПЛАЧЕНО ПРОГОНОМ 14.08.2026: ячейка — это и есть три её признака вместе,
     поэтому снятие облигационного флага НЕИЗБЕЖНО меняет ячейку, а окно входа —
@@ -1283,7 +1415,9 @@ class TestRegimeMerge(AlertsCase):
     уведомления подряд про одно движение.
 
     Приём взят у 837: внутренние переключения не рассылаются отдельно, а собираются
-    объяснением к одному внешнему событию — блоком «Что за этим стоит».
+    объяснением к одному внешнему событию — блоком «Что за этим стоит». С 20.11.2026
+    семейство стоит на флагах ворот и живёт только в журнале страницы; слияние
+    осталось тем же — одна запись журнала на один поворот.
     """
 
     def turn(self, before, after):
@@ -1291,22 +1425,22 @@ class TestRegimeMerge(AlertsCase):
         self.seed(payload(**before))
         return self.alerts.run(payload(**after), dry_run=False, now=NOW)
 
-    def test_три_перехода_становятся_одним_сообщением(self):
+    def test_три_перехода_становятся_одной_записью(self):
         evs = self.turn(dict(vol=1, bond=1, cell="bear|stress|stress"),
                         dict(vol=1, bond=0, cell="bear|stress|ok"))
         self.assertEqual(len(evs), 1, [e["kind"] for e in evs])
         self.assertEqual(evs[0]["kind"], "buy_window_open")
-        self.assertEqual(len(self.sent), 1, "в телеграм ушло больше одного сообщения")
+        self.assertEqual(len(self.alerts.payload_events()), 1, "в журнале больше одной записи")
 
     def test_заголовком_становится_самое_предметное(self):
-        """«Долговой рынок вошёл в стресс» конкретнее, чем «Признаки рынка сменились».
+        """«Долговой рынок вошёл в стресс» конкретнее, чем «Признаки … сменились».
 
         Обратный порядок давал заголовки, из которых нельзя понять, ЧТО произошло.
         """
         evs = self.turn(dict(vol=0, bond=0, cell="bull|calm|ok"),
                         dict(vol=0, bond=1, cell="bull|calm|stress"))
         self.assertEqual([e["kind"] for e in evs], ["bond_flag_on"])
-        self.assertIn("Признаки рынка сменились", " ".join(evs[0]["causes"]))
+        self.assertIn("Признаки рынка для ворот сменились", " ".join(evs[0]["causes"]))
 
     def test_свёрнутое_не_теряется_а_становится_подпунктом(self):
         evs = self.turn(dict(vol=1, bond=1, cell="bear|stress|stress"),
@@ -1314,15 +1448,12 @@ class TestRegimeMerge(AlertsCase):
         message = self.alerts.render(evs[0])
         self.assertIn("<b>Что за этим стоит</b>", message)
         self.assertIn("Долговой рынок вышел из стресса", message)
-        # Смысловая часть свёрнутого — самое ценное, что в нём было.
-        self.assertIn("Покупка просадок в акциях снова имеет смысл", message)
+        # Подробность свёрнутого — расстояние RGBI до порога — тоже объяснение.
+        self.assertIn("Просадка RGBI −1,2% от максимума", message)
 
     def test_ключи_свёрнутых_переезжают_в_главное(self):
-        """Дедуп телеграма и лента хаба работают по ключу.
-
-        Без переноса повтор из очереди прислал бы свёрнутые события заново
-        по отдельности — тем самым вернув ту же тройку сообщений.
-        """
+        """Дедуп ленты работает по ключу: свёрнутые события не должны всплыть
+        в журнале отдельными записями."""
         evs = self.turn(dict(vol=1, bond=1, cell="bear|stress|stress"),
                         dict(vol=1, bond=0, cell="bear|stress|ok"))
         merged = evs[0].get("merged") or []
@@ -1332,12 +1463,14 @@ class TestRegimeMerge(AlertsCase):
     def test_подпункт_не_повторяет_строку_выше(self):
         # Свёрнутое событие описывает то же движение, и его «было → стало» сплошь
         # и рядом совпадает с уже напечатанным. Дубль в блоке объяснений —
-        # не объяснение.
+        # не объяснение. То же со строкой «что это значит для ворот и позиции»:
+        # она одна на весь поворот.
         evs = self.turn(dict(vol=1, bond=1, cell="bear|stress|stress"),
                         dict(vol=1, bond=0, cell="bear|stress|ok"))
         move = f"{evs[0]['before']} → {evs[0]['after']}"
         for cause in evs[0]["causes"]:
             self.assertNotIn(move, cause, f"подпункт повторяет строку движения: {cause}")
+            self.assertNotIn(evs[0]["meaning"], cause, "строка о воротах напечатана дважды")
 
     def test_одиночный_переход_не_обрастает_блоком(self):
         evs = self.turn(dict(trend=1, vol=0, bond=0, cell="bull|calm|ok"),
@@ -1361,160 +1494,109 @@ class TestRegimeMerge(AlertsCase):
 
     def test_тревожность_берётся_худшая(self):
         # Спокойная смена режима, свёрнутая с тревожным флагом, обязана остаться
-        # тревогой: иначе слияние понижает важность сообщения.
+        # тревогой: иначе слияние понижает важность записи.
         evs = self.turn(dict(vol=0, bond=0, cell="bull|calm|ok"),
                         dict(vol=0, bond=1, cell="bull|calm|stress"))
         self.assertEqual(evs[0]["severity"], "warn")
 
 
-class TestCellChangeNamesItsLayer(AlertsCase):
-    """Сменились СЫРЫЕ признаки — сообщение обязано это сказать.
+class TestGateEvents(AlertsCase):
+    """События о состоянии рынка стоят на флагах ВОРОТ и живут только в журнале.
 
-    ОПЛАЧЕНО ПРОГОНОМ 15.09.2026: сырая вола ушла на 0,3 п.п. ниже своего порога,
-    ворота держат стресс до p60 — и в канал уехало «Режим рынка сменился» с
-    ободряющей статистикой ячейки (типичный месяц +1,5%, в плюс 64%), пока панель
-    показывала закрытые ворота, токсичный режим и позицию «деньги». Два дефекта в
-    одной строке: слово «режим» с 02.09.2026 занято РЕЖИМОМ ИЗ ТРЁХ поверх ворот,
-    а он не менялся; и ничто в сообщении не говорило, что ворота стоят на месте.
+    ОПЛАЧЕНО (аудит 20.11.2026, §9.5): за 30 дней в канал рынка ушло 14 сообщений,
+    действия требовало одно. Восемь — «Признаки рынка сменились»: индекс восемь раз
+    пересёк 200-дневную среднюю в пределах ±1 % при неизменных воротах и позиции, и
+    каждое пришло со звуком, разбором модели и значком смены позиции.
+
+    До того (15.09.2026) то же событие уже подводило иначе: сырая вола ушла на 0,3
+    п.п. ниже порога, в канал уехало «Режим рынка сменился» с ободряющей
+    статистикой, а ворота стояли закрытыми и позиция не менялась.
     """
 
-    GATE = {"cell_code": "bear|stress|stress", "open": False}
+    STAYS = gate_block(0, 0, 1)        # ворота: падающий рынок, спокойно, ОФЗ в стрессе
 
-    def turn(self, before, after, gate=None):
-        self.seed(payload(**before))
-        return self.alerts.run(payload(gate=gate, **after), dry_run=False, now=NOW)
+    def test_сырой_тренд_у_средней_при_неизменных_воротах_молчит(self):
+        """Ровно шум ноября: сырой признак тренда перекидывается, ворота стоят.
 
-    def test_заголовок_не_называет_это_сменой_режима(self):
-        """мутация: вернуть «Режим рынка сменился» -> заголовок снова обещает
-        смену того слоя, по которому стоит позиция, хотя менялись сырые признаки.
+        мутация: вернуть правило на states.current -> событие рождается на каждое
+        пересечение средней, и тест краснеет.
         """
-        evs = self.turn(dict(trend=1, vol=0, bond=0, cell="bull|calm|ok"),
-                        dict(trend=0, vol=0, bond=0, cell="bear|calm|ok"))
+        self.seed(payload(trend=0, vol=0, bond=1, cell="bear|calm|stress", gate=self.STAYS))
+        for day, trend in enumerate((1, 0, 1, 0), start=1):
+            evs = self.alerts.run(payload(trend=trend, vol=0, bond=1, gate=self.STAYS,
+                                          cell=("bull" if trend else "bear") + "|calm|stress"),
+                                  dry_run=False, now=NOW + timedelta(days=day))
+            self.assertEqual(evs, [], f"день {day}: сырой признак дал событие")
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.alerts.payload_events(), [])
+
+    def test_смена_флага_ворот_идёт_в_журнал_и_никуда_больше(self):
+        """мутация: убрать ветку is_journal из dispatch -> запись уходит в телеграм
+        и в хаб; убрать фильтр в prepare -> для неё заказывается разбор модели.
+        """
+        nexus = need(self, "pipeline.lib.nexus", "deliver", "SENT")
+        mirrored, asked = [], []
+        self.seed(payload(trend=0, vol=0, bond=1, cell="bear|calm|stress"))
+        with mock.patch.object(nexus, "deliver",
+                               lambda ev: mirrored.append(ev["key"]) or nexus.SENT), \
+             mock.patch.object(self.alerts.commentary, "comments",
+                               lambda evs, pl, log=None: asked.append(len(evs))):
+            evs = self.alerts.run(payload(trend=1, vol=0, bond=1, cell="bull|calm|stress"),
+                                  dry_run=False, now=NOW)
         self.assertEqual([e["kind"] for e in evs], ["state_cell_change"])
-        title = evs[0]["title"]
-        self.assertIn("Признаки рынка сменились", title)
-        self.assertNotIn("Режим", title)
+        self.assertEqual(self.sent, [], "запись о воротах ушла в телеграм")
+        self.assertEqual(mirrored, [], "запись о воротах ушла в хаб")
+        self.assertEqual(asked, [], "для записи о воротах заказан разбор модели")
+        self.assertEqual([e["kind"] for e in self.alerts.payload_events()],
+                         ["state_cell_change"], "записи нет в журнале страницы")
+        self.assertEqual(self.pending_keys(), [], "журнальная запись легла в очередь повторов")
 
-    def test_когда_ворота_стоят_на_месте_сообщение_это_говорит(self):
-        """мутация: не класть detail -> читатель снова получает статистику новой
-        ячейки без единого слова о том, что ворота остались закрытыми.
+    def test_запись_говорит_что_стало_с_воротами_и_позицией(self):
+        """мутация: не класть meaning -> запись не отвечает на вопрос, ради которого
+        её читают: повлияла ли смена флага на позицию.
         """
-        evs = self.turn(dict(trend=0, vol=1, bond=1, cell="bear|stress|stress"),
-                        dict(trend=0, vol=0, bond=1, cell="bear|calm|stress"),
-                        gate=self.GATE)
-        self.assertEqual([e["kind"] for e in evs], ["state_cell_change"])
-        detail = evs[0].get("detail") or ""
-        self.assertIn("сырые признаки", detail)
-        self.assertIn("закрыты", detail)
-        self.assertIn(detail, self.alerts.render(evs[0]),
-                      "строка про ворота не дошла до сообщения")
-        # Ворота отстают по построению, поэтому их сочетание почти всегда совпадает
-        # с тем, что стояло ДО перехода. Назвать его словами значит напечатать
-        # строку «было → стало» второй раз.
-        self.assertNotIn(evs[0]["before"], detail, "подпись повторяет строку движения")
+        flat = position_block("flat", by_score=True)
+        self.seed(payload(trend=0, vol=0, bond=1, cell="bear|calm|stress", position=flat))
+        evs = self.alerts.run(payload(trend=1, vol=0, bond=1, cell="bull|calm|stress",
+                                      position=flat), dry_run=False, now=NOW)
+        self.assertEqual(evs[0]["title"], "Признаки рынка для ворот сменились")
+        self.assertEqual(evs[0]["meaning"],
+                         "Ворота остались открытыми; позиция не изменилась — деньги, "
+                         "её держит оценка рынка (−0,31).")
+        self.assertIn("падающий рынок", evs[0]["before"])
+        self.assertIn("растущий рынок", evs[0]["after"])
 
-    def test_третье_сочетание_у_ворот_называется_словами(self):
-        """мутация: всегда писать «ворота этого ещё не читают» -> читатель не узнает,
-        на каком сочетании они стоят, когда оно не совпадает ни с «было», ни с «стало».
+    def test_закрытие_ворот_при_позиции_деньги_только_журнал(self):
+        """Ворота закрылись, а позиция и так «деньги»: действия не требуется.
+
+        мутация: слать закрытие ворот в канал -> читатель получает тревожное
+        сообщение, по которому делать нечего.
         """
-        evs = self.turn(dict(trend=1, vol=0, bond=0, cell="bull|calm|ok"),
-                        dict(trend=0, vol=0, bond=0, cell="bear|calm|ok"),
-                        gate=self.GATE)
-        self.assertIn("нервная торговля", evs[0]["detail"])
+        flat = position_block("flat", by_score=True)
+        self.seed(payload(trend=0, vol=0, bond=1, cell="bear|calm|stress", position=flat))
+        closed = position_block("flat", by_score=True, gate_open=False,
+                                held_by={"by": "both", "legs": LEGS})
+        evs = self.alerts.run(payload(trend=0, vol=1, bond=1, cell="bear|stress|stress",
+                                      position=closed), dry_run=False, now=NOW)
+        self.assertEqual(self.sent, [])
+        self.assertEqual(len(evs), 1)
+        self.assertEqual(evs[0]["meaning"],
+                         "Ворота закрылись; позиция не изменилась — деньги, её держат "
+                         "и ворота, и оценка рынка (−0,31).")
 
-    def test_открытые_ворота_названы_открытыми(self):
-        evs = self.turn(dict(trend=1, vol=0, bond=0, cell="bull|calm|ok"),
-                        dict(trend=0, vol=0, bond=0, cell="bear|calm|ok"),
-                        gate={"cell_code": "bull|calm|ok", "open": True})
-        self.assertIn("открыты", evs[0]["detail"])
-
-    def test_когда_ворота_читают_то_же_сочетание_лишней_строки_нет(self):
-        # Слои сошлись — оговорка стала бы шумом в каждом сообщении.
-        evs = self.turn(dict(trend=1, vol=0, bond=0, cell="bull|calm|ok"),
-                        dict(trend=0, vol=0, bond=0, cell="bear|calm|ok"),
-                        gate={"cell_code": "bear|calm|ok", "open": True})
-        self.assertIsNone(evs[0].get("detail"))
-
-    def test_без_блока_ворот_ничего_не_придумывается(self):
+    def test_без_блока_ворот_события_нет(self):
         # Старый payload: ворот в нём нет, и утверждать про них нечего.
-        evs = self.turn(dict(trend=1, vol=0, bond=0, cell="bull|calm|ok"),
-                        dict(trend=0, vol=0, bond=0, cell="bear|calm|ok"))
-        self.assertIsNone(evs[0].get("detail"))
+        self.seed(payload(trend=1, vol=0, bond=0, cell="bull|calm|ok", gate=None))
+        evs = self.alerts.run(payload(trend=0, vol=0, bond=0, cell="bear|calm|ok", gate=None),
+                              dry_run=False, now=NOW)
+        self.assertEqual(evs, [])
 
-
-class TestGateLagInFlagEvents(AlertsCase):
-    """«Отпустило» по сырому флагу при воротах, которые ещё держат.
-
-    Пороги ВКЛЮЧЕНИЯ у сырого флага и у флага ворот совпадают, пороги СНЯТИЯ —
-    нет: вола p60 вместо p80, RGBI −3 % вместо −3,9 %, тренд −2 % от MA200. В этой
-    полосе «Долговой рынок вышел из стресса» и «Окно входа» уходят в канал, пока
-    позиция стоит на закрытых воротах. На месячной сетке 2004–2026 полоса по
-    облигациям занимает 11 месяцев, окно входа попадало в неё дважды.
-    """
-
-    def turn(self, before, after, gate=None):
-        self.seed(payload(**before))
-        return self.alerts.run(payload(gate=gate, **after), dry_run=False, now=NOW)
-
-    # Вола НУЛЕВАЯ: при vol=1 тот же поворот рождает «Окно входа», оно становится
-    # заголовком, а «ОФЗ вышли из стресса» уходит подпунктом — и проверка молча
-    # начинает смотреть на другое событие. Первая редакция этого теста именно так
-    # и прошла мимо: мутация «убрать оговорку из bond_off» осталась зелёной.
-    BOND_OFF_BEFORE = dict(trend=0, vol=0, bond=1, cell="bear|calm|stress")
-    BOND_OFF_AFTER = dict(trend=0, vol=0, bond=0, cell="bear|calm|ok")
-
-    def test_снятый_флаг_офз_при_стоящих_воротах_оговорён(self):
-        """мутация: убрать оговорку -> «покупка просадок снова имеет смысл» уходит
-        в канал ровно тогда, когда ворота ещё держат флаг и позиция не менялась.
-        """
-        evs = self.turn(self.BOND_OFF_BEFORE, self.BOND_OFF_AFTER,
-                        gate={"cell_code": "bear|calm|stress", "open": False,
-                              "trend": 0, "vol": 0, "bond": 1})
-        ev = next(e for e in evs if e["kind"] == "bond_flag_off")
-        detail = ev.get("detail") or ""
-        self.assertIn("Ворота этого ещё не читают", detail)
-        self.assertIn("закрыты", detail)
-        self.assertIn(detail, self.alerts.render(ev), "оговорка не дошла до сообщения")
-
-    def test_окно_входа_при_стоящем_флаге_ворот_оговорено(self):
-        """Единственное событие панели, зовущее ДОБАВИТЬ риск. На месячной сетке
-        оно дважды приходилось на месяцы, где ворота стояли закрытыми.
-
-        мутация: не звать _gate_still_holds из окна входа -> приглашение войти
-        уходит без единого слова о том, что ворота его не читают.
-        """
-        evs = self.turn(dict(trend=0, vol=1, bond=1, cell="bear|stress|stress"),
-                        dict(trend=0, vol=1, bond=0, cell="bear|stress|ok"),
-                        gate={"cell_code": "bear|stress|stress", "open": False,
-                              "trend": 0, "vol": 1, "bond": 1})
-        ev = next(e for e in evs if e["kind"] == "buy_window_open")
-        self.assertIn("Ворота этого ещё не читают", ev.get("detail") or "")
-
-    def test_когда_ворота_сняли_флаг_вместе_с_сырым_оговорки_нет(self):
-        evs = self.turn(self.BOND_OFF_BEFORE, self.BOND_OFF_AFTER,
-                        gate={"cell_code": "bear|calm|ok", "open": True,
-                              "trend": 0, "vol": 0, "bond": 0})
-        ev = next(e for e in evs if e["kind"] == "bond_flag_off")
-        self.assertNotIn("Ворота этого ещё не читают", ev.get("detail") or "")
-
-    def test_вход_в_стресс_оговорки_не_требует(self):
-        """Пороги включения совпадают: ворота зажигают флаг тем же днём, что и
-        сырые признаки, — оговорка тут была бы неправдой.
-
-        мутация: звать _gate_still_holds и на включении -> тест красный, если
-        оговорка появится (сравнение флагов её и так не даст, но правило явное).
-        """
-        evs = self.turn(dict(trend=0, vol=0, bond=0, cell="bear|calm|ok"),
-                        dict(trend=0, vol=0, bond=1, cell="bear|calm|stress"),
-                        gate={"cell_code": "bear|calm|stress", "open": True,
-                              "trend": 0, "vol": 0, "bond": 1})
-        ev = next(e for e in evs if e["kind"] == "bond_flag_on")
-        self.assertNotIn("Ворота этого ещё не читают", ev.get("detail") or "")
-
-    def test_без_блока_ворот_оговорки_не_бывает(self):
-        evs = self.turn(self.BOND_OFF_BEFORE, self.BOND_OFF_AFTER)
-        ev = next(e for e in evs if e["kind"] == "bond_flag_off")
-        self.assertNotIn("Ворота", ev.get("detail") or "")
+    def test_первый_прогон_новой_версии_молчит(self):
+        # Снимок старой версии флагов ворот не хранит — переходом это не считается.
+        self.seed(payload(trend=1, vol=0, bond=0, cell="bull|calm|ok", gate=None))
+        evs = self.alerts.run(payload(trend=0, vol=0, bond=0, cell="bear|calm|ok"),
+                              dry_run=False, now=NOW)
+        self.assertEqual(evs, [])
 
 
 class TestNexusMirror(AlertsCase):
@@ -1539,42 +1621,41 @@ class TestNexusMirror(AlertsCase):
         self.mirrored.clear()
 
     def bond_off(self, now=NOW):
-        return self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=False, now=now)
+        """Рабочее рыночное событие (имя метода историческое): решение ЦБ."""
+        return self.alerts.run(rate_after(), dry_run=False, now=now)
 
     def test_event_reaches_the_hub_under_its_own_key(self):
-        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
+        self.seed(rate_before())
         events = self.bond_off()
-        # Снятие флага тянет за собой смену ячейки и окно входа — в ленту уезжают
-        # все три, по одному ключу на событие.
         self.assertEqual(sorted(self.mirrored), sorted(e["key"] for e in events))
-        self.assertIn("bond_off:" + ASOF, self.mirrored)
+        self.assertIn(RATE_KEY, self.mirrored)
         self.assertEqual(self.pending_keys(), [])
 
     def test_dead_hub_retries_without_a_second_telegram_message(self):
         # мутация: считать событие доставленным по одному телеграму -> упавший хаб
         # теряет событие навсегда, повторить его уже некому.
-        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
+        self.seed(rate_before())
         self.hub_outcome = self.nexus.FAIL
         self.bond_off()
-        self.assertIn("bond_off:" + ASOF, self.pending_keys())
+        self.assertIn(RATE_KEY, self.pending_keys())
         self.hub_outcome = self.nexus.SENT
         self.bond_off(NOW + timedelta(hours=1))
         self.assertEqual(self.pending_keys(), [])
-        self.assertEqual(self.mirrored.count("bond_off:" + ASOF), 2)
+        self.assertEqual(self.mirrored.count(RATE_KEY), 2)
         # Телеграм на повторе отвечает DUP: второго сообщения в канал не уходит.
-        self.assertEqual(len([t for t in self.sent if "Долговой рынок вышел из стресса" in t]), 1)
+        self.assertEqual(len([t for t in self.sent if RATE_TITLE in t]), 1)
 
     def test_unconfigured_hub_never_blocks_delivery(self):
         # мутация: OFF трактовать как FAIL -> на машине без NEXUS_* очередь повторов
         # растёт вечно, а телеграм на каждом прогоне отвечает DUP впустую.
-        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
+        self.seed(rate_before())
         self.hub_outcome = self.nexus.OFF
         self.bond_off()
         self.assertEqual(self.pending_keys(), [])
 
     def test_dry_run_touches_neither_channel(self):
-        self.seed(payload(vol=0, bond=1, cell="bear|calm|stress"))
-        self.alerts.run(payload(vol=0, bond=0, cell="bear|calm|ok"), dry_run=True, now=NOW)
+        self.seed(rate_before())
+        self.alerts.run(rate_after(), dry_run=True, now=NOW)
         self.assertEqual(self.mirrored, [])
         self.assertEqual(self.sent, [])
 
@@ -1636,8 +1717,9 @@ class TestPositionChange(AlertsCase):
         self.assertEqual(ev["before"], "акции")
         self.assertEqual(ev["after"], "деньги (ставка 12,9%)")
         self.assertIn("ворота закрылись", ev["detail"].lower())
-        self.assertIn("следующем закрытии", ev["detail"])
-        self.assertIn("Решение от 07.08,", ev["detail"])
+        # День недели и дата исполнения названы: «на следующем закрытии» заставляло
+        # считать по календарю (аудит 20.11.2026, §9.8). 11.08.2026 — вторник.
+        self.assertIn("Решение от вт 11.08, исполнять на закрытии ср 12.08.", ev["detail"])
         self.assertEqual(ev["severity"], "warn")
 
     def test_переход_в_акции(self):
@@ -1673,6 +1755,12 @@ class TestPositionChange(AlertsCase):
         self.assertIn("position_change", kinds)
         self.assertIn("state_cell_change", kinds)
         self.assertNotIn("position_change", str([e.get("merged") for e in evs]))
+        # В канал уходит только смена позиции; запись о воротах — в журнал, и она
+        # говорит, что позиция сменилась.
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("Позиция: переход в деньги", self.sent[0])
+        gate = next(e for e in evs if e["kind"] == "state_cell_change")
+        self.assertIn("Ворота закрылись; позиция сменилась: акции → деньги.", gate["meaning"])
 
     def test_уходит_в_канал_рынка_и_в_ленту(self):
         self.seed(payload(position="long"))
