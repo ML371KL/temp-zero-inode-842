@@ -117,10 +117,21 @@ def parse_fund_page(html):
     return day, pai, nav
 
 
+# Счётчик рынка — справочное число для meta: в ряд он не идёт (грабля 3) и тайлу
+# нужен только строкой контекста. Ждать его как источник ряда нельзя. С 13.11.2026
+# www.moex.com с прод-машины не отвечает вовсе: три попытки по тридцать секунд на
+# КАЖДОМ суточном прогоне — полторы минуты, на которые задерживались и публикация, и
+# вечернее сообщение, при статусе «ok» в журнале (lqdt_aum ok 93 945 мс). Поэтому
+# одна короткая попытка, а отказ назван в meta.
+MOEX_TIMEOUT_S = 8
+MOEX_RETRIES = 1
+
+
 def moex_total_bln():
     """Грубый счётчик суммарной СЧА рынка с moex.com. -> (млрд руб | None, текст)."""
     try:
-        text = _plain(get_text(MOEX_MONEYFUNDS, headers=_UA))
+        text = _plain(get_text(MOEX_MONEYFUNDS, headers=_UA, timeout=MOEX_TIMEOUT_S,
+                               retries=MOEX_RETRIES))
     except FetchError as exc:
         return None, str(exc)
     m = re.search(r"([\d,.]+)\s*(трлн|млрд)[^.]{0,40}?СЧА", text)
@@ -154,11 +165,16 @@ def money_funds():
         day, pai, nav = parsed
         snaps[ticker] = {"day": day, "pai": pai, "nav_rub": nav}
     moex_bln, moex_note = moex_total_bln()
+    # Счётчик не получен — это не отказ ряда (СЧА фонда прочитана), но и молчать о
+    # нём нельзя: тайл теряет строку про весь рынок.
+    moex_warning = (None if moex_bln is not None else
+                    "счётчик рынка на moex.com не получен (%s)" % str(moex_note)[:120])
     if not snaps:
         return SERIES_ID, {}, _meta("error", FUND_URL % FUNDS.get("LQDT", 0),
                                     "; ".join(failed) or "фонды не прочитались",
                                     {"moex_total_bln": moex_bln,
-                                     "moex_note": moex_note})
+                                     "moex_note": moex_note,
+                                     "moex_warning": moex_warning})
     day = max(s["day"] for s in snaps.values())
     used = {t: s for t, s in snaps.items() if s["day"] == day}
     skipped = [t for t in snaps if t not in used]
@@ -166,10 +182,13 @@ def money_funds():
     note = "фондов в корзине: %d (%s)" % (len(used), ", ".join(sorted(used)))
     if skipped:
         note += "; пропущены с другой датой: %s" % ", ".join(sorted(skipped))
+    if moex_warning:
+        note += "; " + moex_warning
     return SERIES_ID, {day: total_bln}, _meta(
         "ok", FUND_URL % FUNDS["LQDT"], note,
         {"asof": day, "funds": snaps, "failed": failed,
          "moex_total_bln": moex_bln, "moex_note": moex_note,
+         "moex_warning": moex_warning,
          "coverage_note": "ряд = сумма по FUNDS, а не весь рынок; счётчик МосБиржи "
                           "приведён отдельно и в ряд НЕ подмешивается"})
 
