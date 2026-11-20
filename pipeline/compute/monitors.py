@@ -661,9 +661,20 @@ def _t_deposit_spread(store, now):
         status = _worst(status, "stale")
     # Сколько дней в прошлом спред уже был положительным: считаем по ряду, а не
     # по сегодняшнему значению.
-    dy_hist = _dy_at(store, [d for d, _ in dep_pts[:-1]])
-    before_positive = sum(1 for d, v in dep_pts[:-1]
-                          if d in dy_hist and dy_hist[d] - v > 0)
+    dy_hist = _dy_at(store, [d for d, _ in dep_pts])
+    positive = [d for d, v in dep_pts[:-1] if d in dy_hist and dy_hist[d] - v > 0]
+    measured = sum(1 for d, _ in dep_pts[:-1] if d in dy_hist)
+    before_positive = len(positive)
+    # График тайла обязан рисовать число из заголовка — спред, а не ставку вкладов
+    # (аудит 20.11.2026, §4.5: под подписью «спред» шла ставка). Точки — декады, спред на
+    # дату декады; последняя точка — сам заголовок: дивдоходность свежее декады, и без
+    # неё хвост графика отставал бы от крупного числа.
+    spread_series = [[d, _r(dy_hist[d] - v, 2)] for d, v in dep_pts[-72:] if d in dy_hist]
+    if spread is not None and dy_asof:
+        if spread_series and spread_series[-1][0] >= dy_asof:
+            spread_series[-1] = [spread_series[-1][0], _r(spread, 2)]
+        else:
+            spread_series.append([dy_asof, _r(spread, 2)])
     payload = {
         "deposit_pct": _r(dep, 2),
         "deposit_asof": dep_asof,
@@ -676,7 +687,14 @@ def _t_deposit_spread(store, now):
         # Отсюда и заголовок «событие впервые в истории», который никто не проверял.
         "positive_now": bool(spread is not None and spread > 0),
         "positive_days_before": before_positive,
+        # Когда спред был выше нуля и на скольких декадах он вообще измерен: из этого
+        # следует подпись тайла (до 20.11.2026 она утверждала «не наступало ни разу»
+        # рядом с positive_days_before = 115).
+        "positive_first": positive[0] if positive else None,
+        "positive_last": positive[-1] if positive else None,
+        "decades_measured": measured,
         "series": [[d, _r(v, 2)] for d, v in dep_pts[-72:]],
+        "spread_series": spread_series,
     }
     if spread is None:
         headline = f"Вклады {_n(dep, 1)}%, дивдоходность не посчитана"
@@ -694,9 +712,24 @@ def _t_deposit_spread(store, now):
         headline = (f"Вклады {_n(dep, 1)}% против дивидендов {_n(dy, 1)}%: "
                     f"спред {_n(spread, 1)} п.п.; как сигнал работает только в фазе "
                     f"смягчения (карточка второго ряда)")
+    # Подпись следует из данных (аудит 20.11.2026, §4.5): до этого она утверждала
+    # «устойчивого спреда > 0 не наступало ни разу» рядом с positive_days_before = 115.
+    # Импорт здесь, а не в шапке файла: шапку в эти же дни правят соседние исполнители.
+    from pipeline.lib.wording import plural
+    if positive:
+        years = (f"{positive[0][:4]} год" if positive[0][:4] == positive[-1][:4]
+                 else f"{positive[0][:4]}–{positive[-1][:4]} годы")
+        history = (f"спред выше нуля был в {before_positive} "
+                   f"{plural(before_positive, 'декаде', 'декадах', 'декадах')} из {measured} "
+                   f"({years}).")
+    elif measured:
+        history = (f"за {measured} {plural(measured, 'декаду', 'декады', 'декад')} истории "
+                   f"ряда спред выше нуля не был ни разу.")
+    else:
+        history = "истории спреда пока нет."
     return _tile("deposit_spread", status, dep_asof or dy_asof, headline, payload,
                  "Как сигнал спред работает только в фазе смягчения ставки (IC +0,26); "
-                 "устойчивого «спред > 0» на истории не наступало ни разу.",
+                 + history,
                  dep_meta.get("fetched_at"))
 
 
@@ -1178,6 +1211,15 @@ def _t_futoi(store, now):
     # с −0,4 (2020) на +0,57 (2025–26), перцентиль прижат к 1,0 и сигнала не несёт
     # (VALIDATION §B2, REGIME §5).
     z = calc.zscore_last([v for _, v in used], 120, min_periods=40)
+    # График тайла — то же z(120д), что в заголовке, а не сама доля нетто (аудит
+    # 20.11.2026, §4.5). Каждая точка — zscore_last на ряде по этот день: последняя
+    # совпадает с заголовком по построению.
+    vals = [v for _, v in used]
+    z_series = []
+    for k in range(max(0, len(used) - 120), len(used)):
+        zk = calc.zscore_last(vals[max(0, k - 119):k + 1], 120, min_periods=40)
+        if zk is not None:
+            z_series.append([used[k][0], _r(zk, 2)])
     status = _st("futoi_mx_fiz_pos", pos, meta, now)
     payload = {
         "net": _r(net, 4),
@@ -1188,6 +1230,7 @@ def _t_futoi(store, now):
         "holders_long": _r(hl.get(asof), 0),
         "holders_short": _r(hs.get(asof), 0),
         "series": [[d, _r(v, 4)] for d, v in used[-120:]],
+        "z120_series": z_series,
         "norm": "z-120 по нетто/брутто" if ratio else "z-120 по нетто-позиции",
     }
     # ПОЧЕМУ сформулировано относительно нормы, а не «перегружены лонгом/шортом»:
@@ -1513,6 +1556,11 @@ def _t_mcxsm(store, now):
         "rs_63d_pct": _r(_rs(63), 1),
         "rs_252d_pct": _r(_rs(252), 1),
         "series": [[d, _r(v, 4)] for d, v in ratio[-120:]],
+        # График тайла — относительная доходность за 63 дня, как в заголовке, а не само
+        # отношение индексов (аудит 20.11.2026, §4.5). Последняя точка = rs_63d_pct.
+        "rs63_series": [[ratio[k][0], _r((ratio[k][1] / ratio[k - 63][1] - 1.0) * 100.0, 1)]
+                        for k in range(max(63, len(ratio) - 120), len(ratio))
+                        if ratio[k - 63][1]],
     }
     rs63 = _rs(63)
     if rs63 is None:
@@ -1523,8 +1571,11 @@ def _t_mcxsm(store, now):
         side = "лучше" if rs63 >= 0 else "хуже"
         headline = f"Малые каппы {side} индекса на {_n(abs(rs63), 1)}% за 63 дня"
     return _tile("mcxsm", status, asof, headline, payload,
-                 "Термометр фазы ставки: в ужесточение малые отстают на 8–9,5 п.п./год, "
-                 "в 2026 впервые опережают. Интерпретация, не сигнал.",
+                 # «В 2026 впервые опережают» отсюда убрано (аудит 20.11.2026, §4.5):
+                 # опережали в 2020, 2022 и 2023, а на 18.11.2026 отставали на 4,2% за
+                 # 63 дня. Что сейчас — говорит заголовок, он считается.
+                 "Термометр фазы ставки: в ужесточение малые отстают на 8–9,5 п.п./год. "
+                 "Интерпретация, не сигнал.",
                  s_meta.get("fetched_at"))
 
 
