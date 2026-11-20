@@ -8,11 +8,21 @@
  * вердикта сигнала рядом с цветом всегда стоят иконка и словесная подпись — это
  * требование доступности и заодно защита от чтения панели в оттенках серого.
  *
- * Первая строка панели — ПОЗИЦИЯ (акции / деньги), итог ворот и наклона; её
+ * Первая строка панели — ПОЗИЦИЯ (акции / деньги), итог ворот и оценки рынка; её
  * считает конвейер (compute/decision.py), фронт не выводит решение сам. Поля
  * аудита 02.09.2026 (verdict.position, states.gate, states.regime_stats, shadow,
  * тайл expectations) необязательны: витрина без них рисуется как прежде, новые
  * блоки просто не появляются — старый data.json остаётся законным входом.
+ *
+ * То же правило — для полей аудита 20.11.2026 («Справка вокруг решения», CONTRACT §3:
+ * verdict.strength, vote, control, held_by.oil_now, windows[].said, said_history,
+ * sources.*.core_affected, compute_error и ряды графиков тайлов). Любого может не
+ * быть — на старом data.json, на внутридневном такте до первого суточного прогона,
+ * при отказе одного блока: его часть страницы тогда не рисуется, остальное на месте.
+ * Что именно показывается в каждом случае, закреплено в tests/test_web_evidence.py.
+ *
+ * Имя у главного числа одно — «оценка рынка». Слова расчёта («композит», «ядро»,
+ * «ячейка») остались только на странице лаборатории, рядом с этим именем.
  */
 (function () {
   'use strict';
@@ -86,6 +96,14 @@
     return (b >= 2 && b <= 4) ? few : many;
   }
 
+  // Фразы конвейера приходят без точки и со строчной буквы — их вставляют и в середину
+  // строки, и отдельным предложением. Здесь они доводятся до предложения.
+  function capFirst(s) { s = String(s || ''); return s.charAt(0).toUpperCase() + s.slice(1); }
+  function sentence(s) {
+    s = String(s || '').trim();
+    return !s || /[.!?…]$/.test(s) ? s : s + '.';
+  }
+
   // Перцентили конвейер публикует уже в процентах: monitors._pct_last возвращает
   // 0..100, и headline тайла говорит «78-й перцентиль» из того же числа. Умножение
   // на сто давало на экране «7800-й перцентиль». Доли (hit, weight) — другая
@@ -93,10 +111,10 @@
   function pctile(v) { return isNum(v) ? Math.round(v) : null; }
 
   var TIER_NOTE = {
-    A: 'Тир A — валидировано: значимо на истории и переживает поправки на множественность.',
-    B: 'Тир B — направление подтверждено, сила умеренная или режимная.',
-    monitor: 'Мониторинг — предиктивность не доказана (мало истории или событий). Наблюдаем, не торгуем.',
-    dead: 'Как предиктор рынка акций опровергнуто. Оставлено для контекста.'
+    A: 'A — проверено на истории: связь значима и переживает поправку на число проверок.',
+    B: 'B — направление подтверждено, сила умеренная или зависит от режима.',
+    monitor: 'Монитор — связь с рынком не доказана (мало истории или событий): наблюдаем, не торгуем.',
+    dead: 'Как предсказатель рынка акций опровергнуто; оставлено для контекста.'
   };
 
   /* ────────────────────────────────────────────────────────── иконки */
@@ -218,6 +236,10 @@
     ]);
   }
 
+  // Пометка текущей строки таблицы зон. Отдельным узлом: на телефоне она уходит второй
+  // строкой ячейки, иначе таблица из четырёх колонок шире экрана.
+  function nowMark() { return h('span', { 'class': 'row-mark', text: ' ◂ сейчас' }); }
+
   function toneOf(v) { return !isNum(v) ? 'tone-mut' : (v > 0 ? 'tone-pos' : (v < 0 ? 'tone-neg' : 'tone-mut')); }
 
   /* ─────────────────────────────────────────────────────── вердикт */
@@ -301,9 +323,9 @@
   // Причина последней смены словами читателя. Конвейер кладёт reason_text; код
   // причины — запас на случай витрины, где текста ещё нет.
   var REASON_WORD = {
-    gate_close: 'ворота закрылись', comp_neg: 'наклон ниже порога в день решения',
-    gate_open: 'ворота открылись', comp_pos: 'наклон выше порога в день решения',
-    entry: 'вход: ворота открыты и наклон за акции',
+    gate_close: 'ворота закрылись', comp_neg: 'оценка рынка ниже порога в день решения',
+    gate_open: 'ворота открылись', comp_pos: 'оценка рынка выше порога в день решения',
+    entry: 'вход: ворота открыты и оценка рынка за акции',
     es_exit: 'доходность годовых ОФЗ резко выросла', es_block: 'ждём, пока доходность годовых ОФЗ успокоится',
     es_clear: 'доходность годовых ОФЗ успокоилась (день решения)'
   };
@@ -377,10 +399,13 @@
     }
     function comp(need) {
       var legs = (sd.legs || []).map(function (l) { return l && l.text; }).filter(Boolean);
+      // note — оговорка конвейера к сдвигам (switch_distance.legs_note, с 20.11.2026):
+      // каждый сдвиг посчитан при неизменных остальных показателях.
       return { k: 'Оценка рынка',
                need: need + ' в день решения' + (p.next_decision ? ' (' + ruDay(p.next_decision) + ')' : ''),
                now: fmtNum(p.comp_daily, 2, true),
-               hint: legs.length ? 'хватило бы одного: ' + legs.join('; ') : null };
+               hint: legs.length ? 'хватило бы одного: ' + legs.join('; ') : null,
+               note: legs.length && sd.legs_note ? String(sd.legs_note) : null };
     }
 
     var rows = [], lead;
@@ -411,13 +436,25 @@
     return { lead: lead, rows: rows };
   }
 
+  /* День решения и день исполнения — одной строкой под условиями (аудит 20.11.2026).
+   * Торгового календаря на странице нет, поэтому дата исполнения не выдумывается:
+   * называется день решения, а исполнение — словами конвейера (position.execute). */
+  function decisionLine(p) {
+    if (!p.next_decision) return null;
+    var wd = weekdayOf(p.next_decision);
+    return 'День решения — ' + ruDay(p.next_decision) + (wd ? ' (' + wd + ')' : '') +
+      '; исполнение — ' + ruText(p.execute || 'на следующем закрытии') + '.';
+  }
+
   function renderSwitch(p, st) {
     var sw = switchRows(p, (st || {}).distances);
+    var when = decisionLine(p);
     if (!sw) {
       var conds = Array.isArray(p.conditions) ? p.conditions.filter(function (c) { return c; }) : [];
-      return conds.length ? h('div', null, [
+      return conds.length ? h('div', { 'class': 'switch' }, [
         h('div', { 'class': 'stat__k', text: 'Что изменит позицию' }),
-        h('ul', { 'class': 'position__cond' }, conds.map(function (c) { return h('li', { text: ruText(c) }); }))
+        h('ul', { 'class': 'position__cond' }, conds.map(function (c) { return h('li', { text: ruText(c) }); })),
+        when ? h('p', { 'class': 'switch__when', text: when }) : null
       ]) : null;
     }
     return h('div', { 'class': 'switch' }, [
@@ -433,25 +470,30 @@
             h('th', { scope: 'row', text: r.k }),
             h('td', null, [
               h('span', { text: r.need }),
-              r.hint ? h('span', { 'class': 'switch__hint', text: ruText(r.hint) }) : null
+              r.hint ? h('span', { 'class': 'switch__hint', text: r.note ? sentence(ruText(r.hint)) : ruText(r.hint) }) : null,
+              r.note ? h('span', { 'class': 'switch__hint', text: sentence(capFirst(ruText(r.note))) }) : null
             ]),
             h('td', { 'class': 'switch__now', text: r.now })
           ]);
         }))
-      ]) : null
+      ]) : null,
+      when ? h('p', { 'class': 'switch__when', text: when }) : null
     ]);
   }
 
-  /* Строка позиции — первая на панели и единственный её итог: ворота ∧ наклон.
+  /* Строка позиции — первая на панели и единственный её итог: ворота и оценка рынка.
    *
    * До аудита 02.09.2026 витрина держала три разных прочтения знака (закрытый
    * месяц, дневной с гистерезисом, дневной без) и ни одного слова «позиция»:
    * читатель собирал решение сам и собирал по-разному (просадка от −26% до −34%
    * в зависимости от прочтения). Теперь позицию считает конвейер (decision.py),
-   * а фронт только показывает: состояние, с какой даты и почему, ставку денег
-   * во флэте, дату следующего решения по наклону и список того, что позицию
-   * сменит. Тон: «акции» — акцент, «деньги» — чернила. НЕ красный и не зелёный:
-   * позиция — не оценка рынка, а место, где стоят деньги.
+   * а фронт только показывает. Тон: «акции» — акцент, «деньги» — чернила. НЕ красный
+   * и не зелёный: позиция — не оценка рынка, а место, где стоят деньги.
+   *
+   * Порядок блока (аудит 20.11.2026): что (позиция) → насколько верить (строка из
+   * трёх чисел: сила сигнала, твёрдость, итог вживую) → почему (плашки «Оценка
+   * рынка» и «Ворота») → что изменит позицию → лента истории. Версия правила и
+   * «смен в год» ушли в лабораторию: на решение дня они не влияют.
    *
    * Старая витрина без verdict.position — законный вход: блок не рисуется. */
   function renderPosition(d) {
@@ -461,19 +503,17 @@
     var reason = p.reason_text || REASON_WORD[p.reason] || '';
     var st = d.states || {};
     var regimeLabel = (v.regime || st.regime || {}).label || '';
-    var thr = isNum(p.comp_threshold) ? p.comp_threshold : 0.2;
 
+    // Сколько платят деньги — строкой под позицией, пока позиция «деньги». Дата — конец
+    // декады ЦБ, ставка которой стоит в расчёте (cash_rate_period, с 20.11.2026).
+    // cash_rate_asof — последний день панели, а не дата ставки: с ним ставка от 10.11
+    // была подписана 19.11. Нет даты ставки — подпись без даты.
+    var cash = !long && isNum(p.cash_rate)
+      ? 'Деньги ≈ ' + fmtNum(p.cash_rate, 1, false) + '% годовых — вклады топ-10' +
+        (p.cash_rate_period ? ' на ' + fmtDay(p.cash_rate_period) : '') + '.'
+      : null;
     var facts = [];
-    if (!long && isNum(p.cash_rate)) {
-      facts.push(stat('Деньги', '≈ ' + fmtNum(p.cash_rate, 1, false) + '% годовых',
-        'вклады топ-10' + (p.cash_rate_asof ? ' на ' + fmtDay(p.cash_rate_asof) : '')));
-    }
-    if (p.next_decision) {
-      var wd = weekdayOf(p.next_decision);
-      facts.push(stat('Следующее решение', ruDay(p.next_decision) + (wd ? ' (' + wd + ')' : ''),
-        'по наклону, порог ±' + fmtNum(thr, 1, false)));
-    }
-    // Ворота и знак решения переехали в плашки «Тормоз» и «Цикл ставки» ниже
+    // Ворота и знак решения живут в плашках «Ворота» и «Оценка рынка» ниже
     // (аудит 10.11.2026, этап 2); на старой витрине без плашек — прежние факты.
     var plaques = renderPlaques(d);
     if (!plaques && (p.gate_open === true || p.gate_open === false)) {
@@ -485,13 +525,330 @@
     }
     if (!plaques && isNum(p.comp_state)) {
       facts.push(stat('Знак решения', COMP_STATE_WORD[String(p.comp_state)] || '—',
-        [isNum(p.comp_daily) ? 'наклон ' + fmtNum(p.comp_daily, 2, true) : null,
+        [isNum(p.comp_daily) ? 'оценка рынка ' + fmtNum(p.comp_daily, 2, true) : null,
          p.comp_state_since ? 'с ' + ruDay(p.comp_state_since) : null].filter(Boolean).join(' · ') || null));
     }
-    if (isNum(p.switches_per_year)) {
-      facts.push(stat('Смен в год', fmtNum(p.switches_per_year, 1, false), 'в среднем за пять лет'));
-    }
 
+    /* Причина в reason — это причина ПОСЛЕДНЕЙ СМЕНЫ, и со временем она перестаёт
+       описывать сегодняшний день. 12.09.2026 строка читалась «деньги с 22.05 ·
+       оценка рынка ушла ниже −0,2», тогда как оценка к тому дню была +0,59 уже два
+       месяца, а позицию держали закрытые ворота. Поэтому к причине смены добавляется
+       то, что держит позицию СЕЙЧАС, и только когда это не одно и то же. */
+    var holds = positionHolds(p);
+    var since = p.since ? 'с ' + fmtDay(p.since) : '';
+    var why = reason ? (since ? ' · ' : '') + ruText(reason) : '';
+    var now = holds ? ((since || why) ? ' · ' : '') + holds : '';
+
+    var jt = journalTables(p);
+    var trust = renderTrust(d, jt);
+    // Нет живого журнала (старая витрина) — строки «вживую» в верхнем ряду нет, и
+    // таблица пересчёта стоит отдельным блоком, как стояла.
+    var journal = jt && !(trust && trust.hasLive) ? h('div', { 'class': 'position__journal' },
+      [h('div', { 'class': 'stat__k', text: 'Что дало правило' })].concat(jt.nodes)) : null;
+
+    return h('div', { 'class': 'position position--' + p.state }, [
+      h('div', { 'class': 'kicker', text: 'Позиция' }),
+      h('div', { 'class': 'position__row' }, [
+        h('span', { 'class': 'position__name', text: 'Позиция: ' + POSITION_WORD[p.state] }),
+        h('span', { 'class': 'position__meta', text: since + why + now })
+      ]),
+      cash ? h('p', { 'class': 'position__cash', text: cash }) : null,
+      trust ? trust.node : null,
+      facts.length ? h('div', { 'class': 'stats stats--cols position__facts' }, facts) : null,
+      plaques,
+      renderSwitch(p, st),
+      renderAgainstLine(d),
+      journal,
+      renderRibbon(d, p)
+    ]);
+  }
+
+  /* Таблицы «что дало правило» (compute/track.py). Сверху — ЖИВОЙ след: что панель
+   * говорила в каждый день (журнал в сторе, записанное не переписывается), окна «с
+   * запуска панели» и «при нынешней версии правила». Ниже — окна «с начала года»,
+   * 12 и 24 месяца: в столбце «Правило» первым стоит то, что панель говорила (до
+   * запуска — пересчёт: windows[].said, с 20.11.2026), пересчёт нынешней версией —
+   * вторым, приглушённым числом. До этого пересчёт стоял там один и читался как
+   * история панели: +14,2% за год на витрине против +11,8% вживую, а окно «с начала
+   * года», где правило проигрывает вкладам, на страницу не выводилось вовсе.
+   * Все числа — накопленный итог за окно, как в контроле лаборатории. Нет said
+   * (старая витрина) — прежняя таблица: пересчёт за 12 и 24 месяца в годовых.
+   * -> {nodes: [...], live} | null */
+  /* Строки таблицы «На истории» из окон журнала.
+   * Есть said хотя бы у одного окна — {said: true}: «с начала года», 12 и 24 месяца,
+   * накопленный итог; rule — что панель говорила (у окна без said — пересчёт), recalc —
+   * пересчёт нынешней версией рядом (null, когда rule и есть пересчёт).
+   * Нет said ни у одного (старая витрина) — {said: false}: прежние две строки, 12 и 24
+   * месяца, пересчёт в годовых. */
+  function journalRows(wins) {
+    var LABEL = { ytd: 'с начала года', m12: '12 мес.', m24: '24 мес.' };
+    var num = function (v) { return typeof v === 'number' && isFinite(v); };
+    var hist = (wins || []).filter(function (w) { return w && LABEL[w.id]; });
+    var said = hist.some(function (w) { return w.said && num(w.said.rule_pct); });
+    if (said) {
+      return { said: true, rows: hist.map(function (w) {
+        var s = w.said && num(w.said.rule_pct) ? w.said : null;
+        return { id: w.id, label: LABEL[w.id], rule: s ? s.rule_pct : w.rule_pct,
+                 recalc: s ? w.rule_pct : null, curve: w.curve_pct, tr: w.tr_pct, cash: w.cash_pct };
+      }) };
+    }
+    var ann = function (w, k) { return num(w[k + '_ann_pct']) ? w[k + '_ann_pct'] : w[k + '_pct']; };
+    return { said: false, rows: hist.filter(function (w) { return w.id !== 'ytd'; }).map(function (w) {
+      return { id: w.id, label: LABEL[w.id], rule: ann(w, 'rule'), recalc: null,
+               curve: ann(w, 'curve'), tr: ann(w, 'tr'), cash: ann(w, 'cash') };
+    }) };
+  }
+
+  function journalTables(p) {
+    var jr = p.journal && typeof p.journal === 'object' ? p.journal : null;
+    if (!jr) return null;
+    var live = jr.live && Array.isArray(jr.live.windows) && jr.live.windows.length ? jr.live : null;
+    var wins = Array.isArray(jr.windows) ? jr.windows : [];
+    if (!live && !wins.length) return null;
+    var pct = function (v) { return isNum(v) ? fmtNum(v, 1, true) + '%' : '—'; };
+    var pctCell = function (v, tone) { return h('td', { 'class': tone ? toneOf(v) : null, text: pct(v) }); };
+    var head = function (first) {
+      return h('thead', null, [h('tr', null, [
+        h('th', { scope: 'col', text: first }), h('th', { scope: 'col', text: 'Правило' }),
+        h('th', { scope: 'col', text: 'Кривая' }), h('th', { scope: 'col', text: 'Акции' }),
+        h('th', { scope: 'col', text: 'Вклады' })
+      ])]);
+    };
+    var nodes = [];
+    if (live) {
+      var liveLabel = function (w) {
+        return w.id === 'launch' ? 'с запуска ' + ruDay(live.launch)
+          : 'версия ' + live.rule_version + ', с ' + ruDay(live.rule_since);
+      };
+      nodes.push(h('div', { 'class': 'tablewrap' }, [
+        h('table', { 'class': 'data' }, [
+          h('caption', { text: 'Вживую: что панель говорила в каждый день' +
+            (live.asof ? ', по ' + fmtDay(live.asof) : '') +
+            '. Кривая — акции, когда 10-летние ОФЗ доходнее 2-летних; акции — с дивидендами.' }),
+          head('Вживую'),
+          h('tbody', null, live.windows.map(function (w) {
+            return h('tr', null, [
+              h('th', { scope: 'row', text: liveLabel(w) }),
+              pctCell(w.rule_pct, true), pctCell(w.curve_pct), pctCell(w.tr_pct), pctCell(w.cash_pct)
+            ]);
+          }))
+        ])
+      ]));
+      var spells = (live.spells || []).filter(function (sp) { return !sp.start; });
+      var spellText = spells.map(function (sp) {
+        var res = isNum(sp.tr_pct) ? (sp.open ? ' — пока ' : ' — ') +
+          (sp.to === 'long' ? 'акции ' + fmtNum(sp.tr_pct, 1, true) + '%, вклады ' + fmtNum(sp.cash_pct, 1, true) + '%'
+                            : 'вклады ' + fmtNum(sp.cash_pct, 1, true) + '%, акции ' + fmtNum(sp.tr_pct, 1, true) + '%') : '';
+        return '«' + (POSITION_WORD[sp.to] || sp.to) + '» ' + ruDay(sp.decided) +
+          (sp.executed ? ', исполнено ' + ruDay(sp.executed) : '') + res;
+      });
+      nodes.push(h('p', { 'class': 'position__note', text:
+        spellText.length ? 'Смены вживую: ' + spellText.join('; ') + '.' : 'Смен вживую не было.' }));
+    }
+    var jrows = journalRows(wins);
+    var hist = jrows.rows;
+    if (hist.length && jrows.said) {
+      nodes.push(h('div', { 'class': 'tablewrap' }, [
+        h('table', { 'class': 'data' }, [
+          h('caption', { text: 'На истории, итог за окно' + (jr.asof ? ' по ' + fmtDay(jr.asof) : '') +
+            '. Правило — что панель говорила, до её запуска — пересчёт; в скобках — пересчёт нынешней версией правила за всё окно.' }),
+          head('На истории'),
+          h('tbody', null, hist.map(function (r) {
+            return h('tr', null, [
+              h('th', { scope: 'row', text: r.label }),
+              h('td', null, [
+                h('span', { 'class': toneOf(r.rule), text: pct(r.rule) }),
+                isNum(r.recalc) ? h('span', { 'class': 'recalc', title: 'Пересчёт нынешней версией правила', text: ' (' + pct(r.recalc) + ')' }) : null
+              ]),
+              pctCell(r.curve), pctCell(r.tr), pctCell(r.cash)
+            ]);
+          }))
+        ])
+      ]));
+    } else {
+      var old = hist;
+      if (old.length) {
+        nodes.push(h('div', { 'class': 'tablewrap' }, [
+          h('table', { 'class': 'data' }, [
+            h('caption', { text: 'Пересчёт нынешней версией правила по истории, на которой его выбирали; годовых.' }),
+            head('На истории'),
+            h('tbody', null, old.map(function (r) {
+              return h('tr', null, [
+                h('th', { scope: 'row', text: r.label }),
+                pctCell(r.rule, true), pctCell(r.curve), pctCell(r.tr), pctCell(r.cash)
+              ]);
+            }))
+          ])
+        ]));
+      }
+    }
+    if (!nodes.length) return null;
+    nodes.push(h('p', { 'class': 'position__note' }, [h('a', { href: 'guide.html#journal', text: 'Как считается' })]));
+    return { nodes: nodes, live: live };
+  }
+
+  /* «Насколько верить» — три числа под заголовком позиции (аудит 20.11.2026): сила
+   * сигнала (verdict.strength), твёрдость (verdict.vote) и итог вживую с запуска
+   * (journal.live). За десять секунд первый экран отвечал «что» и «почему», но не
+   * «насколько верить»: слабый сигнал у порога и сильный выглядели одинаково.
+   *
+   * Каждое число — кнопка; нажатие раскрывает под рядом подробности (таблица зон,
+   * разбивка голосования, таблицы живого следа). Раскрыто не больше одного. Что
+   * раскрыто — состояние чтения: переживает перерисовку панели, но не перезагрузку.
+   * Любого из трёх блоков может не быть (старая витрина, отказ блока) — тогда его
+   * кнопки нет; нет ни одного — нет и ряда. */
+  var trustOpen = null;
+  function renderTrust(d, jt) {
+    var v = d.verdict || {}, p = v.position || {};
+    var items = [];
+
+    var s = v.strength;
+    if (s && typeof s === 'object' && s.label && isNum(s.value)) {
+      items.push({ id: 'strength', k: 'Сила сигнала', v: String(s.label),
+        hint: 'оценка рынка ' + fmtNum(s.value, 2, true), body: function () { return strengthBody(s); } });
+    }
+    var vt = v.vote;
+    if (vt && typeof vt === 'object' && isNum(vt.n_long) && isNum(vt.n_total)) {
+      items.push({ id: 'vote', k: 'Твёрдость', v: 'за акции ' + vt.n_long + ' из ' + vt.n_total,
+        hint: plural(vt.n_total, 'настройки', 'настроек', 'настроек') + ' правила', body: function () { return voteBody(vt); } });
+    }
+    var live = jt && jt.live;
+    var lw = live ? live.windows.filter(function (w) { return w.id === 'launch'; })[0] : null;
+    if (lw && isNum(lw.rule_pct)) {
+      items.push({ id: 'live', k: 'Вживую с запуска ' + ruDay(live.launch),
+        v: 'правило ' + fmtNum(lw.rule_pct, 1, true) + '%',
+        hint: 'вклады ' + fmtNum(lw.cash_pct, 1, true) + '% · акции ' + fmtNum(lw.tr_pct, 1, true) + '%',
+        body: function () { return h('div', { 'class': 'position__journal position__journal--in' }, jt.nodes); } });
+    }
+    if (!items.length) return null;
+    if (trustOpen && !items.some(function (it) { return it.id === trustOpen; })) trustOpen = null;
+
+    var buttons = [], panels = [];
+    function sync() {
+      items.forEach(function (it, i) {
+        var open = trustOpen === it.id;
+        buttons[i].setAttribute('aria-expanded', open ? 'true' : 'false');
+        if (open) panels[i].removeAttribute('hidden'); else panels[i].setAttribute('hidden', '');
+      });
+      // Графики в раскрытой панели только что получили ширину.
+      C.flush();
+    }
+    items.forEach(function (it) {
+      var pid = 'trust-' + it.id;
+      var btn = h('button', { 'class': 'trust__item', type: 'button', 'aria-controls': pid, 'aria-expanded': 'false' }, [
+        h('span', { 'class': 'stat__k', text: it.k }),
+        h('span', { 'class': 'trust__v' + (it.tone ? ' ' + it.tone : ''), text: it.v }),
+        h('span', { 'class': 'trust__hint', text: it.hint }),
+        chevron('chev trust__chev')
+      ]);
+      btn.addEventListener('click', function () {
+        trustOpen = trustOpen === it.id ? null : it.id;
+        sync();
+      });
+      buttons.push(btn);
+      panels.push(h('div', { 'class': 'trust__panel', id: pid, role: 'region', 'aria-label': it.k, hidden: '' }, [it.body()]));
+    });
+    var node = h('div', { 'class': 'trust' }, [h('div', { 'class': 'trust__row trust__row--' + items.length }, buttons)].concat(panels));
+    items.forEach(function (it, i) {
+      if (trustOpen === it.id) { buttons[i].setAttribute('aria-expanded', 'true'); panels[i].removeAttribute('hidden'); }
+    });
+    return { node: node, hasLive: !!lw };
+  }
+
+  /* Сила сигнала: зона оценки рынка и что в ней было на истории (compute/evidence.py).
+   * Простые проценты — как в журнале; текущая зона выделена. */
+  function strengthBody(s) {
+    var zones = Array.isArray(s.zones) ? s.zones : [];
+    return h('div', null, [
+      s.text ? h('p', { 'class': 'trust__lead', text: sentence(ruText(s.text)) }) : null,
+      zones.length ? h('div', { 'class': 'tablewrap tablewrap--tight' }, [
+        h('table', { 'class': 'data' }, [
+          h('caption', { text: 'Акции с дивидендами минус вклады за следующие ' + (s.fwd_sessions || 20) +
+            ' сессий по зонам оценки рынка в день решения' +
+            (s.since ? ', с ' + String(s.since).slice(0, 4) + ' года' : '') +
+            (s.through ? ' по ' + fmtDay(s.through) : '') + '.' }),
+          h('thead', null, [h('tr', null, [
+            h('th', { scope: 'col', text: 'Оценка рынка' }), h('th', { scope: 'col', text: 'В среднем' }),
+            h('th', { scope: 'col', text: 'В плюс' }), h('th', { scope: 'col', text: 'Недель' })
+          ])]),
+          h('tbody', null, zones.map(function (z) {
+            var cur = z.id === s.zone;
+            return h('tr', { 'class': cur ? 'is-current' : null }, [
+              h('th', { scope: 'row' }, [h('span', { text: ruText(z.range_text || z.id) }), cur ? nowMark() : null]),
+              h('td', { 'class': toneOf(z.mean_pct), text: isNum(z.mean_pct) ? fmtNum(z.mean_pct, 1, true) + '%' : '—' }),
+              h('td', { text: share(z.hit) }),
+              h('td', { text: isNum(z.weeks) ? String(z.weeks) : '—' })
+            ]);
+          }))
+        ])
+      ]) : null,
+      h('p', { 'class': 'position__note' }, [
+        document.createTextNode('Сильный сигнал — оценка за пределами ±' + fmtNum(isNum(s.strong_from) ? s.strong_from : 0.5, 1, false) +
+          ', слабый — от ' + fmtNum(isNum(s.weak_from) ? s.weak_from : 0.2, 1, false) + ' по модулю. '),
+        h('a', { href: 'guide.html#strength', text: 'Как читать' })
+      ])
+    ]);
+  }
+
+  /* Твёрдость: сколько из 27 почти равноценных настроек правила сегодня за акции
+   * (compute/evidence.vote). Расхождение большинства с позицией — не сигнал, а мера
+   * того, насколько решение зависит от настройки. */
+  function voteBody(vt) {
+    function group(title, rows, label) {
+      if (!Array.isArray(rows) || !rows.length) return null;
+      return h('div', { 'class': 'vote__g' }, [
+        h('div', { 'class': 'stat__k', text: title }),
+        h('ul', { 'class': 'vote__list' }, rows.map(function (r) {
+          return h('li', null, [
+            h('span', { text: label(r) }),
+            h('span', { 'class': 'vote__n', text: r.n_long + ' из ' + r.n_total })
+          ]);
+        }))
+      ]);
+    }
+    var monthly = (Array.isArray(vt.monthly) ? vt.monthly : []).filter(function (r) { return r && isNum(+r[1]); })
+      .map(function (r) { return [r[0], Math.round(+r[1] * 100)]; });
+    var groups = [
+      group('По измерению нефти', vt.by_oil, function (r) { return ruText(r.label || r.id); }),
+      group('По окну нормировки', vt.by_window, function (r) { return r.months + ' ' + plural(r.months, 'месяц', 'месяца', 'месяцев'); }),
+      group('По порогу решения', vt.by_threshold, function (r) { return '±' + fmtNum(r.threshold, 1, false); })
+    ].filter(Boolean);
+    return h('div', null, [
+      vt.text ? h('p', { 'class': 'trust__lead', text: sentence(ruText(vt.text)) +
+        (vt.agrees === false ? ' Большинство расходится с позицией: решение сегодня зависит от настройки.' : '') }) : null,
+      groups.length ? h('div', { 'class': 'vote' }, groups) : null,
+      monthly.length > 1 ? h('div', { 'class': 'vote__chart' }, [
+        h('div', { 'class': 'stat__k', text: 'Доля настроек за акции' }),
+        C.miniSeries(monthly, { digits: 0, unit: '%', label: 'за акции', color: tok('--accent'), height: 44,
+          aria: 'Доля настроек правила за акции по месяцам' })
+      ]) : null,
+      h('p', { 'class': 'position__note' }, [
+        document.createTextNode('Строка — те настройки из ' + vt.n_total + ', у которых это значение. '),
+        h('a', { href: 'guide.html#vote', text: 'Как читать' })
+      ])
+    ]);
+  }
+
+  /* Лента позиции. Большая лента с 2004 года — ПЕРЕСЧЁТ нынешней версией правила, и
+   * так подписана (аудит 20.11.2026: без пометки она читалась как история панели).
+   * Вживую панель говорит с запуска — это последние три месяца из двадцати трёх лет,
+   * на большой ленте их не разглядеть: там только скобка над хвостом. Поэтому под
+   * ней — тот же отрезок крупно, двумя полосами на общей оси: что панель говорила
+   * (position.said_history) и что даёт пересчёт. Где полосы разного цвета — там
+   * панель вживую говорила иное. */
+  function clipRle(rle, start) {
+    var out = [], state = null;
+    (rle || []).forEach(function (r) {
+      if (!r || r[0] == null) return;
+      if (String(r[0]) <= start) state = +r[1];
+      else out.push([String(r[0]), +r[1]]);
+    });
+    if (state === 0 || state === 1) out.unshift([start, state]);
+    return out;
+  }
+  function renderRibbon(d, p) {
+    if (!Array.isArray(p.history) || !p.history.length) return null;
+    var end = p.decision_day || d.asof_trading_day;
     function sw(cls, bg) {
       var s = h('span', { 'class': 'legend__sw' + (cls ? ' ' + cls : '') });
       if (bg) s.style.background = bg;
@@ -501,124 +858,39 @@
       h('span', { 'class': 'legend__i' }, [sw('legend__sw--accent'), h('span', { text: 'акции' })]),
       h('span', { 'class': 'legend__i' }, [sw(null, 'var(--mid)'), h('span', { text: 'деньги' })])
     ]);
-
-    /* Причина в reason — это причина ПОСЛЕДНЕЙ СМЕНЫ, и со временем она перестаёт
-       описывать сегодняшний день. 12.09.2026 строка читалась «деньги с 22.05 ·
-       оценка рынка ушла ниже −0,2», тогда как оценка к тому дню была +0,59 уже два
-       месяца, а позицию держали закрытые ворота. Рядом, в той же карточке, стояло
-       «Знак решения: + (за акции)» — читатель видел противоречие.
-       Поэтому к причине смены добавляется то, что держит позицию СЕЙЧАС, и только
-       когда это не одно и то же. */
-    var holds = positionHolds(p);
-    var since = p.since ? 'с ' + fmtDay(p.since) : '';
-    var why = reason ? (since ? ' · ' : '') + ruText(reason) : '';
-    var now = holds ? ((since || why) ? ' · ' : '') + holds : '';
-
-    /* Что дало правило (compute/track.py, аудит 10.11.2026). Сверху — ЖИВОЙ след:
-       что панель говорила в каждый день (журнал в сторе, записанное не переписывается),
-       окна «с запуска панели» и «при нынешней версии правила». Ниже, свёрнуто, —
-       пересчёт истории нынешней версией за 12 и 24 месяца: до 10.11.2026 он стоял
-       здесь один, и правка правила 21.10 переписала «хуже вкладов» в «лучше». В обоих
-       — четыре столбца: правило, простая кривая (акции, когда 10-летние ОФЗ доходнее
-       2-летних), акции с дивидендами, вклады. Как считается — в руководстве. */
-    var jr = p.journal && typeof p.journal === 'object' ? p.journal : null;
-    var live = jr && jr.live && Array.isArray(jr.live.windows) && jr.live.windows.length ? jr.live : null;
-    var journal = null;
-    var pctCell = function (v, tone) {
-      return h('td', { 'class': tone ? toneOf(v) : null, text: isNum(v) ? fmtNum(v, 1, true) + '%' : '—' });
-    };
-    var jrHead = function (first) {
-      return h('thead', null, [h('tr', null, [
-        h('th', { scope: 'col', text: first }), h('th', { scope: 'col', text: 'Правило' }),
-        h('th', { scope: 'col', text: 'Кривая' }), h('th', { scope: 'col', text: 'Акции' }),
-        h('th', { scope: 'col', text: 'Вклады' })
-      ])]);
-    };
-    var jrRow = function (label, w, ann) {
-      var g = function (k) { return ann && isNum(w[k + '_ann_pct']) ? w[k + '_ann_pct'] : w[k + '_pct']; };
-      return h('tr', null, [
-        h('th', { scope: 'row', text: label }),
-        pctCell(g('rule'), true), pctCell(g('curve')), pctCell(g('tr')), pctCell(g('cash'))
+    var said = Array.isArray(p.said_history) && p.said_history.length ? p.said_history : null;
+    var launch = said ? String(said[0][0]) : null;
+    var zoom = null;
+    if (said && launch < String(end)) {
+      zoom = h('div', { 'class': 'ribbon__zoom' }, [
+        h('div', { 'class': 'stat__k', text: 'С запуска панели ' + fmtDay(launch) + ' — крупно' }),
+        h('div', { 'class': 'ribbon__pair' }, [
+          h('span', { 'class': 'ribbon__lbl', text: 'панель говорила' }),
+          C.positionRibbon(said, { height: 18, band: 14, axis: false, end: end, aria: 'Что панель говорила вживую с запуска' }),
+          h('span', { 'class': 'ribbon__lbl', text: 'пересчёт' }),
+          C.positionRibbon(clipRle(p.history, launch), { height: 40, band: 14, months: true, end: end,
+            aria: 'Пересчёт нынешней версией правила за то же время' })
+        ])
       ]);
-    };
-    if (jr && (live || (Array.isArray(jr.windows) && jr.windows.length))) {
-      var kids = [h('div', { 'class': 'stat__k', text: 'Что дало правило' })];
-      if (live) {
-        var liveLabel = function (w) {
-          return w.id === 'launch' ? 'с запуска ' + ruDay(live.launch)
-            : 'версия ' + live.rule_version + ', с ' + ruDay(live.rule_since);
-        };
-        kids.push(h('div', { 'class': 'tablewrap' }, [
-          h('table', { 'class': 'data' }, [
-            h('caption', { text: 'Вживую: что панель говорила в каждый день. Кривая — акции, когда 10-летние ОФЗ доходнее 2-летних; акции — с дивидендами.' }),
-            jrHead('Вживую'),
-            h('tbody', null, live.windows.map(function (w) { return jrRow(liveLabel(w), w, false); }))
-          ])
-        ]));
-        var spells = (live.spells || []).filter(function (sp) { return !sp.start; });
-        var spellText = spells.map(function (sp) {
-          var res = isNum(sp.tr_pct) ? (sp.open ? ' — пока ' : ' — ') +
-            (sp.to === 'long' ? 'акции ' + fmtNum(sp.tr_pct, 1, true) + '%, вклады ' + fmtNum(sp.cash_pct, 1, true) + '%'
-                              : 'вклады ' + fmtNum(sp.cash_pct, 1, true) + '%, акции ' + fmtNum(sp.tr_pct, 1, true) + '%') : '';
-          return '«' + (POSITION_WORD[sp.to] || sp.to) + '» ' + ruDay(sp.decided) +
-            (sp.executed ? ', исполнено ' + ruDay(sp.executed) : '') + res;
-        });
-        kids.push(h('p', { 'class': 'position__note' }, [
-          document.createTextNode((spellText.length ? 'Смены вживую: ' + spellText.join('; ') + '. ' : 'Смен вживую не было. ')),
-          h('a', { href: 'guide.html#journal', text: 'Как считается' })
-        ]));
-      }
-      var hist = (jr.windows || []).filter(function (w) { return w.id === 'm12' || w.id === 'm24'; });
-      if (hist.length) {
-        var histTable = h('div', { 'class': 'tablewrap' }, [
-          h('table', { 'class': 'data' }, [
-            h('caption', { text: 'Пересчёт нынешней версией правила по истории, на которой его выбирали; годовых.' }),
-            jrHead('На истории'),
-            h('tbody', null, hist.map(function (w) {
-              return jrRow(w.id === 'm12' ? '12 мес.' : '24 мес.', w, true);
-            }))
-          ])
-        ]);
-        kids.push(live ? h('details', { 'class': 'evt__more journal__hist' }, [
-          h('summary', null, [h('span', { text: 'На истории — пересчёт нынешней версией' }), chevron('chev')]),
-          histTable
-        ]) : histTable);
-      }
-      journal = h('div', { 'class': 'position__journal' }, kids);
     }
-
-    return h('div', { 'class': 'position position--' + p.state }, [
-      h('div', { 'class': 'kicker', text: 'Позиция · итог ворот и наклона' +
-        (isNum(p.rule_version) ? ' · правило, версия ' + p.rule_version + (p.rule_since ? ' от ' + fmtDay(p.rule_since) : '') : '') }),
-      h('div', { 'class': 'position__row' }, [
-        h('span', { 'class': 'position__name', text: 'Позиция: ' + POSITION_WORD[p.state] }),
-        h('span', { 'class': 'position__meta', text: since + why + now })
-      ]),
-      h('div', { 'class': 'position__grid' }, [
-        h('div', null, [
-          facts.length ? h('div', { 'class': 'stats stats--cols' }, facts) : null,
-          h('p', { 'class': 'position__note', text: 'Исполнение — ' + ruText(p.execute || 'на следующем закрытии') +
-            ' после дня решения.' })
-        ]),
-        renderSwitch(p, st)
-      ]),
-      plaques,
-      renderAgainstLine(d),
-      journal,
-      Array.isArray(p.history) && p.history.length ? h('div', { 'class': 'position__ribbon' }, [
-        h('div', { 'class': 'stat__k', text: 'Акции и деньги с 2004 года' }),
-        C.positionRibbon(p.history, { end: p.decision_day || d.asof_trading_day, aria: 'Позиция по правилу панели с 2004 года' }),
-        legend
-      ]) : null
+    return h('div', { 'class': 'position__ribbon' }, [
+      h('div', { 'class': 'stat__k', text: 'Акции и деньги с 2004 года — пересчёт нынешней версией правила' }),
+      C.positionRibbon(p.history, { end: end, mark: launch, aria: 'Позиция по пересчёту нынешней версией правила с 2004 года' }),
+      zoom,
+      legend
     ]);
   }
 
-  /* Две плашки под позицией (аудит 10.11.2026, этап 2): «Цикл ставки» — оценка
-   * рынка, медленная часть решения, и «Тормоз» — ворота. До этого они были слиты в
-   * одну позицию, и не было видно, что именно держит «деньги». В цикле — две строки
-   * прозрачности: что говорит простая кривая и какой показатель держит знак (09.11:
-   * оценка −0,28, без нефти +0,39 — знак держит нефть). Числа считает конвейер
-   * (verdict.position.held_by, curve), фронт только раскладывает. */
+  /* Две плашки под позицией (аудит 10.11.2026, этап 2): «Оценка рынка» — медленная
+   * часть решения, и «Ворота». До этого они были слиты в одну позицию, и не было
+   * видно, что именно держит «деньги». В оценке — строки прозрачности: какой
+   * показатель держит знак (09.11: оценка −0,28, без нефти +0,39 — знак держит нефть),
+   * какой была бы оценка по текущей нефти и что говорит простая кривая. Числа считает
+   * конвейер (verdict.position.held_by, curve), фронт только раскладывает.
+   *
+   * Имя у числа одно — «оценка рынка» (аудит 20.11.2026): до этого −0,25 носило на
+   * двух страницах пять имён — «оценка рынка», «цикл ставки», «наклон», «ядро»,
+   * «композит». «Наклон» остался только именем показателя «наклон кривой ОФЗ». */
   var LEG_SHORT = { usd_mom63: 'Курс доллара', slope_10_2: 'Кривая ОФЗ', urals_rub_gap: 'Нефть в рублях' };
   var LEG_GEN = { usd_mom63: 'него', slope_10_2: 'неё', urals_rub_gap: 'неё' };
 
@@ -682,20 +954,28 @@
     } else if (cs === 1 || cs === -1) {
       lines.push('Знак держат все три показателя вместе: без любого одного он тот же.');
     }
+    // Оценка по текущей нефти (held_by.oil_now, с 20.11.2026): в расчёте стоит средняя
+    // цена прошлого месяца, и к концу месяца она отстаёт от рынка. Текст приходит
+    // готовым и только когда нефть в расчёте старше трёх недель — иначе строки нет.
+    var oilNow = held.oil_now && typeof held.oil_now === 'object' ? held.oil_now.text : null;
+    if (oilNow) lines.push(sentence(ruText(oilNow)));
     var cv = p.curve;
     if (cv && POSITION_WORD[cv.state]) {
       lines.push('Простая кривая: ' + POSITION_WORD[cv.state] + (cv.since ? ' с ' + ruDay(cv.since) : '') +
         (isNum(cv.slope_pp) ? ' (10 лет минус 2 года ' + fmtNum(cv.slope_pp, 2, true) + ' п.п.)' : '') + '.');
     }
+    var thr = isNum(p.comp_threshold) ? p.comp_threshold : 0.2;
     var cycle = h('div', { 'class': 'plaque' }, [
       h('div', { 'class': 'plaque__head' }, [
-        h('span', { 'class': 'kicker', text: 'Цикл ставки · оценка рынка' }), holdsBadge(by === 'comp' || by === 'both')
+        h('span', { 'class': 'kicker', text: 'Оценка рынка' }), holdsBadge(by === 'comp' || by === 'both')
       ]),
       h('div', { 'class': 'plaque__main' }, [
         h('span', { 'class': 'plaque__word', text: csWord }),
-        h('span', { 'class': 'plaque__meta', text: [p.comp_state_since ? 'с ' + ruDay(p.comp_state_since) : null,
-          isNum(p.comp_daily) ? 'оценка ' + fmtNum(p.comp_daily, 2, true) : null].filter(Boolean).join(' · ') })
+        h('span', { 'class': 'plaque__meta', text: [
+          isNum(p.comp_daily) ? fmtNum(p.comp_daily, 2, true) + ' при пороге ±' + fmtNum(thr, 1, false) : null,
+          p.comp_state_since ? 'с ' + ruDay(p.comp_state_since) : null].filter(Boolean).join(' · ') })
       ]),
+      h('div', { 'class': 'plaque__cap', text: 'Вклады показателей; оценка — их среднее' }),
       h('div', { 'class': 'plaque__legs' }, legRows),
       h('ul', { 'class': 'plaque__lines' }, lines.map(function (t) { return h('li', { text: t }); }))
     ]);
@@ -712,7 +992,7 @@
     if ((by === 'gate' || by === 'both') && v.cell_rule) brakeLines.push(ruText(v.cell_rule));
     var brake = h('div', { 'class': 'plaque' }, [
       h('div', { 'class': 'plaque__head' }, [
-        h('span', { 'class': 'kicker', text: 'Тормоз · ворота' }), holdsBadge(by === 'gate' || by === 'both')
+        h('span', { 'class': 'kicker', text: 'Ворота' }), holdsBadge(by === 'gate' || by === 'both')
       ]),
       h('div', { 'class': 'plaque__main' }, [
         h('span', { 'class': 'plaque__word', text: p.gate_open ? 'открыты' : 'закрыты' }),
@@ -730,10 +1010,13 @@
   function againstHist(a) {
     var s = a && a.stats;
     if (!s || !isNum(s.with_fwd)) return '';
+    // «Выше в 9 из 12» здесь больше не печатается (аудит 20.11.2026): доля не отличается
+    // от обычной — рынок через 40 сессий выше в 64% всех дней, — а без этой базы читалась
+    // как свойство эпизодов. Остаётся среднее рядом со средним по всем дням в деньгах.
     return 'С ' + String(a.since || '').slice(0, 4) + ' года ' + s.episodes + ' ' +
       plural(s.episodes, 'эпизод', 'эпизода', 'эпизодов') + '; через ' + a.fwd_sessions +
-      ' сессий рынок был выше в ' + s.higher + ' из ' + s.with_fwd + ', в среднем ' +
-      fmtNum(s.fwd_avg_pct, 1, true) + '% против ' + fmtNum(s.flat_fwd_avg_pct, 1, true) + '% по всем дням в деньгах.';
+      ' сессий рынок в среднем ' + fmtNum(s.fwd_avg_pct, 1, true) + '% против ' +
+      fmtNum(s.flat_fwd_avg_pct, 1, true) + '% по всем дням в деньгах.';
   }
   function renderAgainstLine(d) {
     var a = (d.verdict || {}).against;
@@ -765,7 +1048,7 @@
           h('span', { 'class': 'plaque__word', text: fmtNum(g.value_pp, 1, true) + ' п.п.' }),
           h('span', { 'class': 'plaque__meta', text: (ZONE_WORD[g.zone] || '') + (g.asof ? ' · на ' + fmtDay(g.asof) : '') })
         ]),
-        h('div', { 'class': 'tablewrap' }, [
+        h('div', { 'class': 'tablewrap tablewrap--tight' }, [
           h('table', { 'class': 'data' }, [
             h('caption', { text: 'Акции сверх вкладов за следующий год по зонам спреда, месяцы ' +
               g.since.slice(5, 7) + '.' + g.since.slice(0, 4) + '–' + '11.2025.' }),
@@ -775,7 +1058,7 @@
             ])]),
             h('tbody', null, g.zones.map(function (z) {
               return h('tr', { 'class': z.id === g.zone ? 'is-current' : null }, [
-                h('th', { scope: 'row', text: range[z.id] + (z.id === g.zone ? ' ◂ сейчас' : '') }),
+                h('th', { scope: 'row' }, [h('span', { text: range[z.id] }), z.id === g.zone ? nowMark() : null]),
                 h('td', { 'class': toneOf(z.excess_pct), text: fmtNum(z.excess_pct, 1, true) + '%' }),
                 h('td', { text: share(z.hit) }), h('td', { text: String(z.months) })
               ]);
@@ -816,20 +1099,44 @@
       stat('Вход после дна', isNum(w.rises.entry_days_avg) ? 'через ' + w.rises.entry_days_avg : '—',
         isNum(w.rises.entry_days_avg) ? days(w.rises.entry_days_avg) + '; рынок к этому дню +' + w.rises.missed_pct_avg + '%' : null)
     ]);
+    /* У волны, которую панель прожила вживую (сейчас это текущая), главным стоит то,
+       что панель сделала на самом деле (said_entry_days, said_taken_pct — с 20.11.2026),
+       пересчёт нынешней версией — приглушённо рядом: «взято 30%, вход через 44 дня»
+       пересчётом было «взято 7%, вход через 66 дней» вживую. У прежних волн живого
+       следа нет — там пересчёт и стоит. */
+    var anySaid = false;
+    var entryText = function (n) { return isNum(n) ? 'через ' + n + ' дн.' : 'не вошло'; };
     var rows = (w.last_rises || []).map(function (r) {
+      var lived = 'said_taken_pct' in r && isNum(r.said_taken_pct);
+      if (lived) anySaid = true;
+      var recalc = function (text) {
+        return h('span', { 'class': 'recalc', title: 'Пересчёт нынешней версией правила', text: ' (' + text + ')' });
+      };
+      // Конец открытой волны — последний день разметки (waves.asof): индекс полной
+      // доходности выходит на день позже панели, и «сейчас» было бы на день свежее числа.
+      var to = String((r.open && w.asof) || r.to || '');
       return h('tr', null, [
-        h('th', { scope: 'row', text: ruDay(r.from) + '.' + r.from.slice(2, 4) + ' – ' + (r.open ? 'сейчас' : ruDay(r.to) + '.' + r.to.slice(2, 4)) }),
+        h('th', { scope: 'row' }, [
+          h('span', { text: ruDay(r.from) + '.' + r.from.slice(2, 4) + ' – ' + ruDay(to) + '.' + to.slice(2, 4) }),
+          r.open ? h('span', { 'class': 'wave__open', text: 'идёт' }) : null
+        ]),
         h('td', { 'class': toneOf(r.move_pct), text: fmtNum(r.move_pct, 0, true) + '%' }),
-        h('td', { text: isNum(r.entry_days) ? 'через ' + r.entry_days + ' дн.' : 'не вошло' }),
-        h('td', { text: r.taken_pct + '%' })
+        h('td', null, lived
+          ? [h('span', { text: entryText(r.said_entry_days) }), recalc(entryText(r.entry_days))]
+          : [h('span', { text: entryText(r.entry_days) })]),
+        h('td', null, lived
+          ? [h('span', { text: r.said_taken_pct + '%' }), recalc(r.taken_pct + '%')]
+          : [h('span', { text: r.taken_pct + '%' })])
       ]);
     });
-    return section('Что панель умеет', 'на истории: правило нынешней версии, волны рынка от 20% с ' + fmtMon(w.since), [
+    return section('Что панель умеет', 'пересчёт нынешней версией правила: волны рынка от 20% с ' + fmtMon(w.since) +
+      (w.asof ? ' по ' + fmtDay(w.asof) : ''), [
       h('article', { 'class': 'card' }, [
         head,
         rows.length ? h('div', { 'class': 'tablewrap tablewrap--tight', style: 'margin-top:16px' }, [
           h('table', { 'class': 'data' }, [
-            h('caption', { text: 'Последние волны роста: когда правило вошло после дна и какую долю взяло.' }),
+            h('caption', { text: 'Последние волны роста: когда правило вошло после дна и какую долю взяло.' +
+              (anySaid ? ' У волны, прожитой вживую, первым стоит то, что панель сделала на самом деле, в скобках — пересчёт.' : '') }),
             h('thead', null, [h('tr', null, [
               h('th', { scope: 'col', text: 'Волна' }), h('th', { scope: 'col', text: 'Рынок' }),
               h('th', { scope: 'col', text: 'Вход' }), h('th', { scope: 'col', text: 'Взято' })
@@ -850,38 +1157,49 @@
    * данным до вчерашнего дня, вклады складываются в ход индекса точно. Разрядка как
    * отдельная часть не выделяется: приёмка 10.11.2026 её не пропустила, она внутри
    * «остального». Как считается — в руководстве. */
+  // Окна блока «Что в цене», которые показывает витрина: всё, кроме помеченных show: false.
+  function pricedWindows(q) {
+    return (q && Array.isArray(q.windows) ? q.windows : []).filter(function (w) { return w && w.show !== false; });
+  }
+
   function renderPriced(d) {
     var q = (d.verdict || {}).priced;
     if (!q || !Array.isArray(q.windows) || !q.windows.length) return null;
     var lp = function (v) { return isNum(v) ? fmtNum(v, 1, true) : '—'; };
-    var month = q.windows.filter(function (w) { return w.sessions === 21; })[0];
+    /* Аудит 20.11.2026: окно в пять сессий конвейер помечает show: false (пять точек —
+       не выборка), столбца «Объяснено» нет («объяснено 10%» по пяти точкам — число без
+       смысла: два независимых шума дают в среднем 17%), а строка под таблицей про
+       остаток — слова конвейера (priced.other_note). Раньше фронт сам относил остаток
+       к «новостям о переговорах и санкциях, потокам, дивидендам» — выдавал остаток за
+       знание. Старая витрина без show показывает все окна, без other_note — без строки. */
+    var wins = pricedWindows(q);
+    if (!wins.length) return null;
+    var month = wins.filter(function (w) { return w.sessions === 21; })[0];
     var label = { 5: 'неделя', 21: 'месяц', 63: 'квартал' };
     var det = q.detente === true;
-    var head = ['Окно', 'Индекс', 'Ставки', 'Нефть'].concat(det ? ['Разрядка'] : []).concat(['Остальное', 'Объяснено']);
+    var head = ['Окно', 'Индекс', 'Ставки', 'Нефть'].concat(det ? ['Разрядка'] : []).concat(['Остаток']);
     return section('Что в цене', 'ход индекса по частям; в решение не входит', [
       h('article', { 'class': 'card' }, [
-        month ? h('p', { 'class': 'priced__lead', text: 'За месяц индекс ' + fmtNum(month.index_pct, 1, true) + '% (' +
-          lp(month.index_lp) + ' лог-пункта): ' +
+        month ? h('p', { 'class': 'priced__lead', text: 'За месяц индекс ' + fmtNum(month.index_pct, 1, true) + '%: ' +
           (det ? 'разрядка ' + lp(month.detente_lp) + ', ' : '') + 'ставки ' + lp(month.rates_lp) +
-          ', нефть ' + lp(month.oil_lp) + ', остальное ' + lp(month.other_lp) + '.' }) : null,
+          ', нефть ' + lp(month.oil_lp) + ', остаток ' + lp(month.other_lp) + ' лог-пункта.' }) : null,
         h('div', { 'class': 'tablewrap tablewrap--tight' }, [
           h('table', { 'class': 'data' }, [
-            h('caption', { text: 'Вклады в лог-пунктах; объяснено — доля дневных колебаний, совпавшая с ходом ставок и нефти.' }),
+            h('caption', { text: 'Ход индекса и вклады в него, лог-пункты' + (q.asof ? '; по ' + fmtDay(q.asof) : '') + '.' }),
             h('thead', null, [h('tr', null, head.map(function (t) { return h('th', { scope: 'col', text: t }); }))]),
-            h('tbody', null, q.windows.map(function (w) {
+            h('tbody', null, wins.map(function (w) {
               return h('tr', null, [
                 h('th', { scope: 'row', text: (label[w.sessions] || w.sessions + ' сессий') }),
                 h('td', { 'class': toneOf(w.index_lp), text: lp(w.index_lp) }),
                 h('td', { text: lp(w.rates_lp) }), h('td', { text: lp(w.oil_lp) }),
                 det ? h('td', { text: lp(w.detente_lp) }) : null,
-                h('td', { text: lp(w.other_lp) }),
-                h('td', { text: isNum(w.explained) ? Math.round(w.explained * 100) + '%' : '—' })
+                h('td', { text: lp(w.other_lp) })
               ]);
             }))
           ])
         ]),
         h('p', { 'class': 'card__foot' }, [
-          document.createTextNode('Остальное — новости о переговорах и санкциях, потоки, дивиденды: три показателя оценки рынка их не видят. '),
+          q.other_note ? document.createTextNode(sentence(capFirst(ruText(q.other_note))) + ' ') : null,
           h('a', { href: 'guide.html#priced', text: 'Как считается' })
         ])
       ])
@@ -1024,7 +1342,7 @@
       h('span', { 'class': 'bit__v', text: PHASE[String(cur.rate_phase)] || 'нет данных' })
     ]));
 
-    var kicker = gateSrc ? 'Ворота · читаются ежедневно, с гистерезисом' : 'Ворота риска · что сейчас можно';
+    var kicker = gateSrc ? 'Ворота · флаги читаются ежедневно' : 'Ворота риска · что сейчас можно';
     var regime = v.regime || st.regime || null;
     var rsRaw = regime && regime.id && st.regime_stats && st.regime_stats[regime.id] ? st.regime_stats[regime.id] : null;
     // Две формы блока: вложенная {price:{…}, excess:{…}} (states.py) и плоская
@@ -1113,13 +1431,13 @@
       var holdsNow = positionHolds(p);
       gateNote = 'Позиция — ' + POSITION_WORD[p.state] + (p.since ? ' с ' + fmtDay(p.since) : '') +
         (why ? (holdsNow ? ' (тогда ' + ruText(why) + ')' : ': ' + ruText(why)) : '') +
-        (holdsNow ? '; ' + holdsNow : '') + '. Наклон читается в день решения, ворота — каждый день.';
+        (holdsNow ? '; ' + holdsNow : '') + '. Оценка читается в день решения, ворота — каждый день.';
     }
     var me = core.month_end || {};
     var thr = p && isNum(p.comp_threshold) ? p.comp_threshold : 0.2;
 
     var right = h('div', { 'class': 'hero__gauge' }, [
-      h('div', { 'class': 'kicker', text: 'Наклон · куда смотрит ядро' }),
+      h('div', { 'class': 'kicker', text: 'Оценка рынка · композит ядра' }),
       h('div', { 'class': 'gaugeval' }, [
         h('span', {
           'class': 'gaugeval__n ' + toneOf(core.value),
@@ -1133,16 +1451,16 @@
       // Под шкалой — траектория за два года: одно значение не отвечает на вопрос
       // «композит разворачивается или затухает», а место под шкалой всё равно пустует.
       h('div', { 'class': 'gauge__trail' }, [
-        h('div', { 'class': 'stat__k', text: 'Композит за 24 месяца' }),
+        h('div', { 'class': 'stat__k', text: 'Оценка рынка за 24 месяца · на конец месяца' }),
         C.signedHistory((core.series || []).slice(-24), {
-          height: 84, label: 'композит', aria: 'Композит ядра за последние 24 месяца'
+          height: 84, label: 'оценка', aria: 'Оценка рынка на конец месяца за последние 24 месяца'
         })
       ]),
       h('div', { 'class': 'gauge__meta' }, [
         // Решение по наклону — раз в неделю по ДНЕВНОМУ значению с порогом ±0,2
         // (аудит 02.09.2026, ступень P1): закрытый месяц больше не решает, но
         // остаётся справочной строкой мелко — им сверяют, куда складывается месяц.
-        p ? h('div', { text: 'решение по наклону — по пятницам (последний торговый день недели), порог ±' + fmtNum(thr, 1, false) }) : null,
+        p ? h('div', { text: 'решение по оценке — по пятницам (последний торговый день недели), порог ±' + fmtNum(thr, 1, false) }) : null,
         p && isNum(p.comp_state) ? h('div', { text: 'знак решения: ' + (COMP_STATE_WORD[String(p.comp_state)] || '—') +
           (p.comp_state_since ? ' с ' + fmtDay(p.comp_state_since) : '') +
           (isNum(p.comp_daily) ? ' · дневной ' + fmtNum(p.comp_daily, 2, true) + (p.decision_day ? ' на ' + fmtDay(p.decision_day) : '') : '') }) : null,
@@ -1223,111 +1541,137 @@
 
     var hist = h('article', { 'class': 'card' }, [
       h('div', { 'class': 'card__head' }, [
-        h('h3', { 'class': 'card__title', text: 'Композит с 2004 года' }),
-        h('span', { 'class': 'card__note', text: 'заливка — знак; точки на нуле — смены знака' })
+        h('h3', { 'class': 'card__title', text: 'Оценка рынка с 2004 года · композит ядра' }),
+        h('span', { 'class': 'card__note', text: 'на конец месяца; заливка — знак; точки на нуле — смены знака' })
       ]),
-      C.signedHistory(core.series, { height: 200, label: 'композит', aria: 'Композит ядра' })
+      C.signedHistory(core.series, { height: 200, label: 'оценка', aria: 'Оценка рынка на конец месяца с 2004 года' })
     ]);
 
-    var hl = core.health || {};
-    /* Статусы: ok — весь 95% интервал выше нуля, связь различима (с 03.10.2026; до
-       того хватало IC ≥ 0,05, и карточка горела «связь видна» при IC +0,08 с
-       интервалом от −0,33 до +0,49); warn — на этом окне неотличимо от нуля (при
-       плюсе — нейтрально, при минусе — «связи не видно»; и то и другое НЕ «модель
-       сломана»: при окне 24 месяца интервал ±0,41, а слом быстрее ~5 лет
-       статистически не обнаруживается); review — двенадцать закрытых месяцев
-       подряд ниже нуля, плановая ревалидация состава. Старые витрины присылают
-       dead — читаем его как warn. */
-    var hlNeg = isNum(hl.ic_24m) && hl.ic_24m < 0;
-    var hlWord = { ok: 'связь различима', warn: hlNeg ? 'связи не видно' : 'неотличимо от нуля',
-                   review: 'ревалидация', dead: 'связи не видно' };
-    var hlStatus = hlWord[hl.status] || 'нет данных';
-    var hlKind = { ok: 'good', warn: hlNeg ? 'warn' : 'flat', review: 'crit', dead: 'warn' }[hl.status] || 'flat';
-    var hlIco = ico(hlKind);
-    hlIco.setAttribute('class', 'sig__ico');
-    hlIco.style.color = QUALITY_COLOR[hlKind];
-    var reviewMonths = isNum(hl.review_months) ? hl.review_months : 12;
-    var coversZero = hl.ic_ci95 && isNum(hl.ic_ci95[0]) && hl.ic_ci95[0] < 0 && hl.ic_ci95[1] > 0;
-    var hlFoot;
-    if (hl.review_due || hl.status === 'review') {
-      hlFoot = 'IC ниже нуля ' + (hl.below_zero_months || 0) + ' мес подряд — порог плановой ревалидации состава (' +
-        reviewMonths + ' месяцев, §7) достигнут. Протокол — реколибровка, а не сокращение позиции: на истории такие тревоги ' +
-        'были контрарными (после них умение модели и избыток над деньгами выше среднего).';
-    } else if ((hl.status === 'warn' || hl.status === 'dead') && !hlNeg) {
-      hlFoot = 'IC выше нуля, но интервал его накрывает: на 24 месяцах различима только связь сильнее ' +
-        'примерно ±0,4, а так бывает редко (IC-24 внутри ±0,4 в девяти месяцах истории из десяти). ' +
-        'Это не тревога, а честное «на этом окне информации мало». Ревалидация состава — после ' +
-        reviewMonths + ' месяцев подряд ниже нуля (сейчас ' + (hl.below_zero_months || 0) + ').';
-    } else if (hl.status === 'warn' || hl.status === 'dead') {
-      hlFoot = 'IC ниже нуля' +
-        (coversZero ? ', и доверительный интервал накрывает ноль: на 24 месяцах отличить модель от монетки нечем. ' : '. ') +
-        '«Связи не видно» — не «модель сломана»: слом быстрее пяти лет статистически не обнаруживается. ' +
-        'Ревалидация состава — после ' + reviewMonths + ' месяцев подряд ниже нуля (сейчас ' + (hl.below_zero_months || 0) + '); ' +
-        'до этого состав не меняется.';
-    } else {
-      hlFoot = 'Интервал целиком выше нуля: связь различима даже на коротком окне. Состав ядра фиксирован: ' +
-        'отбор по скользящей результативности проверялся на истории и проиграл.';
-    }
+    return section('Оценка рынка · ядро', 'три показателя и их среднее — композит; знак меняется примерно дважды в год', [
+      h('div', { 'class': 'comps', style: 'margin-bottom:16px' }, cards),
+      hist
+    ]);
+  }
 
-    /* Живой счёт вместо «Здоровья модели» (аудит 10.11.2026, §3.7). Ранговая связь
-       за 24 месяца при интервале ±0,41 не может ни подтвердить модель, ни забраковать
-       её; на вопрос «работает ли правило» отвечает живой счёт против вкладов и
-       простой кривой. Контрольная сверка — через 12 месяцев живого счёта: не обыграла
-       кривую — заменить ею (итог аудита, FINAL.md). Ранговая связь, её расчёт и события
-       остаются — свёрнуты ниже. */
-    var pj = ((d.verdict || {}).position || {}).journal || {};
+  /* Контроль в деньгах (verdict.control, compute/evidence.py; аудит 20.11.2026).
+   *
+   * Стоит на месте карточки «здоровье модели». Тот прибор мерил ранговую связь оценки с
+   * рынком за 24 месяца: при таком окне статус «в порядке» требует связи выше 0,41, а
+   * у самой модели на всей истории она 0,13 — исправная модель показывала «в порядке»
+   * в 7% месяцев, и отличить её от сломанной прибор не мог. На вопрос «работает ли
+   * правило» отвечает счёт в деньгах: правило против вкладов за 12, 24 и 36 месяцев и
+   * как часто такое отставание бывало на истории. Статус: ok — не хуже вкладов; lag —
+   * хуже, но в пределах истории; beyond — хуже худшего на истории, повод пересматривать
+   * правило. Отставание от акций на статус не влияет.
+   *
+   * Ранговая связь осталась свёрнутой строкой внизу — числом, без статуса и без цвета.
+   * Сюда же переехали с главной версия правила и «смен в год», а рядом стоит живой счёт
+   * с запуска (сверка с простой кривой через 12 месяцев — итог аудита 10.11.2026).
+   * Нет verdict.control (старая витрина) — карточка называется «Живой счёт правила». */
+  var CONTROL_WORD = { ok: 'в пределах истории', lag: 'хуже вкладов, в пределах истории', beyond: 'за пределами истории' };
+  var CONTROL_KIND = { ok: 'good', lag: 'warn', beyond: 'crit' };
+
+  function renderControl(d) {
+    var v = d.verdict || {}, p = v.position || {}, core = d.core || {};
+    var c = v.control && Array.isArray(v.control.windows) && v.control.windows.length ? v.control : null;
+    var hl = core.health || {};
+    var pj = p.journal || {};
     var lv = pj.live && Array.isArray(pj.live.windows) ? pj.live : null;
     var lw = lv ? lv.windows.filter(function (w) { return w.id === 'launch'; })[0] : null;
-    var vw = lv ? lv.windows.filter(function (w) { return w.id === 'version'; })[0] : null;
-    var pp = function (v) { return isNum(v) ? fmtNum(v, 1, true) + ' п.п.' : '—'; };
-    var checkDay = lv && lv.launch ? (Number(lv.launch.slice(0, 4)) + 1) + lv.launch.slice(4) : null;
-    var score = lw ? h('div', { 'class': 'health' }, [
-      stat('Сверх вкладов', pp(lw.excess_pp), 'с запуска ' + ruDay(lv.launch), toneOf(lw.excess_pp)),
-      stat('Против кривой', pp(lw.vs_curve_pp), 'та же мера, кривая без подбора', toneOf(lw.vs_curve_pp)),
-      vw ? stat('Версия ' + lv.rule_version, pp(vw.excess_pp), 'сверх вкладов с ' + ruDay(lv.rule_since), toneOf(vw.excess_pp)) : null,
-      stat('Дней вживую', isNum(lw.days) ? String(lw.days) : '—', checkDay ? 'сверка ' + fmtDay(checkDay) : null)
-    ]) : h('p', { 'class': 'empty', text: 'Живой журнал ещё не заведён' });
+    var hasIc = isNum(hl.ic_24m);
+    if (!c && !lw && !hasIc && !isNum(p.rule_version)) return null;
+    var pct = function (x) { return isNum(x) ? fmtNum(x, 1, true) + '%' : '—'; };
+    var pp = function (x) { return isNum(x) ? fmtNum(x, 1, true) + ' п.п.' : '—'; };
+    var kids = [];
 
-    var health = h('article', { 'class': 'card' }, [
-      h('div', { 'class': 'card__head' }, [
+    if (c) {
+      var kind = CONTROL_KIND[c.status] || 'flat';
+      var sIco = ico(kind, 'sig__ico');
+      sIco.style.color = QUALITY_COLOR[kind];
+      kids.push(h('div', { 'class': 'card__head' }, [
+        h('h3', { 'class': 'card__title', text: 'Контроль в деньгах' }),
+        h('span', { 'class': 'control__status' }, [sIco, h('span', { text: CONTROL_WORD[c.status] || 'статус не определён' })]),
+        h('span', { 'class': 'card__note', text: 'правило против вкладов' + (c.asof ? ' по ' + fmtDay(c.asof) : '') })
+      ]));
+      var lines = c.windows.map(function (w) { return w && w.text; }).filter(Boolean);
+      if (lines.length) {
+        kids.push(h('ul', { 'class': 'position__cond control__lines' }, lines.map(function (t) {
+          return h('li', { text: sentence(ruText(t)) });
+        })));
+      }
+      var saidRule = c.rule !== 'recalc';
+      // На телефоне таблицы нет: семь колонок в 326 пикселей не помещаются, а строки выше
+      // несут те же числа словами (styles.css, .control__table).
+      kids.push(h('div', { 'class': 'tablewrap control__table', style: 'margin-top:14px' }, [
+        h('table', { 'class': 'data' }, [
+          h('caption', { text: (saidRule
+            ? 'Правило — что панель говорила, до её запуска — пересчёт; в скобках — пересчёт нынешней версией за всё окно. '
+            : 'Правило — пересчёт нынешней версией. ') +
+            'Справа — норма: в какой доле окон той же длины' + (c.since ? ' с ' + String(c.since).slice(0, 4) + ' года' : '') +
+            ' правило было хуже вкладов и самое большое такое отставание.' }),
+          h('thead', null, [h('tr', null, [
+            h('th', { scope: 'col', text: 'Окно' }), h('th', { scope: 'col', text: 'Правило' }),
+            h('th', { scope: 'col', text: 'Вклады' }), h('th', { scope: 'col', text: 'Акции' }),
+            h('th', { scope: 'col', text: 'К вкладам' }), h('th', { scope: 'col', text: 'Хуже вкладов бывало' }),
+            h('th', { scope: 'col', text: 'Худшее' })
+          ])]),
+          h('tbody', null, c.windows.map(function (w) {
+            var n = w.norm && w.norm.cash ? w.norm.cash : null;
+            var worst = n ? (isNum(n.worst_prior_pp) ? n.worst_prior_pp : n.worst_pp) : null;
+            return h('tr', null, [
+              h('th', { scope: 'row', text: w.label || (w.months + ' мес.') }),
+              h('td', null, [
+                h('span', { text: pct(w.rule_pct) }),
+                saidRule && isNum(w.rule_recalc_pct) ? h('span', { 'class': 'recalc', title: 'Пересчёт нынешней версией правила',
+                  text: ' (' + pct(w.rule_recalc_pct) + ')' }) : null
+              ]),
+              h('td', { text: pct(w.cash_pct) }), h('td', { text: pct(w.tr_pct) }),
+              h('td', { 'class': toneOf(w.vs_cash_pp), text: pp(w.vs_cash_pp) }),
+              h('td', { text: n && isNum(n.worse_share) ? 'в ' + Math.round(n.worse_share * 100) + '% окон' : '—' }),
+              h('td', { text: pp(worst) })
+            ]);
+          }))
+        ])
+      ]));
+    } else {
+      kids.push(h('div', { 'class': 'card__head' }, [
         h('h3', { 'class': 'card__title', text: 'Живой счёт правила' }),
         h('span', { 'class': 'card__note', text: 'правило против вкладов и простой кривой; через 12 месяцев — сверка' })
-      ]),
-      score,
-      h('div', { 'class': 'stat__k', style: 'margin-top:18px', text: 'Ранговая связь с рынком за 24 месяца' }),
-      h('div', { 'class': 'journal__hist' }, [
-      h('div', { 'class': 'health' }, [
-        /* Интервал ПОД самим числом, а не в примечании: при окне 24 месяца он
-           шириной около ±0,41, то есть шире любого значения, какое здесь может
-           стоять. Без него «−0,08» читается как приговор модели, тогда как это
-           «информации нет» — отчёт реколибровки печатает интервал давно, а живая
-           карточка не печатала (оплачено тревогой 01.09.2026). */
-        stat('IC 24 мес', fmtNum(hl.ic_24m, 2, true),
-          (hl.ic_ci95 && isNum(hl.ic_ci95[0]))
-            ? '95% интервал ' + fmtNum(hl.ic_ci95[0], 2, true) + '…' + fmtNum(hl.ic_ci95[1], 2, true)
-            : null,
-          toneOf(hl.ic_24m)),
-        stat('Наблюдений', isNum(hl.n) ? String(hl.n) : '—'),
-        isNum(hl.below_zero_months) ? stat('Ниже нуля подряд',
-          hl.below_zero_months + ' мес',
-          'порог ревалидации — ' + reviewMonths,
-          hl.review_due ? 'tone-neg' : 'tone-mut') : null,
-        h('div', null, [
-          h('div', { 'class': 'stat__k', text: 'Статус' }),
-          h('div', { 'class': 'sig__verdict', style: 'margin-top:2px' }, [hlIco, h('span', { text: hlStatus })])
-        ])
-      ]),
-      hl.series ? C.miniSeries(hl.series, {
-        height: 44, zero: true, digits: 2, label: 'IC',
-        color: tok('--ink-3'), aria: 'Скользящий IC модели по месяцам'
-      }) : null,
-      h('p', { 'class': 'card__foot', text: hlFoot })
-      ])
-    ]);
+      ]));
+    }
 
-    return section('Ядро', 'Слой 1 · медленный композит, меняет знак примерно дважды в год', [
-      h('div', { 'class': 'comps', style: 'margin-bottom:16px' }, cards),
-      h('div', { 'class': 'grid', style: 'grid-template-columns:1fr' }, [hist, health])
+    var vw = lv ? lv.windows.filter(function (w) { return w.id === 'version'; })[0] : null;
+    var checkDay = lv && lv.launch ? (Number(lv.launch.slice(0, 4)) + 1) + lv.launch.slice(4) : null;
+    var facts = [
+      isNum(p.rule_version) ? stat('Версия правила', String(p.rule_version), p.rule_since ? 'с ' + fmtDay(p.rule_since) : null) : null,
+      isNum(p.switches_per_year) ? stat('Смен в год', fmtNum(p.switches_per_year, 1, false), 'в среднем за пять лет') : null,
+      lw ? stat('Вживую сверх вкладов', pp(lw.excess_pp), 'с запуска ' + ruDay(lv.launch), toneOf(lw.excess_pp)) : null,
+      lw ? stat('Вживую против кривой', pp(lw.vs_curve_pp), 'та же мера, кривая без подбора', toneOf(lw.vs_curve_pp)) : null,
+      vw ? stat('Версия ' + lv.rule_version + ' сверх вкладов', pp(vw.excess_pp), 'с ' + ruDay(lv.rule_since), toneOf(vw.excess_pp)) : null,
+      lw ? stat('Дней вживую', isNum(lw.days) ? String(lw.days) : '—', checkDay ? 'сверка с кривой ' + fmtDay(checkDay) : null) : null
+    ].filter(Boolean);
+    if (facts.length) kids.push(h('div', { 'class': 'stats stats--cols control__facts' }, facts));
+
+    if (hasIc) {
+      var ci = hl.ic_ci95 && isNum(hl.ic_ci95[0]) && isNum(hl.ic_ci95[1]) ? hl.ic_ci95 : null;
+      kids.push(h('details', { 'class': 'evt__more control__ic' }, [
+        h('summary', null, [
+          h('span', { text: 'Ранговая связь оценки с рынком за 24 месяца: ' + fmtNum(hl.ic_24m, 2, true) }),
+          chevron('chev')
+        ]),
+        h('p', { 'class': 'card__foot', text:
+          (ci ? '95% интервал ' + fmtNum(ci[0], 2, true) + '…' + fmtNum(ci[1], 2, true) + '. ' : '') +
+          (isNum(hl.n) ? 'Наблюдений ' + hl.n + '. ' : '') +
+          'На таком окне это число не отличает работающую модель от сломанной; работает ли правило, показывает контроль в деньгах.' }),
+        hl.series ? C.miniSeries(hl.series, {
+          height: 44, zero: true, digits: 2, label: 'связь',
+          color: tok('--ink-3'), aria: 'Ранговая связь оценки с рынком за 24 месяца, по месяцам'
+        }) : null,
+        h('p', { 'class': 'card__foot' }, [h('a', { href: 'guide.html#health', text: 'Почему так' })])
+      ]));
+    }
+    return section('Контроль правила', 'работает ли оно: счёт в деньгах, а не статистика связи', [
+      h('article', { 'class': 'card' }, kids)
     ]);
   }
 
@@ -1439,7 +1783,7 @@
     // Расстояние до переключения живёт на главной, в «Контексте рынка» (10.11.2026):
     // карточка сигналов осталась одна и стоит во всю ширину, а сами сигналы на
     // широком экране — в две колонки, как стояли в половине ряда.
-    return section('Машина состояний', 'Слой 2 · лента ячеек, сигналы второго ряда и восемь сочетаний', [
+    return section('Признаки рынка · машина состояний', 'лента ячеек, сигналы второго ряда и восемь сочетаний', [
       ribbon,
       // В решение не входят (аудит 10.11.2026): «за лонг» у трёх из четырёх при
       // позиции «деньги» читалось как спор с позицией — поэтому свёрнуто.
@@ -1455,8 +1799,10 @@
     ]);
   }
 
-  /* Расстояние до переключения — на главной, в «Контексте рынка»: в решение не входит
-   * само, но показывает, насколько близко каждый флаг ворот к смене. Считается от ТОГО
+  /* Пороги флагов ворот — на главной, в «Контексте рынка». До 20.11.2026 блок назывался
+   * «Расстояние до переключения» и читался как расстояние до смены ПОЗИЦИИ; на деле это
+   * пороги трёх флагов, а позицию меняют только все три вместе (и оценка рынка — её
+   * порог стоит в «Что изменит позицию»). Считается от ТОГО
    * порога, который сработает следующим: у включённого бита это порог выключения (вола —
    * тот же p80, RGBI −3%, тренд −2% от MA200), у выключенного — порог включения. Витрина
    * без гистерезиса (старый data.json) присылает один порог — берём его. На широком
@@ -1485,8 +1831,8 @@
     });
     return h('article', { 'class': 'card' }, [
       h('div', { 'class': 'card__head' }, [
-        h('h3', { 'class': 'card__title', text: 'Расстояние до переключения' }),
-        gateSrc === st.gate ? h('span', { 'class': 'card__note', text: 'до порога, который сработает следующим' }) : null
+        h('h3', { 'class': 'card__title', text: 'Флаги ворот: расстояние до порога' }),
+        gateSrc === st.gate ? h('span', { 'class': 'card__note', text: 'до порога, который сработает следующим; ворота закрывают только три флага вместе' }) : null
       ]),
       dists.length ? h('div', { 'class': 'dists' }, dists) : h('p', { 'class': 'empty', text: 'Расстояния ещё не рассчитаны' })
     ]);
@@ -1494,12 +1840,24 @@
 
   /* ───────────────────────────────────────────────────── мониторы */
 
-  function tileBody(m) {
+  /* compact — тайл свёрнут в строку, и крупное число уже стоит в ней (tileKey): в
+   * раскрытой части оно не повторяется. Тексты пяти тайлов, которые меняются на
+   * стороне данных (ВДО, аукционы ОФЗ, Polymarket, дивиденды, заседание ЦБ), фронт не
+   * сочиняет: печатается заголовок конвейера (headline). */
+  function tileBody(m, compact) {
     var p = m.payload || {};
     var out = [];
-    function num(v, digits, unit, sign) {
-      return h('div', { 'class': 'tile__num ' + (sign ? toneOf(v) : ''), text: fmtNum(v, digits, sign) + (unit || '') });
+    function num(v, digits, unit, sign, plain) {
+      if (compact || !isNum(v)) return null;
+      return h('div', { 'class': 'tile__num ' + (sign && !plain ? toneOf(v) : ''), text: fmtNum(v, digits, sign) + (unit || '') });
     }
+    function headline() {
+      var t = ruText(m.headline);
+      return t ? h('div', { 'class': 'tile__headline', text: t }) : null;
+    }
+    // Ряд графика: новый ряд той же величины, что крупное число (с 20.11.2026), а при
+    // его отсутствии — прежний ряд с прежней подписью.
+    function pick(key) { return Array.isArray(p[key]) && p[key].length > 1 ? p[key] : null; }
     switch (m.id) {
       case 'expectations':
         // Крупно — спред годовой ОФЗ к ключу: это и есть «сколько смягчения в
@@ -1562,12 +1920,16 @@
           : 'Большой ротации ещё не случалось' }));
         break;
       case 'deposit_spread':
-        out.push(num(p.spread_pp, 1, ' п.п.', true));
+        // Спред — уровень, а не оценка «за» или «против»: число набрано чернилами, как в
+        // карточке «Дивиденды минус вклад» (до 20.11.2026 одно и то же −4,6 п.п. стояло
+        // на двух страницах чёрным, красным и синим).
+        out.push(num(p.spread_pp, 1, ' п.п.', true, true));
         // Обе доходности — с одним знаком после запятой: их тут же вычитают друг
         // из друга, и «12,85% против 8,5%» читалось как небрежность в паре чисел,
         // из которых собран спред строкой выше.
-        out.push(h('div', { 'class': 'tile__sub', text: 'Вклады ' + fmtNum(p.deposit_pct, 1, false) + '% против дивидендов ' + fmtNum(p.dy_trail_pct, 1, false) + '%' }));
-        if (p.series) out.push(C.miniSeries(p.series, { digits: 1, zero: true, label: 'спред', unit: ' п.п.', color: tok('--s1') }));
+        out.push(h('div', { 'class': 'tile__sub', text: 'Дивиденды ' + fmtNum(p.dy_trail_pct, 1, false) + '% минус вклады ' + fmtNum(p.deposit_pct, 1, false) + '%' }));
+        if (pick('spread_series')) out.push(C.miniSeries(p.spread_series, { digits: 1, zero: true, label: 'спред', unit: ' п.п.', color: tok('--s1') }));
+        else if (p.series) out.push(C.miniSeries(p.series, { digits: 1, label: 'ставка вкладов', unit: '%', color: tok('--s1') }));
         break;
       case 'cb_meeting':
         if (!isNum(p.days_left)) {
@@ -1578,8 +1940,7 @@
           break;
         }
         out.push(num(p.days_left, 0, ' дн.'));
-        out.push(h('div', { 'class': 'tile__sub', text: 'до заседания ' + fmtDay(p.next_meeting) + '; ключевая ' + fmtNum(p.key_rate, 2, false) + '%' +
-          (isNum(p.consensus) ? ', консенсус ' + fmtNum(p.consensus, 2, false) + '%' : ', консенсус не внесён') }));
+        out.push(headline());
         // Недельная инфляция переехала сюда одной строкой: отдельный тайл снят
         // аудитом 02.09.2026 (для акций предиктивности нет, для ожиданий по
         // ставке — контекст). Имя поля выбирает конвейер: печатаем любое
@@ -1590,12 +1951,9 @@
         break;
       case 'polymarket':
         out.push(num(p.prob_pct, 0, '%'));
-        /* Горизонт печатается рядом с числом, а не только в примечании:
-           вероятность «до даты» тем ниже, чем ближе дата, и без срока 2% по
-           августовскому контракту и 24% по декабрьскому читаются как
-           противоречие, хотя это один рынок в один день. */
-        out.push(h('div', { 'class': 'tile__sub', text: (isNum(p.chg_7d_pp) ? fmtNum(p.chg_7d_pp, 1, true) + ' п.п. за неделю. ' : '') +
-          (isNum(p.horizon_days) ? 'горизонт ' + p.horizon_days + ' дн. · ' : '') + (p.question || '') }));
+        // Срок контракта стоит в заголовке конвейера («Соглашение до 31.12.2026: …»):
+        // вероятность «до даты» без даты не читается.
+        out.push(headline());
         if (p.series) out.push(C.miniSeries(p.series, { digits: 0, unit: '%', label: 'вероятность', color: tok('--s2') }));
         break;
       case 'futoi':
@@ -1609,7 +1967,8 @@
           // holders_* — число ЛИЦ (unit=persons), а не контракты: «лонгов 70 000»
           // рядом с z нетто-позиции читалось как объём длинных позиций.
           '; держателей лонга ' + fmtNum(p.holders_long, 0, false) + ', шорта ' + fmtNum(p.holders_short, 0, false) }));
-        if (p.series) out.push(C.miniSeries(p.series, { digits: 2, zero: true, label: 'нетто/брутто', color: tok('--s3') }));
+        if (pick('z120_series')) out.push(C.miniSeries(p.z120_series, { digits: 2, zero: true, label: 'z за 120 дней', color: tok('--s3') }));
+        else if (p.series) out.push(C.miniSeries(p.series, { digits: 2, zero: true, label: 'нетто/брутто', color: tok('--s3') }));
         break;
       case 'rub_barrel':
         out.push(num(p.tax_barrel_rub, 0, ' ₽'));
@@ -1631,7 +1990,7 @@
         break;
       case 'hy_spread':
         out.push(num(p.spread_pp, 1, ' п.п.'));
-        out.push(h('div', { 'class': 'tile__sub', text: 'ВДО ' + fmtNum(p.hy_yield, 1, false) + '% к ' + (p.base_label || 'ОФЗ') }));
+        out.push(headline());
         if (p.series) out.push(C.miniSeries(p.series, { digits: 1, label: 'спред', unit: ' п.п.', color: tok('--s2') }));
         break;
       case 'rvi':
@@ -1641,8 +2000,9 @@
         break;
       case 'mcxsm':
         out.push(num(p.rs_63d_pct, 1, '%', true));
-        out.push(h('div', { 'class': 'tile__sub', text: 'малые каппы против индекса за 63 дня' }));
-        if (p.series) out.push(C.miniSeries(p.series, { digits: 2, label: 'отношение', color: tok('--s3') }));
+        out.push(h('div', { 'class': 'tile__sub', text: 'малые компании к индексу за 63 дня' }));
+        if (pick('rs63_series')) out.push(C.miniSeries(p.rs63_series, { digits: 1, zero: true, label: 'к индексу за 63 дня', unit: '%', color: tok('--s3') }));
+        else if (p.series) out.push(C.miniSeries(p.series, { digits: 2, label: 'отношение индексов', color: tok('--s3') }));
         break;
       case 'cpi_weekly':
         out.push(num(p.last_pct, 2, '%', true));
@@ -1652,12 +2012,15 @@
       case 'ofz_auctions':
         // Провал аукциона — это не «разместили ноль»: крупное «0,0 млрд ₽» ничем
         // не отличалось от состоявшегося размещения на нулевую сумму. Пишем словом.
-        if (p.failed) {
-          out.push(h('div', { 'class': 'tile__headline', text: 'аукцион ' + fmtDay(p.date) + ' не состоялся' }));
-        } else {
-          out.push(num(p.placed_bn, 1, ' млрд ₽'));
-          out.push(h('div', { 'class': 'tile__sub', text: 'спрос ' + fmtNum(p.demand_bn, 1, false) +
-            ' млрд, bid-to-cover ' + fmtNum(p.bid_to_cover, 2, false) }));
+        if (!p.failed) out.push(num(p.placed_bn, 1, ' млрд ₽'));
+        out.push(headline());
+        // Спрос и его отношение к размещению печатаются, только когда они есть: биржа
+        // спрос не раскрывает, и строка «спрос — млрд, bid-to-cover —» была пустой.
+        if (isNum(p.demand_bn) || isNum(p.bid_to_cover)) {
+          out.push(h('div', { 'class': 'tile__sub', text: [
+            isNum(p.demand_bn) ? 'спрос ' + fmtNum(p.demand_bn, 1, false) + ' млрд ₽' : null,
+            isNum(p.bid_to_cover) ? 'спрос к размещению ' + fmtNum(p.bid_to_cover, 2, false) : null
+          ].filter(Boolean).join(', ') }));
         }
         break;
       case 'sep_node':
@@ -1669,9 +2032,13 @@
         // 41,9 млн открытых счетов и 3,0 млн торгующих это разные величины,
         // и крупная цифра «41,9 млн» читалась бы как число участников рынка.
         out.push(num(p.share_equity_pct, 0, '%'));
-        out.push(h('div', { 'class': 'tile__sub', text: 'оборота акций за физлицами; активны ' +
-          fmtNum(p.active_mln, 1, false) + ' из ' + fmtNum(p.clients_total_mln, 1, false) + ' млн счетов' +
-          (isNum(p.inflow_equity_bln) ? '; в акции ' + fmtNum(p.inflow_equity_bln, 1, true) + ' млрд ₽' : '') }));
+        // Каждый кусок подписи — только при своём числе: без общего числа счетов строка
+        // читалась «активны 3,0 из — млн счетов».
+        out.push(h('div', { 'class': 'tile__sub', text: ['оборота акций за физлицами',
+          isNum(p.active_mln) ? 'активны ' + fmtNum(p.active_mln, 1, false) +
+            (isNum(p.clients_total_mln) ? ' из ' + fmtNum(p.clients_total_mln, 1, false) : '') + ' млн счетов' : null,
+          isNum(p.inflow_equity_bln) ? 'в акции ' + fmtNum(p.inflow_equity_bln, 1, true) + ' млрд ₽' : null
+        ].filter(Boolean).join('; ') }));
         if (p.portfolio && p.portfolio.length) {
           out.push(h('div', { 'class': 'tile__sub', text: 'народный портфель: ' +
             p.portfolio.slice(0, 3).map(function (x) {
@@ -1685,10 +2052,39 @@
         // это шум, поэтому пустой заголовок при status=missing не печатаем.
         if (m.status !== 'missing') out.push(h('div', { 'class': 'tile__headline', text: ruText(m.headline) || 'нет данных' }));
     }
+    out = out.filter(Boolean);
     if (!out.length && m.status !== 'missing') {
       out.push(h('div', { 'class': 'tile__headline', text: ruText(m.headline) || 'нет данных' }));
     }
     return out;
+  }
+
+  /* Главное число тайла для свёрнутой строки «название — число — дата». Только числа
+   * из payload с единицей; слов фронт не добавляет. Нет числа (новый тайл, поле
+   * переименовано на стороне данных) — в строке его просто нет, заголовок конвейера
+   * остаётся в раскрытой части. */
+  function tileKey(m) {
+    var p = m.payload || {};
+    var f = function (v, digits, unit, sign) { return isNum(v) ? fmtNum(v, digits, sign) + (unit || '') : null; };
+    switch (m.id) {
+      case 'expectations': return f(isNum(p.spread_y1_key_pp) ? p.spread_y1_key_pp : p.y1_minus_key, 2, ' п.п.', true);
+      case 'cb_meeting': return f(p.days_left, 0, ' дн.');
+      case 'orfr': return f((p.last || {}).fiz, 1, ' млрд ₽', true);
+      case 'futoi': return f(p.z120, 2, '', true);
+      case 'hy_spread': return f(p.spread_pp, 1, ' п.п.');
+      case 'rub_barrel': return f(p.tax_barrel_rub, 0, ' ₽');
+      case 'deposit_spread': return f(p.spread_pp, 1, ' п.п.', true);
+      case 'dividends': return f(p.sum_90d_bn, 0, ' млрд ₽');
+      case 'ofz_auctions': return p.failed ? 'не состоялся' : f(p.placed_bn, 1, ' млрд ₽');
+      case 'rvi': return f(p.rvi, 1, '');
+      case 'breadth': return f(p.pct_above_ma200, 0, '%');
+      case 'polymarket': return f(p.prob_pct, 0, '%');
+      case 'sep_node': return p.active ? 'идёт' : f(p.days_to_start, 0, ' дн.');
+      case 'lqdt': return f(p.aum, 0, ' млрд ₽');
+      case 'mcxsm': return f(p.rs_63d_pct, 1, '%', true);
+      case 'retail': return f(p.share_equity_pct, 0, '%');
+      default: return null;
+    }
   }
 
   // Поля payload, в которых у тайлов лежит настоящая дата данных: нужны, когда
@@ -1734,7 +2130,9 @@
     return 'данные: ' + (asof.length > 7 ? fmtDay(asof) : fmtMon(asof + '-01'));
   }
 
-  function monitorTiles(d) {
+  /* Тайл развёрнутой карточкой — как было до 20.11.2026. Остался для режима «Таблица»:
+   * там всё стоит целиком, без нажатий, для чтения и проверки. */
+  function monitorCards(d) {
     return (d.monitors || []).map(function (m) {
       var body = tileBody(m);
       var note = ruText(trimNote(m.note));
@@ -1750,16 +2148,108 @@
     });
   }
 
+  /* Мониторы строками (аудит 20.11.2026). Шестнадцать тайлов занимали 987 слов из
+   * 2 437 на главной и ни одно из них не влияет на решение. Теперь каждый — строка
+   * «название — число — дата данных» со значком доказательности; полный текст и
+   * график раскрываются на месте по нажатию. Раскрытие — родной details/summary:
+   * клавиатура (Tab, Enter, пробел) и скринридер работают без скрипта. Какие строки
+   * раскрыты, панель помнит на этом устройстве.
+   *
+   * Отставший монитор помечается здесь же, словом и точкой: плашки на всю страницу
+   * из-за ряда, который в решение не входит, больше нет (renderBanners). */
+  var TILES_KEY = 'moex-radar-tiles';
+  var tilesOpen = null;
+  function tilesOpenSet() {
+    if (tilesOpen) return tilesOpen;
+    tilesOpen = {};
+    try {
+      var raw = JSON.parse(window.localStorage.getItem(TILES_KEY) || '[]');
+      if (Array.isArray(raw)) raw.forEach(function (id) { tilesOpen[String(id)] = true; });
+    } catch (e) { /* приватный режим или мусор в хранилище */ }
+    return tilesOpen;
+  }
+  function tilesRemember() {
+    try { window.localStorage.setItem(TILES_KEY, JSON.stringify(Object.keys(tilesOpen || {}))); }
+    catch (e) { /* приватный режим */ }
+  }
+  var STATUS_WORD = { stale: 'отстал', error: 'не ответил', missing: 'нет данных', manual_needed: 'ручной резерв' };
+
+  function monitorRows(d) {
+    var open = tilesOpenSet();
+    return (d.monitors || []).map(function (m) {
+      var key = tileKey(m);
+      var asof = tileAsof(m, d).replace(/^данные: /, '');
+      var bad = m.status && m.status !== 'ok';
+      var note = ruText(trimNote(m.note));
+      var row = h('details', { 'class': 'mon' + (m.tier === 'dead' ? ' tile--dead' : '') }, [
+        // Сетка строки — у вложенного блока: сам summary сеткой делать нельзя, часть
+        // браузеров при этом теряет его поведение (то же у заголовка журнала).
+        h('summary', { 'class': 'mon__sum' }, [h('div', { 'class': 'mon__row' }, [
+          h('h3', { 'class': 'mon__title', text: m.title || m.id }),
+          h('span', { 'class': 'mon__num', text: key || '' }),
+          h('span', { 'class': 'mon__date' }, [
+            bad ? statusDot(m.status) : null,
+            h('span', { text: (bad ? (STATUS_WORD[m.status] || 'отстал') + ' · ' : '') + asof })
+          ]),
+          h('span', { 'class': 'mon__tier-cell' }, [tier(m.tier)]),
+          chevron('chev mon__chev')
+        ])]),
+        h('div', { 'class': 'mon__body' }, tileBody(m, !!key).concat([
+          note ? h('p', { 'class': 'tile__sub', text: note }) : null,
+          TIER_NOTE[m.tier] ? h('p', { 'class': 'tile__sub mon__tier', text: TIER_NOTE[m.tier] }) : null
+        ]))
+      ]);
+      var id = String(m.id || m.title || '');
+      if (open[id]) row.open = true;
+      row.addEventListener('toggle', function () {
+        if (row.open) open[id] = true; else delete open[id];
+        tilesRemember();
+        // График в только что раскрытой строке получил ширину — рисуем.
+        C.flush();
+      });
+      return row;
+    });
+  }
+
+  /* Строка-ссылка на руководство над мониторами (аудит 20.11.2026): блок «Как
+   * читать» из четырёх колонок внизу главной пересказывал руководство и шёл после
+   * журнала, где его не читали. */
+  function renderHowto() {
+    return h('p', { 'class': 'howto-line' }, [
+      h('span', { text: 'Как читать панель: ' }),
+      h('a', { href: 'guide.html#quick', text: 'за 30 секунд' }),
+      h('span', { text: ' · ' }),
+      h('a', { href: 'guide.html', text: 'руководство целиком' })
+    ]);
+  }
+
   /* Контекст рынка — на главной, после «Что в цене» (10.11.2026, по слову владельца):
-   * панель читают и как картину рынка, поэтому расстояние до переключения и все
-   * плитки мониторов стоят рядом с решением, но отдельным разделом с подписью «в
-   * решение не входит». Содержимое — то же, что было на lab.html, без правок. */
-  function renderContext(d) {
-    var tiles = monitorTiles(d);
+   * панель читают и как картину рынка, поэтому пороги флагов ворот и мониторы стоят
+   * рядом с решением, но отдельным разделом с подписью «в решение не входит». */
+  function renderContext(d, full) {
+    var tiles = full ? monitorCards(d) : monitorRows(d);
+    var list = null;
+    if (tiles.length && full) {
+      list = h('div', { 'class': 'tiles', style: 'margin-top:16px' }, tiles);
+    } else if (tiles.length) {
+      // Две независимые колонки, а не сетка: раскрытая строка раздвигает только свою
+      // колонку и не оставляет дыру напротив. На телефоне колонки идут подряд.
+      var half = Math.ceil(tiles.length / 2);
+      list = h('article', { 'class': 'card mons', style: 'margin-top:16px' }, [
+        h('ul', { 'class': 'mons__legend' }, [
+          h('li', null, [tier('A'), h('span', { text: 'проверено на истории' })]),
+          h('li', null, [tier('B'), h('span', { text: 'направление подтверждено, сила зависит от режима' })]),
+          h('li', null, [tier('monitor'), h('span', { text: 'наблюдаем, связь с рынком не доказана' })])
+        ]),
+        h('div', { 'class': 'mons__cols' }, [
+          h('div', { 'class': 'mons__col' }, tiles.slice(0, half)),
+          h('div', { 'class': 'mons__col' }, tiles.slice(half))
+        ])
+      ]);
+    }
     return section('Контекст рынка', 'в решение не входит', [
       renderDistances(d),
-      tiles.length ? h('div', { 'class': 'tiles', style: 'margin-top:16px' }, tiles)
-        : h('p', { 'class': 'empty', text: 'Тайлы ещё не собраны' })
+      list || h('p', { 'class': 'empty', text: 'Тайлы ещё не собраны' })
     ]);
   }
 
@@ -1793,7 +2283,11 @@
         h('span', { text: s.state === 1 ? 'включён' : 'выключен' })
       ]);
     }
-    var cards = sigs.filter(function (s) { return s && typeof s === 'object'; }).map(function (s) {
+    // Сигнал, у которого ещё нет ряда в хранилище (status no_series), не показывается:
+    // пустая карточка «ряда в сторе нет» ничего не сообщала (аудит 20.11.2026).
+    var cards = sigs.filter(function (s) {
+      return s && typeof s === 'object' && s.status !== 'no_series';
+    }).map(function (s) {
       var body = [];
       var bad = s.status && s.status !== 'ok';
       if (bad) {
@@ -2014,14 +2508,14 @@
     rows.reverse();
     var head = [
       h('th', { scope: 'col', text: 'Месяц' }),
-      h('th', { scope: 'col', text: 'Композит' }),
-      h('th', { scope: 'col', text: 'Ячейка' }),
-      hasGate ? h('th', { scope: 'col', text: 'Ворота (с гистерезисом)' }) : null,
+      h('th', { scope: 'col', text: 'Оценка рынка' }),
+      h('th', { scope: 'col', text: 'Признаки' }),
+      hasGate ? h('th', { scope: 'col', text: 'Флаги ворот' }) : null,
       hist.length ? h('th', { scope: 'col', text: 'Позиция' }) : null
     ];
     var table = h('table', { 'class': 'data' }, [
-      h('caption', { text: 'Композит ядра, ячейка состояния' + (hasGate ? ', ворота с гистерезисом' : '') +
-        (hist.length ? ' и позиция' : '') + ' помесячно, последние 36 месяцев. Полная история — в history/daily.json.' }),
+      h('caption', { text: 'Оценка рынка на конец месяца, сочетание сырых признаков' + (hasGate ? ', флаги ворот' : '') +
+        (hist.length ? ' и позиция' : '') + ' помесячно, последние 36 месяцев.' }),
       h('thead', null, [h('tr', null, head)]),
       h('tbody', null, rows.map(function (r) {
         return h('tr', null, [
@@ -2040,10 +2534,10 @@
       ]);
     });
     var compTable = h('table', { 'class': 'data' }, [
-      h('caption', { text: 'Компоненты ядра на текущую дату.' }),
+      h('caption', { text: 'Три показателя оценки рынка на текущую дату; оценка — среднее их вкладов.' }),
       h('thead', null, [h('tr', null, [
-        h('th', { scope: 'col', text: 'Компонент' }), h('th', { scope: 'col', text: 'Вклад' }),
-        h('th', { scope: 'col', text: 'Значение' }), h('th', { scope: 'col', text: 'Тир' })
+        h('th', { scope: 'col', text: 'Показатель' }), h('th', { scope: 'col', text: 'Вклад' }),
+        h('th', { scope: 'col', text: 'Значение' }), h('th', { scope: 'col', text: 'Доказательность' })
       ])]),
       h('tbody', null, comps)
     ]);
@@ -2062,12 +2556,12 @@
       if (isNum(p.comp_state)) {
         posRows.push(['Знак решения', COMP_STATE_WORD[String(p.comp_state)] || '—',
           'порог ±' + fmtNum(isNum(p.comp_threshold) ? p.comp_threshold : 0.2, 1, false) +
-          (isNum(p.comp_daily) ? '; дневной наклон ' + fmtNum(p.comp_daily, 2, true) : '') +
+          (isNum(p.comp_daily) ? '; оценка рынка ' + fmtNum(p.comp_daily, 2, true) : '') +
           (p.decision_day ? ' на ' + fmtDay(p.decision_day) : '')]);
       }
-      if (p.next_decision) posRows.push(['Следующее решение по наклону', fmtDay(p.next_decision), weekdayOf(p.next_decision)]);
+      if (p.next_decision) posRows.push(['День решения по оценке рынка', fmtDay(p.next_decision), weekdayOf(p.next_decision)]);
       if (isNum(p.cash_rate)) posRows.push(['Ставка денег', fmtNum(p.cash_rate, 2, false) + '% годовых',
-        'вклады топ-10' + (p.cash_rate_asof ? ' на ' + fmtDay(p.cash_rate_asof) : '')]);
+        'вклады топ-10' + (p.cash_rate_period ? ' на ' + fmtDay(p.cash_rate_period) : '')]);
       if (isNum(p.switches_per_year)) posRows.push(['Смен позиции в год', fmtNum(p.switches_per_year, 1, false), 'в среднем за пять лет']);
     }
     var gate = st.gate && typeof st.gate === 'object' ? st.gate : null;
@@ -2078,7 +2572,9 @@
         var b = gate[k];
         if (!(b === 0 || b === 1 || b === true || b === false)) return;
         var on = b === 1 || b === true;
-        posRows.push([BIT_LABEL[k].k + ' (с гистерезисом)', on ? BIT_LABEL[k].on : BIT_LABEL[k].off,
+        // Гистерезис — у тренда и облигаций; у волатильности он снят 21.10.2026 (версия 4
+        // правила): флаг ставится и снимается на одном пороге.
+        posRows.push([BIT_LABEL[k].k + (k === 'vol' ? ' (один порог)' : ' (с гистерезисом)'), on ? BIT_LABEL[k].on : BIT_LABEL[k].off,
           (gate.since || {})[k] ? 'с ' + fmtDay(gate.since[k]) : '']);
       });
     }
@@ -2092,13 +2588,16 @@
       }))
     ]) : null;
 
-    return section('Таблица', 'те же ряды числами — для чтения без цвета и для проверки', [
+    var sec = section('Таблица', 'те же ряды числами — для чтения без цвета и для проверки; мониторы ниже развёрнуты целиком', [
       h('article', { 'class': 'card' }, [
         posTable ? h('div', { 'class': 'tablewrap' }, [posTable]) : null,
         h('div', { 'class': 'tablewrap', style: posTable ? 'margin-top:20px' : null }, [compTable]),
         h('div', { 'class': 'tablewrap', style: 'margin-top:20px' }, [table])
       ])
     ]);
+    sec.id = 'table-mode';
+    sec.setAttribute('tabindex', '-1');
+    return sec;
   }
 
   /* ────────────────────────────────────────────────────── страница */
@@ -2195,40 +2694,104 @@
         ])
       ]));
     }
+    /* Расчёт сегодня не прошёл (compute_error, с 20.11.2026): конвейер публикует
+       прежний вердикт со свежей меткой времени, и без плашки вчерашняя позиция
+       выглядела бы сегодняшней. Текст ошибки — служебный, он в подсказке. */
+    if (d.compute_error) {
+      var vp = (d.verdict || {}).position || {};
+      var asofDay = vp.decision_day || d.asof_trading_day;
+      var ce = h('div', { 'class': 'banner banner--warn banner--tight', title: String(d.compute_error) }, [
+        ico('warn', 'banner__ico'),
+        h('div', null, [
+          h('b', { text: 'Расчёт сегодня не прошёл. ' }),
+          h('span', { text: 'Показан вердикт' + (asofDay ? ' от ' + fmtDay(asofDay) : ' прошлого расчёта') + '.' })
+        ])
+      ]);
+      box.appendChild(ce);
+    }
     /* Две разные беды, и называть их одним словом нельзя. Источник может
        МОЛЧАТЬ (не ответил, не опрошен) — а может отвечать исправно и отдавать
        СТАРОЕ. Второе неделю выглядело работой: FRED каждый день возвращал Brent
        недельной давности, ALGOPACK падал по сертификату, futoi жил бесплатным
        потоком с задержкой в две недели. Поэтому у второй строки в тексте стоит
        ДАТА ДАННЫХ — то, чего читателю и не хватало, чтобы заметить. */
-    var mute = [], old_ = [];
-    Object.keys(d.sources || {}).forEach(function (k) {
-      var s = d.sources[k];
-      if (!s) return;
-      // manual_needed — «живой источник молчит, взят ручной резерв»: для
-      // читателя это ровно то же, что stale, и молчать об этом нельзя.
-      if (s.status === 'error' || s.status === 'manual_needed' ||
-          (s.status === 'stale' && s.stale_reason !== 'data')) mute.push(k);
-      else if (s.status === 'stale') old_.push(k + ' (данные от ' + fmtDay(s.asof) + ')');
-    });
+    /* Плашка на всю страницу — только о том, что задевает РЕШЕНИЕ (аудит 20.11.2026).
+       С 19.11 вверху висело «источник перестал обновляться: iss» из-за одного ряда
+       ВДО, который в решение не входит, — и занимало треть первого экрана телефона.
+       Сторож источников теперь говорит по рядам: core_affected === false — отстал
+       только монитор, отметка стоит на его тайле, плашки нет. true — плашка называет
+       ряды решения (core_series с подписями). Поля нет (старая витрина) — по-прежнему:
+       плашка по семье источника. */
+    var alerts = sourceAlerts(d.sources);
+    var mute = alerts.mute, old_ = alerts.old;
     if (mute.length) {
-      box.appendChild(h('div', { 'class': 'banner' }, [
+      box.appendChild(h('div', { 'class': 'banner banner--tight' }, [
         ico('info', 'banner__ico'),
         h('div', null, [
-          h('b', { text: 'Часть источников молчит: ' }),
-          h('span', { text: mute.join(', ') + '. Затронутые тайлы помечены жёлтой точкой; ядро и состояния считаются по последним доступным данным.' })
+          h('b', { text: 'Источник не отвечает: ' }),
+          h('span', { text: mute.join(', ') + '. Расчёт идёт по последним полученным данным.' })
         ])
       ]));
     }
     if (old_.length) {
-      box.appendChild(h('div', { 'class': 'banner' }, [
+      box.appendChild(h('div', { 'class': 'banner banner--tight' }, [
         ico('info', 'banner__ico'),
         h('div', null, [
-          h('b', { text: 'Источник отвечает, но обновляться перестал: ' }),
-          h('span', { text: old_.join(', ') + '. Панель показывает последнее известное значение как сегодняшнее — оно тянется вперёд, пока не выйдет лимит, и только потом сигнал исчезнет.' })
+          h('b', { text: 'Источник перестал обновляться: ' }),
+          h('span', { text: old_.join(', ') + '. В расчёте — последнее известное значение.' })
         ])
       ]));
     }
+  }
+
+  /* Какие источники заслуживают плашки на всю страницу.
+   * -> {mute: [имена молчащих], old: [имена отставших с датой данных]}.
+   * core_affected === false — семья задета только монитором: плашки нет. true — в плашку
+   * идут ряды решения из core_series со статусом не «ok», под своими подписями. Поля нет
+   * (старая витрина) — как раньше: одна запись на семью источника. */
+  function sourceAlerts(sources) {
+    // Семьи источников словами читателя; неизвестная семья печатается как есть.
+    var WORD = {
+      iss: 'МосБиржа', algopack: 'платный шлюз МосБиржи', cbr: 'Банк России', external: 'цены нефти',
+      minfin: 'Минфин', auctions: 'аукционы ОФЗ', rosstat: 'Росстат', orfr: 'обзор рисков Банка России',
+      investfunds: 'фонды денежного рынка', moex_press: 'релизы МосБиржи', polymarket: 'Polymarket',
+      consensus: 'консенсус по ставке', manual: 'ручные вводы', dividends: 'дивидендный календарь',
+      tinvest: 'Т-Инвестиции'
+    };
+    var day = function (iso) {
+      var t = String(iso || '');
+      return /^\d{4}-\d{2}-\d{2}/.test(t) ? t.slice(8, 10) + '.' + t.slice(5, 7) + '.' + t.slice(0, 4) : t;
+    };
+    // manual_needed — «живой источник молчит, взят ручной резерв»: для читателя это
+    // ровно то же, что stale, и молчать об этом нельзя.
+    var silent = function (x) {
+      return x.status === 'error' || x.status === 'manual_needed' ||
+        (x.status === 'stale' && x.stale_reason !== 'data');
+    };
+    var mute = [], old = [];
+    Object.keys(sources || {}).forEach(function (k) {
+      var s = sources[k];
+      if (!s || s.core_affected === false) return;
+      var name = WORD[k] || k;
+      var core = [];
+      if (s.core_affected === true && s.core_series && typeof s.core_series === 'object') {
+        Object.keys(s.core_series).forEach(function (id) {
+          var c = s.core_series[id];
+          if (c && c.status && c.status !== 'ok') core.push(c);
+        });
+      }
+      if (core.length) {
+        core.forEach(function (c) {
+          var label = String(c.label || c.series || name);
+          if (silent(c)) mute.push(label);
+          else old.push(label + (c.asof ? ' (данные от ' + day(c.asof) + ')' : ''));
+        });
+        return;
+      }
+      if (silent(s)) mute.push(name);
+      else if (s.status === 'stale') old.push(name + (s.asof ? ' (данные от ' + day(s.asof) + ')' : ''));
+    });
+    return { mute: mute, old: old };
   }
 
   /** Шапка и подвал: их обновляем каждую минуту даже когда витрина не менялась —
@@ -2302,21 +2865,25 @@
     var kbFig = focusedFigure();
     app.innerHTML = '';
     renderBanners(d);
+    // Режим «Таблица» виден сразу (аудит 20.11.2026): таблицы стоят ПЕРВЫМ блоком
+    // страницы, а не в её конце, где после нажатия ничего не менялось на экране.
+    if (tableOn) app.appendChild(renderTable(d));
     if (PAGE === 'lab') {
       // Вторая страница: всё, что не нужно ни для решения, ни для картины рынка, — на
-      // тех же данных. Мониторы и расстояние до переключения — на главной.
-      app.appendChild(section('Ворота и наклон', 'три режима, флаги с гистерезисом, оценка рынка за 24 месяца', [renderHero(d)]));
+      // тех же данных. Мониторы и пороги флагов ворот — на главной.
+      var ctl = renderControl(d);
+      if (ctl) app.appendChild(ctl);
+      app.appendChild(section('Ворота и оценка рынка', 'три режима, флаги ворот, оценка рынка за 24 месяца', [renderHero(d)]));
       app.appendChild(renderCore(d));
       app.appendChild(renderStates(d));
       var shd = renderShadow(d);
       if (shd) app.appendChild(shd);
     } else {
       app.appendChild(renderHero(d));
-      [renderGuides(d), renderSkills(d), renderPriced(d), renderContext(d), renderEvents(d)].forEach(function (x) {
+      [renderGuides(d), renderSkills(d), renderPriced(d), renderHowto(), renderContext(d, tableOn), renderEvents(d)].forEach(function (x) {
         if (x) app.appendChild(x);
       });
     }
-    if (tableOn) app.appendChild(renderTable(d));
     // Всё дерево уже в документе — только теперь у контейнеров графиков есть
     // ширина, и их можно рисовать. Второй вызов в следующем кадре добирает те,
     // чей размер на момент первого ещё считался (шрифты, полоса прокрутки).
@@ -2376,7 +2943,17 @@
     tt.addEventListener('click', function () {
       var on = tt.getAttribute('aria-pressed') === 'true';
       tt.setAttribute('aria-pressed', on ? 'false' : 'true');
+      var label = tt.querySelector('.pill__label');
+      if (label) label.textContent = on ? 'Таблица' : 'Скрыть таблицу';
+      tt.setAttribute('aria-label', on ? 'Показать те же ряды таблицей' : 'Скрыть таблицу');
+      tt.setAttribute('title', on ? 'Показать те же ряды таблицей' : 'Скрыть таблицу');
       if (window.__lastPayload) render(window.__lastPayload);
+      // Включили — таблица стоит первым блоком: показываем её начало и ставим на неё
+      // фокус, чтобы и с клавиатуры было ясно, что режим сменился.
+      if (!on) {
+        var sec = document.getElementById('table-mode');
+        if (sec) { window.scrollTo(0, 0); sec.focus({ preventScroll: true }); }
+      }
     });
     load();
     setInterval(load, REFRESH_MS);

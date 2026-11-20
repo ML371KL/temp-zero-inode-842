@@ -394,13 +394,28 @@ def _sources_fallback(now):
     должен определять статус семьи, пока в ней есть собранные ряды. Оговорка
     «он не повод топить семью» уже стояла для рядов стора, но для записей
     реестра терялась.
+
+    ТРЕТИЙ СЛОЙ (аудит 20.11.2026, §9.7): одна строка на семью прячет, КАКОЙ ряд
+    плох и важен ли он. С 19.11 семья биржевых рядов помечена устаревшей из-за
+    доходности ВДО (монитор, в решение не входит): плашка об источнике горит над
+    позицией, которой этот ряд не касается, а отказ индекса или кривой ОФЗ в той же
+    семье ничего бы не изменил ни на странице, ни в тревогах. Поэтому у каждой
+    семьи теперь три поля сверх прежних (прежние не тронуты):
+
+    * `bad_series`  — список плохих рядов семьи, строка на ряд (`series`, `status`,
+      `asof`, `lag_min`, `data_age_days`, `stale_reason`, `core`);
+    * `core_affected` — есть ли среди плохих ряд решения (alerts.is_decision_series):
+      по нему витрина решает, показывать ли верхнюю плашку;
+    * `core_series` — все ряды решения семьи с их статусом (и здоровые тоже): по ним
+      alerts.py ведёт тревогу о каждом ряде отдельно.
     """
     stored = set(store.list_series()) if hasattr(store, "list_series") else set()
-    known, empty = {}, {}
+    known, empty, rows = {}, {}, {}
     for sid, spec in registry.SERIES.items():
         if not spec.get("fetcher"):
             continue  # теневой ряд без источника — не семья источников, а расчёт
         family = str(spec.get("fetcher", "")).split(".")[0]
+        decision = alerts.is_decision_series(spec)
         # Ряд реестра может разворачиваться в НЕСКОЛЬКО рядов стора: zcyc -> zcyc_y1…,
         # futoi_mx -> futoi_mx_pos…, orfr_flows -> orfr_flows_fiz… Искать по точному
         # имени бессмысленно: живой источник объявлялся «missing» и красил всю семью
@@ -434,15 +449,38 @@ def _sources_fallback(now):
             # отдельно и станет статусом семьи, только если в ней вообще ничего
             # не собрано.
             empty.setdefault(family, sid)
+            if decision:
+                # Ряд решения, которого в сторе нет вовсе, — не «ещё не собирали», а
+                # дыра под позицией: статус семьи он по-прежнему не определяет, но в
+                # своей строке виден.
+                rows.setdefault(family, []).append(
+                    (sid, {"asof": None, "fetched_at": None, "status": "missing",
+                           "lag_min": None, "data_age_days": None, "stale_reason": None,
+                           "series": sid}, True, spec.get("label")))
             continue
+        rows.setdefault(family, []).append((sid, best, decision, spec.get("label")))
         cur = known.get(family)
         if cur is None or _worse(best["status"], cur["status"]):
             known[family] = best
-    out = dict(known)
+    # Копии, а не те же словари: строка семьи ниже получает список своих же рядов.
+    out = {family: dict(row) for family, row in known.items()}
     for family, sid in empty.items():
         # Фронт красит missing серым, не жёлтым: «не собирали» — не поломка.
         out.setdefault(family, {"asof": None, "fetched_at": None, "status": "missing",
                                 "lag_min": None, "series": sid})
+    brief = ("series", "status", "asof", "lag_min", "data_age_days", "stale_reason")
+    for family, meta in out.items():
+        bad, core = [], {}
+        for sid, row, decision, label in rows.get(family, []):
+            line = {k: row.get(k) for k in brief}
+            if row.get("status") in ("stale", "error") or (decision and
+                                                           row.get("status") == "missing"):
+                bad.append(dict(line, core=bool(decision)))
+            if decision:
+                core[sid] = dict(line, label=label)
+        meta["bad_series"] = bad
+        meta["core_affected"] = any(b["core"] for b in bad)
+        meta["core_series"] = core
     return out
 
 
@@ -552,7 +590,8 @@ def _live_journal(panel, decision, journal):
         curve = track.curve_positions(dates, cols.get("slope_10_2"),
                                       daily.get("is_decision_day") or [False] * len(dates))
         live = track.live_journal(dates, said, cols.get("mcftr"), cols.get("deposit"),
-                                  curve=curve, pos_now=daily["pos"])
+                                  curve=curve, pos_now=daily["pos"],
+                                  tr_last=daily.get("tr_last"))
         if live and isinstance(pos_block.get("journal"), dict):
             pos_block["journal"]["live"] = live
     except Exception as exc:  # noqa: BLE001 — граница изоляции
@@ -573,6 +612,41 @@ def _priced(panel, decision, journal):
         journal.warn("compute", f"«что в цене» упало: {type(exc).__name__}: {exc}")
 
 
+# Блоки справки вокруг решения, которые едут в verdict рядом с позицией (compute/
+# evidence.py, аудит 20.11.2026): контроль в деньгах, сила сигнала, голосование настроек.
+EVIDENCE_KEYS = ("control", "strength", "vote")
+
+
+def _evidence(panel, mf, decision, journal):
+    """Справка вокруг решения (compute/evidence.py): дописывает поля живого следа, дату
+    ставки и оценку по текущей нефти в блок позиции, а блоки EVIDENCE_KEYS складывает в
+    decision["evidence"]. Изолировано: справка не имеет права ронять публикацию позиции.
+    Считается только при полном пересчёте; внутридневной такт берёт всё это из прошлого
+    вердикта, как ядро и позицию."""
+    evidence = _optional("pipeline.compute.evidence")
+    if evidence is None or not isinstance(decision, dict):
+        return
+    try:
+        extras, errors = evidence.attach(store, panel, mf, decision)
+    except Exception as exc:  # noqa: BLE001 — граница изоляции
+        journal.warn("compute", f"справка вокруг решения упала: {type(exc).__name__}: {exc}")
+        return
+    for err in errors:
+        journal.warn("compute", f"справка вокруг решения — {err}")
+    decision["evidence"] = extras
+
+
+def _attach_evidence(payload, decision):
+    """Блоки справки — в verdict (publish.build_verdict их не знает и не трогает)."""
+    verdict = (payload or {}).get("verdict")
+    extras = (decision or {}).get("evidence") if isinstance(decision, dict) else None
+    if isinstance(verdict, dict) and isinstance(extras, dict):
+        for key in EVIDENCE_KEYS:
+            if extras.get(key):
+                verdict[key] = extras[key]
+    return payload
+
+
 def build_full(now, journal):
     """Полный пересчёт: панель → ядро → состояния → решение → тень.
 
@@ -588,6 +662,7 @@ def build_full(now, journal):
         decision = decision_mod.compute_decision(panel, mf, states)
         _live_journal(panel, decision, journal)
         _priced(panel, decision, journal)
+        _evidence(panel, mf, decision, journal)
     shadow = _shadow(panel, states, decision, now, journal)
     dates = (panel or {}).get("dates") or []
     pos = ((decision or {}).get("position") or {})
@@ -616,19 +691,25 @@ def build_payload_for_mode(mode, now, journal):
             # цен живёт отдельно, в quotes. Вердикт (с позицией) и тень — тоже из
             # прошлого прогона: пересобирать вердикт из core/states значило бы
             # терять позицию на весь торговый день.
-            return publish_mod.build_payload(
+            payload = publish_mod.build_payload(
                 core=prev.get("core"), states=prev.get("states"), monitors=monitors,
                 sources=sources, mode=mode,
                 asof=prev.get("asof_trading_day") or asof, quotes=quotes,
                 verdict=prev.get("verdict"), shadow=prev.get("shadow"))
+            # Вердикт взят из прошлого прогона — вместе с пометкой, что тот прогон
+            # расчёт не осилил. Без этого пометка «вердикт прежний» жила бы пять
+            # минут, до первого же интрадей-такта.
+            payload["compute_error"] = prev.get("compute_error") or None
+            return payload
         journal.warn("compute", "интрадей без прошлого data.json — считаем полностью")
 
     if not all((panel_mod, core_mod, states_mod, store)):
         raise RuntimeError("нет модулей расчёта: " + ", ".join(sorted(MISSING_MODULES)))
     core, states, decision, shadow = build_full(now, journal)
-    return publish_mod.build_payload(core=core, states=states, monitors=monitors,
-                                     sources=sources, mode=mode, asof=asof, quotes=quotes,
-                                     decision=decision, shadow=shadow)
+    return _attach_evidence(
+        publish_mod.build_payload(core=core, states=states, monitors=monitors,
+                                  sources=sources, mode=mode, asof=asof, quotes=quotes,
+                                  decision=decision, shadow=shadow), decision)
 
 
 def _seed_payload(journal):
@@ -769,8 +850,14 @@ def main(argv=None):
     if failed:
         journal.line("fetch", f"отказов {len(failed)}: {', '.join(sorted(failed)[:8])}")
 
+    # Текст исключения упавшего расчёта — только для тревоги в канал отказов: в
+    # публичную витрину уходит лишь тип ошибки и время (поле compute_error).
+    crash = None
     try:
         payload = build_payload_for_mode(args.mode, now, journal)
+        # Полный расчёт прошёл — пометки нет. У интрадей-такта она уже проставлена
+        # (унаследована от прогона, чей вердикт он несёт).
+        payload.setdefault("compute_error", None)
     except Exception as exc:  # noqa: BLE001 — расчёт упал целиком: пробуем прошлый payload
         journal.warn("compute", f"расчёт упал: {type(exc).__name__}: {exc}")
         prev = publish_mod.read_local_payload()
@@ -782,17 +869,39 @@ def main(argv=None):
             monitors=_monitors(now, journal), sources=_sources(now, journal),
             mode=args.mode, asof=prev.get("asof_trading_day"), quotes=_quotes(now),
             verdict=prev.get("verdict"), shadow=prev.get("shadow"))
+        # ПАДЕНИЕ РАСЧЁТА НЕ ВЫДАЁТСЯ ЗА СВЕЖИЙ ПРОГОН (аудит 20.11.2026, §9.7).
+        # Раньше здесь публиковался вчерашний вердикт со свежим generated_at: юнит
+        # зелёный, событий нет, страница выглядит обновлённой. Теперь витрина несёт
+        # поле верхнего уровня compute_error — «ТипОшибки @ время UTC» (null, когда
+        # расчёт прошёл), по нему страница покажет, что вердикт прежний, а alerts.py
+        # даст тревогу в канал отказов с защёлкой до доставки.
+        # Упавший ИНТРАДЕЙ-такт пометки не ставит, а несёт прежнюю: он и в норме
+        # публикует вердикт прошлого расчёта, а снять пометку умеет только полный
+        # расчёт — один сбой такта держал бы её до вечера.
+        if args.mode == "intraday":
+            payload["compute_error"] = prev.get("compute_error") or None
+        else:
+            payload["compute_error"] = (f"{type(exc).__name__} @ "
+                                        f"{now.strftime('%Y-%m-%dT%H:%M:%SZ')}")
+            crash = f"{type(exc).__name__}: {exc}"[:200]
 
     # Алерты изолированы целиком: это единственный этап, который сам ничего не
     # публикует. Раньше исключение в правиле или мусор в alerts_state.json
     # превращали «нет уведомления» в «панель не обновилась» — прогон падал ДО
     # publish, и systemd после трёх таких падений глушил юнит.
-    events = []
+    #
+    # ПОРЯДОК (20.11.2026): правила и разбор → лента в payload → ПУБЛИКАЦИЯ → отправка.
+    # Раньше сообщение уходило до публикации, и ссылка «Открыть панель» из сообщения
+    # о смене позиции вела на страницу с прежней позицией. В ленту страницы событие
+    # обязано попасть до публикации, поэтому цикл разрезан надвое (alerts.prepare /
+    # alerts.deliver), а не переставлен целиком.
+    events, alert_ctx = [], None
     if not args.no_alerts:
         try:
-            events = alerts.run(payload, dry_run=args.dry_run, enabled=True, now=now,
-                                seed_payload=_seed_payload(journal),
-                                log=lambda m: journal.line("alerts", m))
+            events, alert_ctx = alerts.prepare(payload, dry_run=args.dry_run, enabled=True,
+                                               now=now, seed_payload=_seed_payload(journal),
+                                               log=lambda m: journal.line("alerts", m),
+                                               crash=crash)
         except Exception as exc:  # noqa: BLE001 — граница изоляции
             journal.warn("alerts", f"правила упали: {type(exc).__name__}: {exc} "
                                    f"(публикацию это не останавливает)")
@@ -801,6 +910,14 @@ def main(argv=None):
     except Exception as exc:  # noqa: BLE001
         journal.warn("alerts", f"лента событий не собралась: {type(exc).__name__}: {exc}")
         payload["events"] = []
+
+    res = publish_mod.publish(payload, args.mode, store=store, dry_run=args.dry_run)
+
+    if alert_ctx is not None:
+        try:
+            events = alerts.deliver(events, alert_ctx)
+        except Exception as exc:  # noqa: BLE001 — граница изоляции
+            journal.warn("alerts", f"доставка упала: {type(exc).__name__}: {exc}")
     # «Доставлено» раньше считало и ПОВТОР, погашенный дедупом телеграма (DUP).
     # Правила-состояния (cb_reminder) рождают событие на каждом такте накануне
     # заседания, и 09–10.09.2026 журнал насчитал «доставлено 1» сто семьдесят шесть
@@ -811,7 +928,9 @@ def main(argv=None):
     dup = sum(1 for e in events if e.get("outcome") == telegram.DUP)
     commented = sum(1 for e in events if (e.get("comment") or "").strip())
     ops = sum(1 for e in events if alerts.is_ops(e))
-    journal.line("alerts", f"событий {len(events)} (санитарных {ops} — в ops-канал), "
+    quiet = sum(1 for e in events if alerts.is_journal(e))
+    journal.line("alerts", f"событий {len(events)} (санитарных {ops} — в ops-канал"
+                           + (f", только в журнал страницы {quiet}" if quiet else "") + "), "
                            f"отправлено {sent}"
                            + (f", повторов погашено дедупом {dup}" if dup else "")
                            + (f", не доставлено {len(events) - delivered}"
@@ -819,7 +938,6 @@ def main(argv=None):
                            + f", с комментарием {commented}" +
                  ("" if not events else ": " + "; ".join(e["kind"] for e in events)))
 
-    res = publish_mod.publish(payload, args.mode, store=store, dry_run=args.dry_run)
     size_kb = res["bytes"] / 1024.0
     journal.line("publish", f"data.json {size_kb:.1f} КБ; опубликовано={res['published']}; "
                             f"{res.get('reason')}; объектов {len(res['objects'])}; "

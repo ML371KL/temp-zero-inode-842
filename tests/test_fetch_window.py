@@ -150,7 +150,7 @@ class TestYieldSanity(IssCase):
 
     def test_взрыв_доходности_не_попадает_в_ряд(self):
         self.serve(lambda _u: self.rows([26.5, 27.4, 14204.82]))
-        _sid, points, meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
+        _sid, points, meta = self.iss.index_yield(sec="RUCBCPNS", start="2026-08-11",
                                                   end="2026-08-19")
         self.assertEqual(sorted(points.values()), [26.5, 27.4])
         self.assertEqual(meta["status"], "stale", "мусор источника не назван отказом")
@@ -163,7 +163,7 @@ class TestYieldSanity(IssCase):
         # жёлтая точка. Тихо вернуть пустой ряд нельзя — он выглядел бы «свежим».
         self.serve(lambda _u: self.rows([207.47, 14204.82, 2850.29]))
         with self.assertRaises(self.iss.FetchError) as ctx:
-            self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11", end="2026-08-19")
+            self.iss.index_yield(sec="RUCBCPNS", start="2026-08-11", end="2026-08-19")
         self.assertIn("коридор", str(ctx.exception))
         self.assertIn("2850.29", str(ctx.exception), "не названо последнее значение")
 
@@ -189,7 +189,7 @@ class TestYieldSanity(IssCase):
 
     def test_ноль_по_прежнему_заглушка(self):
         self.serve(lambda _u: self.rows([0.0, 26.5]))
-        _sid, points, _meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
+        _sid, points, _meta = self.iss.index_yield(sec="RUCBCPNS", start="2026-08-11",
                                                    end="2026-08-19")
         self.assertEqual(list(points.values()), [26.5])
 
@@ -235,7 +235,7 @@ class TestYieldFromConstituents(IssCase):
         self.serve_all([26.5, 14204.82],
                        {"BOND-A": 60.0, "BOND-B": 40.0},
                        {"BOND-A": 30.0, "BOND-B": 20.0})
-        _sid, points, meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
+        _sid, points, meta = self.iss.index_yield(sec="RUCBCPNS", start="2026-08-11",
                                                   end="2026-08-19")
         # 0,6*30 + 0,4*20 = 26,0 — считаем руками, а не тем же кодом.
         self.assertEqual(points["2026-08-19"], 26.0)
@@ -261,7 +261,7 @@ class TestYieldFromConstituents(IssCase):
         ys["BOND-BAD"] = 3904.38
         ys["BOND-OK"] = 30.0
         self.serve_all([26.5, 14204.82], weights, ys)
-        _sid, points, meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
+        _sid, points, meta = self.iss.index_yield(sec="RUCBCPNS", start="2026-08-11",
                                                   end="2026-08-19")
         got = points["2026-08-19"]
         self.assertLess(got, 40.0, f"битая бумага втекла в среднее: {got}")
@@ -284,7 +284,7 @@ class TestYieldFromConstituents(IssCase):
         weights["BOND-HI"] = 5.0
         ys["BOND-HI"] = 99.0
         self.serve_all([26.5, 14204.82], weights, ys)
-        _sid, points, meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
+        _sid, points, meta = self.iss.index_yield(sec="RUCBCPNS", start="2026-08-11",
                                                   end="2026-08-19")
         self.assertEqual(meta["estimate_dropped"]["count"], 1)
         self.assertAlmostEqual(points["2026-08-19"], sum(vals) / len(vals), places=2)
@@ -296,7 +296,7 @@ class TestYieldFromConstituents(IssCase):
         weights = {("BOND-%02d" % i): 5.0 for i in range(len(vals))}
         ys = {("BOND-%02d" % i): v for i, v in enumerate(vals)}
         self.serve_all([26.5, 14204.82], weights, ys)
-        _sid, points, meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
+        _sid, points, meta = self.iss.index_yield(sec="RUCBCPNS", start="2026-08-11",
                                                   end="2026-08-19")
         self.assertEqual(meta["estimate_dropped"]["count"], 0,
                          "рабочий разброс корзины принят за поломку")
@@ -309,7 +309,7 @@ class TestYieldFromConstituents(IssCase):
         ys = {s: 28.0 for s in weights}
         ys["BOND-BAD"] = 5000.0
         self.serve_all([26.5, 14204.82], weights, ys)
-        _sid, _points, meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
+        _sid, _points, meta = self.iss.index_yield(sec="RUCBCPNS", start="2026-08-11",
                                                   end="2026-08-19")
         self.assertEqual(meta["estimate_cover_pct"], 90.0)
         self.assertEqual(meta["estimate_dropped"]["weight_pct"], 10.0)
@@ -318,8 +318,8 @@ class TestYieldFromConstituents(IssCase):
         # мутация «считать всегда» -> лишние 10 запросов на каждый прогон и
         # подмена биржевого числа собственной оценкой без повода.
         # Индекс взят ИСПРАВНЫЙ (RUCBCPNS): у ВДО поле биржи врёт и внутри
-        # коридора, поэтому его последний день сверяется с составом всегда —
-        # см. YIELD_XCHECK_SECS и тест ниже.
+        # коридора, поэтому его значение дня — всегда оценка по составу
+        # (YIELD_XCHECK_SECS, tests/test_hy_yield.py).
         asked = []
         def responder(url):
             asked.append(url)
@@ -329,7 +329,7 @@ class TestYieldFromConstituents(IssCase):
         _sid, points, meta = self.iss.index_yield(sec="RUCBCPNS", start="2026-08-11",
                                                   end="2026-08-19")
         self.assertEqual(sorted(points.values()), [16.5, 16.6])
-        self.assertNotIn("method", meta)
+        self.assertIsNone(meta.get("method"))
         self.assertFalse([u for u in asked if "analytics" in u or "bonds" in u],
                          "за составом ходили при исправном источнике")
 
@@ -344,7 +344,7 @@ class TestYieldFromConstituents(IssCase):
         self.serve_all([32.5, 32.8, 88.75, 32.6, 32.9],
                        {"BOND-A": 60.0, "BOND-B": 40.0},
                        {"BOND-A": 33.0, "BOND-B": 32.0})
-        _sid, points, meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
+        _sid, points, meta = self.iss.index_yield(sec="RUCBCPNS", start="2026-08-11",
                                                   end="2026-08-19")
         self.assertNotIn(88.75, points.values(), "мусор внутри коридора уехал в ряд")
         self.assertTrue(meta.get("dropped_outliers"))
@@ -360,7 +360,7 @@ class TestYieldFromConstituents(IssCase):
         self.serve_all([32.5, 32.8, 43.78, 32.6, 32.9],
                        {"BOND-A": 60.0, "BOND-B": 40.0},
                        {"BOND-A": 33.0, "BOND-B": 32.0})
-        _sid, points, meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
+        _sid, points, meta = self.iss.index_yield(sec="RUCBCPNS", start="2026-08-11",
                                                   end="2026-08-19")
         self.assertNotIn(43.78, points.values())
         self.assertEqual(meta["dropped_outliers"][0][1], 43.78)
@@ -375,37 +375,36 @@ class TestYieldFromConstituents(IssCase):
         self.serve_all([20.0, 20.2, 26.0, 26.4, 26.2],
                        {"BOND-A": 60.0, "BOND-B": 40.0},
                        {"BOND-A": 27.0, "BOND-B": 25.0})
-        _sid, points, meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
+        _sid, points, meta = self.iss.index_yield(sec="RUCBCPNS", start="2026-08-11",
                                                   end="2026-08-19")
         self.assertIn(26.0, points.values(), "настоящий сдвиг уровня отброшен")
         self.assertFalse(meta.get("dropped_outliers"))
 
-    def test_последний_день_сверяется_с_составом(self):
-        # Соседей справа у него нет, поэтому спорит с ним состав: 60,0 против
-        # оценки 32,6 — в ряд идёт оценка.
-        self.serve_all([32.5, 32.8, 32.6, 32.9, 60.0],
-                       {"BOND-A": 60.0, "BOND-B": 40.0},
-                       {"BOND-A": 33.0, "BOND-B": 32.0})
-        _sid, points, meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
-                                                  end="2026-08-19")
-        self.assertEqual(meta["method"], "constituents")
-        self.assertNotIn(60.0, points.values(), "опровергнутое число осталось в ряду")
-        # 0,6*33 + 0,4*32 = 32,6 — считаем руками, не тем же кодом.
-        self.assertAlmostEqual(points[max(points)], 32.6, places=2)
+    # Сверка ПОСЛЕДНЕГО дня ВДО с составом («согласуется — оставляем биржевое,
+    # расходится — берём оценку») жила здесь двумя тестами до 20.11.2026. Аудит
+    # показал, что эта конструкция и портила ряд: оценка жила один день, а назавтра
+    # окно догрузки писало биржевое число поверх. Новое поведение ВДО — отдельный
+    # файл tests/test_hy_yield.py; здесь остался общий резерв (RUCBCPNS).
 
-    def test_согласие_с_составом_оставляет_биржевое_число(self):
-        # Расхождение в пределах допуска — официальное число индекса главнее
-        # собственной оценки, и подменять его без повода нельзя.
-        self.serve_all([32.5, 32.8, 32.6, 32.9, 33.1],
-                       {"BOND-A": 60.0, "BOND-B": 40.0},
-                       {"BOND-A": 33.0, "BOND-B": 32.0})
-        _sid, points, meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
-                                                  end="2026-08-19")
-        # Биржевой хвост сохранён целиком, оценка в ряд не добавлена.
-        self.assertEqual(sorted(points.values()), [32.5, 32.6, 32.8, 32.9, 33.1])
-        self.assertNotIn("method", meta)
-        self.assertEqual(meta["xcheck_constituents"], 32.6)
-        self.assertAlmostEqual(meta["xcheck_diff_pp"], 0.5, places=2)
+    def test_поля_прошлой_оценки_не_переживают_здоровый_прогон(self):
+        """Стор доливает meta поверх прежней: поле, не названное прогоном, врёт.
+
+        Вечером 19.11.2026 «посчитано из состава, покрытие 91 %» осталось в meta
+        от дневного прогона, хотя в ряд ушло биржевое число.
+        мутация: вернуть из здорового прогона meta без полей оценки -> после
+        долива в сторе остаётся method="constituents" от прошлого прогона.
+        """
+        self.store.upsert_points("rucbcpns_yield", {"2026-08-10": 16.4}, {
+            "method": "constituents", "estimate_cover_pct": 91.0,
+            "estimate_dropped": {"count": 14}, "xcheck_constituents": 33.32})
+        self.serve(lambda _u: _history([["2026-08-11", 78.0, 1e9, 16.5],
+                                        ["2026-08-12", 78.0, 1e9, 16.6]]))
+        sid, points, meta = self.iss.index_yield(sec="RUCBCPNS", start="2026-08-11",
+                                                 end="2026-08-19")
+        saved = self.store.upsert_points(sid, points, meta)["meta"]
+        for key in ("method", "estimate_cover_pct", "estimate_dropped",
+                    "xcheck_constituents"):
+            self.assertIsNone(saved.get(key), f"{key} остался от прошлого прогона")
 
     def test_огрызок_корзины_не_превращается_в_число(self):
         # Выпавшие бумаги — обычно самые неликвидные, то есть самые доходные:
@@ -415,7 +414,7 @@ class TestYieldFromConstituents(IssCase):
                        {"BOND-A": 60.0, "BOND-B": 40.0},
                        {"BOND-A": 30.0})
         with self.assertRaises(self.iss.FetchError) as ctx:
-            self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11", end="2026-08-19")
+            self.iss.index_yield(sec="RUCBCPNS", start="2026-08-11", end="2026-08-19")
         # Наружу идёт ИСХОДНАЯ причина — мусор биржи, а не «покрытие мало»:
         # чинить надо источник, а не корзину.
         self.assertIn("коридор", str(ctx.exception))
@@ -425,7 +424,7 @@ class TestYieldFromConstituents(IssCase):
         self.serve_all([14204.82],
                        {"BOND-A": 90.0, "BOND-B": 10.0},
                        {"BOND-A": 30.0, "BOND-B": 20.0})
-        _sid, points, _meta = self.iss.index_yield(sec="RUCBHYCP", start="2026-08-11",
+        _sid, points, _meta = self.iss.index_yield(sec="RUCBCPNS", start="2026-08-11",
                                                    end="2026-08-19")
         self.assertEqual(points["2026-08-19"], 29.0)
 

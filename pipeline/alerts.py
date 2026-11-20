@@ -11,6 +11,14 @@
 
 ПОЧЕМУ pending: телеграм лежит регулярно. Недоставленное событие остаётся в очереди
 и повторяется на следующем прогоне (сутки), маркер дедупа двигает только успех.
+
+ТРИ СУДЬБЫ СОБЫТИЯ (аудит 20.11.2026):
+* обычное рыночное — телеграм и хаб, в очереди повторов сутки;
+* главное (MUST_DELIVER_KINDS — смена позиции) — живёт в очереди до доставки, но не
+  дольше MUST_DELIVER_MAX_DAYS и не дольше следующей смены; о недоставке дольше часа
+  уходит тревога в канал отказов обвязки;
+* журнальное (JOURNAL_KINDS — флаги ворот) — только журнал страницы: ни телеграма,
+  ни хаба, ни разбора моделью.
 """
 
 import json
@@ -19,12 +27,27 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from pipeline.lib import commentary, constants, nexus, telegram, wording
+from pipeline.lib import commentary, constants, nexus, registry, telegram, wording
+from pipeline.lib import dates as datelib
 
 STATE_NAME = "alerts_state.json"
 FEED_LIMIT = 20          # столько последних событий уезжает в data.json
 PENDING_MAX_HOURS = 24   # старше — не повторяем: новость протухла
 PENDING_MAX = 40         # длина очереди повторов; режем СТАРОЕ, а не свежее
+# ГЛАВНОЕ СОБЫТИЕ — смена позиции: по нему владелец действует на живые деньги. До
+# 20.11.2026 оно жило в очереди те же сутки, что и остальные, и защёлки «держать до
+# доставки» у него не было: Телеграм лежит дольше суток — сообщение стёрто, а заново
+# правило его не родит (снимок позиции уже обновлён). Прогон аудита на копии это
+# подтвердил (scripts/agentN/n7_sim_delivery.py). Теперь такое событие ждёт доставки
+# до следующей смены позиции (она его вытесняет) или MUST_DELIVER_MAX_DAYS суток.
+MUST_DELIVER_KINDS = frozenset({"position_change"})
+MUST_DELIVER_MAX_DAYS = 14
+# Главное событие не дошло до канала рынка за это время — тревога в канал отказов
+# обвязки: он на другом боте и может быть жив, когда рыночный лежит. Если лежат оба,
+# остаётся строка в журнале прогона — это не лечится.
+STUCK_AFTER = timedelta(hours=1)
+# Отбой предупреждения уходит без звука: он отменяет ожидание, а не зовёт к действию.
+SILENT_KINDS = frozenset({"position_watch_off"})
 DEPOSIT_UPTICK_PP = 0.05  # декадная ставка шумит в сотых, порог отсекает дрожь
 # ВСЕ поля события, которые обязаны пережить очередь повторов и ленту. Плоский
 # text — свёртка для журнала витрины (контракт §3), но телеграм рендерится из
@@ -36,9 +59,14 @@ DEPOSIT_UPTICK_PP = 0.05  # декадная ставка шумит в соты
 # него повтор слал бы слитую тройку заново по отдельности. causes — блок «Что за
 # этим стоит» слитого поворота режима: без него повтор приходил без объяснения, тот
 # же класс дефекта, что 18.08 (аудит 28.10.2026).
+# exec_day / exec_missed — день исполнения решения о позиции и «его закрытие прошло
+# ещё до рождения события»: по ним досылка из очереди говорит, насколько опоздала и
+# успевает ли читатель к закрытию исполнения. Без них в EVENT_FIELDS повтор терял бы
+# эту строку — тот же класс дефекта.
 EVENT_FIELDS = ("key", "ts", "kind", "severity", "text", "comment",
                 "title", "before", "after", "moves", "detail", "meaning",
-                "fact", "where", "merged", "causes", "direction")
+                "fact", "where", "merged", "causes", "direction",
+                "exec_day", "exec_missed")
 
 # САНИТАРНЫЕ события — отказы обвязки, а не движение рынка. Они уходят в общий
 # ops-канал панелей и НЕ попадают ни в журнал витрины, ни в ленту хаба.
@@ -50,6 +78,10 @@ EVENT_FIELDS = ("key", "ts", "kind", "severity", "text", "comment",
 OPS_KINDS = frozenset({
     "source_stale", "source_ok", "health_review", "lease_lost", "payload_oversize",
     "core_missing",
+    # Аудит 20.11.2026: ряд решения отслеживается сам по себе, а не через семью;
+    # падение расчёта; главное событие не доходит до канала рынка.
+    "core_series_stale", "core_series_ok", "compute_failed", "compute_ok",
+    "delivery_stuck", "delivery_ok",
     # Прежние имена (до 02.09.2026): новых событий с ними не бывает, но в очереди
     # повторов старого alerts_state.json они ещё могут лежать — и обязаны уйти в
     # ops-канал, а не в ленту рынка.
@@ -59,6 +91,29 @@ OPS_KINDS = frozenset({
 
 def is_ops(event):
     return (event or {}).get("kind") in OPS_KINDS
+
+
+# ЖУРНАЛЬНЫЕ события — флаги ворот. Они идут ТОЛЬКО в журнал страницы.
+#
+# ПОЧЕМУ (аудит 20.11.2026, §9.5). За 30 дней в канал рынка ушло 14 сообщений,
+# действия требовало одно. Восемь из них — «Признаки рынка сменились»: индекс восемь
+# раз пересёк 200-дневную среднюю в пределах ±1 % при неизменных воротах и позиции, и
+# каждое пришло со звуком, разбором модели и тем же значком 🔔, что смена позиции.
+# Читатель, которого восемь раз позвали зря, девятый раз не откроет — а девятым и
+# будет смена позиции. Всё, что из состояния рынка требует действия, приходит
+# событием position_change (ворота закрылись при позиции «акции» — это оно и есть);
+# остальное — справка, и её место в журнале страницы.
+JOURNAL_KINDS = frozenset({"buy_window_open", "bond_flag_on", "bond_flag_off",
+                           "state_cell_change"})
+JOURNAL = "journal"      # исход доставки журнального события: в сеть не ходили
+
+
+def is_journal(event):
+    return (event or {}).get("kind") in JOURNAL_KINDS
+
+
+def must_deliver(event):
+    return (event or {}).get("kind") in MUST_DELIVER_KINDS
 
 
 def state_dir():
@@ -172,7 +227,7 @@ def _ev(key, kind, title, severity="info", now=None, **parts):
     # direction — "up"/"down" для значка 📈/📉 (стандарт сообщений §4): у разворота
     # оценки, решения ЦБ и вкладов направление своё в каждом событии.
     for name in ("before", "after", "moves", "detail", "meaning",
-                 "fact", "where", "direction"):
+                 "fact", "where", "direction", "exec_day", "exec_missed"):
         if parts.get(name):
             event[name] = parts[name]
     event["text"] = wording.plain_text(event)
@@ -184,12 +239,31 @@ def _day(value, now):
     return wording.ru_date(value, now)
 
 
+def _leg(position, leg_id):
+    """Строка слагаемого оценки из verdict.position.held_by.legs — или None."""
+    for row in ((position or {}).get("held_by") or {}).get("legs") or []:
+        if isinstance(row, dict) and row.get("id") == leg_id:
+            return row
+    return None
+
+
+def _oil_contrib(position):
+    """(вклад нефти в рублях, число слагаемых) — для сообщения о новом месяце нефти."""
+    legs = [r for r in ((position or {}).get("held_by") or {}).get("legs") or []
+            if isinstance(r, dict) and isinstance(r.get("contrib"), (int, float))]
+    row = _leg(position, "urals_rub_gap") or {}
+    value = row.get("contrib")
+    return (value if isinstance(value, (int, float)) else None), len(legs)
+
+
 def snapshot(payload, now=None):
     """Что запоминаем до следующего прогона. Только то, по чему ищем переходы."""
     core = payload.get("core") or {}
     cur = (payload.get("states") or {}).get("current") or {}
+    gate = (payload.get("states") or {}).get("gate")
     mons = _mons(payload)
     position = (payload.get("verdict") or {}).get("position") or {}
+    oil, legs_n = _oil_contrib(position)
     return {
         "asof": payload.get("asof_trading_day"),
         "core_value": core.get("value"),
@@ -199,14 +273,27 @@ def snapshot(payload, now=None):
         "position": position.get("state"),
         "position_since": position.get("since"),
         "trend": cur.get("trend"), "vol": cur.get("vol"), "bond": cur.get("bond"),
+        # Флаги ВОРОТ (с гистерезисом): по ним, а не по сырым признакам, стоит
+        # событие о смене состояния рынка (аудит 20.11.2026). None — в витрине блока
+        # ворот нет (старый payload): переходом это не считается.
+        "gate": ({k: gate.get(k) for k in ("trend", "vol", "bond", "open")}
+                 if isinstance(gate, dict) else None),
+        # Оценка рынка и вклад нефти прошлого расчёта — «было» в сообщении о новом
+        # месяце налоговой цены нефти.
+        "comp_daily": position.get("comp_daily"),
+        "oil_contrib": oil, "legs_n": legs_n,
+        # Признак «расчёт упал, на странице прежний вердикт» (run.py).
+        "compute_error": payload.get("compute_error") or None,
         "health": (core.get("health") or {}).get("status"),
         "health_review_due": bool((core.get("health") or {}).get("review_due")),
         "key_rate": _mp(mons, "cb_meeting", "key_rate"),
         "deposit": _mp(mons, "deposit_spread", "deposit_pct"),
         "orfr_asof": (mons.get("orfr") or {}).get("asof"),
         "auction_date": _mp(mons, "ofz_auctions", "date"),
-        "sources": {k: (v or {}).get("status") for k, v in (payload.get("sources") or {}).items()
-                    if isinstance(v, dict)},
+        # Статус семьи — БЕЗ рядов решения: у них свой снимок и своя тревога, иначе
+        # монитор, пометивший семью устаревшей, заслонял отказ ряда решения в ней.
+        "sources": {k: v.get("status") for k, v in _family_units(payload).items()},
+        "core_series": {k: v.get("status") for k, v in _core_units(payload).items()},
         "updated_at": _iso(now),
     }
 
@@ -263,163 +350,501 @@ def _core_flip(payload, prev, state, now):
             f"торговый день недели и только за пределами ±{_num(thr, 1, False)}.")
     detail = (f"Знак держится с {_day(since, now)}. " if since else "") + rule
     return [_ev(f"core_flip:{sign}:{payload.get('asof_trading_day')}", "core_flip",
-                "Оценка рынка на месяц вперёд развернулась "
+                # Без «на месяц вперёд»: то же число в сообщении о позиции звалось
+                # «оценкой на неделю вперёд» — одно число под двумя горизонтами
+                # (аудит 20.11.2026, §9.8). Имя одно: «оценка рынка».
+                "Оценка рынка развернулась "
                 + ("вверх" if sign > 0 else "вниз"),
                 now=now, direction="up" if sign > 0 else "down",
                 before=f"{_num(prev_value, 2, True)}{f' ({was_label})' if was_label else ''}",
                 after=f"{_num(val, 2, True)}{f' ({_core_label(val)})' if _core_label(val) else ''}",
                 detail=detail,
                 meaning="Шкала — от −3 до +3: чем дальше от нуля, тем увереннее "
-                        "перевес в эту сторону. Это оценка направления на месяц, "
+                        "перевес в эту сторону. Это оценка направления, "
                         "а не обещание доходности.")]
+
+
+POSITION_WORD = {"long": "акции", "flat": "деньги"}
+
+
+def _thr(pos):
+    value = (pos or {}).get("comp_threshold")
+    return value if isinstance(value, (int, float)) else constants.DECISION["comp_threshold"]
+
+
+def _wd(day, now):
+    """«пт 06.11» — день недели и дата (wording.ru_weekday_date)."""
+    return wording.ru_weekday_date(day, now)
+
+
+def exec_day_of(decision_day):
+    """День исполнения решения: следующий торговый день после дня решения.
+
+    «Исполнение — на следующем закрытии»: решение пятницы исполняется на закрытии
+    понедельника, решение среды (закрылись ворота) — четверга. Календарь —
+    pipeline/lib/dates.py, тот же, по которому слой решения ищет день решения.
+    None — дата не разобралась: тогда сообщение дня исполнения не называет.
+    """
+    try:
+        return datelib.next_trading_day(decision_day).isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
+def _money_word(pos):
+    rate = (pos or {}).get("cash_rate")
+    return "деньги" + (f" (ставка {_pct(rate, 1)})" if isinstance(rate, (int, float)) else "")
+
+
+def _sign_holder(pos):
+    """Слагаемое, которое держит знак оценки: без него она была бы по другую сторону нуля.
+
+    Считается от знака САМОЙ оценки (comp_daily), а не от знака решения: в
+    предупреждении перед днём решения знак решения ещё прежний, а читателю важно,
+    что утянуло оценку за порог. Если таких слагаемых несколько — то, чей вклад
+    больше по модулю. -> (внешнее имя, оценка без него) | None.
+    """
+    comp = (pos or {}).get("comp_daily")
+    if not isinstance(comp, (int, float)) or comp == 0:
+        return None
+    best = None
+    for row in ((pos or {}).get("held_by") or {}).get("legs") or []:
+        if not isinstance(row, dict):
+            continue
+        name = wording.leg_name(row.get("id"))
+        own, without = row.get("contrib"), row.get("without")
+        if not name or not isinstance(own, (int, float)) or not isinstance(without, (int, float)):
+            continue
+        if without * comp < 0 and (best is None or abs(own) > best[0]):
+            best = (abs(own), name, without)
+    return (best[1], best[2]) if best else None
+
+
+def _legs_line(pos):
+    """«Слагаемые оценки (она — их среднее): курс доллара −0,15; …» — или пусто."""
+    bits = []
+    for row in ((pos or {}).get("held_by") or {}).get("legs") or []:
+        name = wording.leg_name((row or {}).get("id")) if isinstance(row, dict) else ""
+        if name and isinstance(row.get("contrib"), (int, float)):
+            bits.append(f"{name} {_num(row['contrib'], 2, True)}")
+    return ("Слагаемые оценки (она — их среднее): " + "; ".join(bits) + ".") if bits else ""
+
+
+def _holder_line(pos):
+    holder = _sign_holder(pos)
+    if not holder:
+        return ""
+    return (f"Знак оценки держит {holder[0]}: без этого слагаемого она была бы "
+            f"{_num(holder[1], 2, True)}.")
+
+
+def held_lines(pos):
+    """Что держит позицию и что её сменит — ФАКТ, из held_by и conditions (аудит 20.11.2026).
+
+    Разбор модели к выходу 06.11 назвал причиной стресс облигаций и индекс ниже
+    средней, хотя ворота были открыты, а вышла панель из-за оценки рынка, знак
+    которой держала нефть. Правда о причине обязана стоять в фактической части
+    сообщения — независимо от того, что напишет (и напишет ли) модель.
+    """
+    pos = pos or {}
+    held = pos.get("held_by") or {}
+    comp = pos.get("comp_daily")
+    score = _num(comp, 2, True) if isinstance(comp, (int, float)) else ""
+    thr = _num(_thr(pos), 1, False)
+    by = held.get("by")
+    if by == "comp":
+        head = ("оценка рынка" + (f" — {score} при пороге входа +{thr}" if score else "")
+                + f"; {wording.GATE_WORD} открыты")
+    elif by == "gate":
+        head = (f"закрытые {wording.GATE_WORD}; знак оценки рынка — за акции"
+                + (f" (оценка {score})" if score else ""))
+    elif by == "both":
+        head = (f"и закрытые {wording.GATE_WORD}, и оценка рынка"
+                + (f" ({score} при пороге входа +{thr})" if score else ""))
+    elif by == "open":
+        head = (f"{wording.GATE_WORD} открыты, знак оценки рынка — за акции"
+                + (f" (оценка {score}, порог выхода −{thr})" if score else ""))
+    else:
+        head = ""
+    lines = []
+    if head:
+        lines.append(" ".join(x for x in (f"Что держит позицию: {head}.", _holder_line(pos))
+                              if x))
+    legs = _legs_line(pos)
+    if legs:
+        lines.append(legs)
+    conditions = [c for c in pos.get("conditions") or [] if isinstance(c, str) and c.strip()]
+    if conditions:
+        # Только первое условие: второе — ориентир «хватило бы одного из …» на три
+        # строки, он есть на странице и во входе разбора.
+        cond = wording.sentence(wording.ru_decimals(conditions[0].strip()))
+        lines.append("Что сменит позицию: " + cond[:1].lower() + cond[1:])
+    return lines
+
+
+# Причины, при которых позицию сменила ОЦЕНКА РЫНКА (а не ворота).
+SCORE_REASONS = ("comp_neg", "comp_pos")
+
+POSITION_MEANING = (
+    "Позиция — итог двух условий: ворота (три признака состояния рынка, читаются "
+    "ежедневно) и знак оценки рынка. Знак читается в день решения — последний "
+    "торговый день недели — с порогом ±{thr}; между порогами держится прежний.")
 
 
 def _position_change(payload, prev, now):
     """Смена позиции «акции ↔ деньги» между прогонами (слой решения, 02.09.2026).
 
     Первый прогон молчит, как core_flip: снимок без позиции (старая версия панели)
-    переходом не считается. Слово «позиция» здесь — итог ворот и наклона, а не
+    переходом не считается. Слово «позиция» здесь — итог ворот и оценки, а не
     совет: панель говорит, где она стоит по своему правилу, и почему.
+
+    С 20.11.2026 (аудит, §9): сообщение называет день недели и дату исполнения,
+    говорит, если о решении узнали позже дня решения и прошло ли закрытие
+    исполнения, и несёт в факте строки «что держит позицию» и «что её сменит».
     """
     pos = (payload.get("verdict") or {}).get("position") or {}
     new, old = pos.get("state"), prev.get("position")
     if new not in ("long", "flat") or old not in ("long", "flat") or new == old:
         return []
-    rate = pos.get("cash_rate")
-    money = "деньги" + (f" (ставка {_pct(rate, 1)})" if isinstance(rate, (int, float)) else "")
-    word = {"long": "акции", "flat": money}
+    word = {"long": "акции", "flat": _money_word(pos)}
     reason = wording.sentence(wording.ru_decimals(pos.get("reason_text") or ""))
-    since = pos.get("since")
-    detail = ((reason + " ") if reason else "") + (
-        f"Решение от {_day(since, now)}, " if since else "") + "исполнять на следующем закрытии."
+    comp = pos.get("comp_daily")
+    if reason and pos.get("reason") in SCORE_REASONS and isinstance(comp, (int, float)):
+        # Причина называет порог, факт — само число: «ушла ниже −0,2 … : −0,31».
+        reason = reason.rstrip(".") + f": {_num(comp, 2, True)}."
+    since, asof = pos.get("since"), payload.get("asof_trading_day")
+    exec_day = exec_day_of(since) if since else None
+    close = wording.exec_close(exec_day) if exec_day else None
+    exec_missed = bool(close and now >= close)
+    when = []
+    if since:
+        when.append(f"Решение от {_wd(since, now)}, исполнять на закрытии "
+                    + (f"{_wd(exec_day, now)}." if exec_day else "следующего торгового дня."))
+        if asof and str(since)[:10] < str(asof)[:10]:
+            # Решение датировано раньше дня расчёта: панель узнала о нём задним числом
+            # (правка данных, пропущенный прогон). Молчать об этом нельзя — читатель
+            # иначе исполнит «на следующем закрытии» то, что надо было исполнить давно.
+            when.append(f"Панель узнала о решении позже дня решения — по расчёту за "
+                        f"{_day(asof, now)}.")
+    else:
+        when.append("Исполнять на следующем закрытии.")
+    if exec_missed:
+        when.append(f"Закрытие исполнения ({_wd(exec_day, now)}) уже прошло.")
+    detail = "\n".join(x for x in ([reason] if reason else []) + [" ".join(when)]
+                       + held_lines(pos) if x)
     # Заголовок называет ДЕЙСТВИЕ, а строка ниже — движение со ставкой. Прежний
     # заголовок «Позиция: деньги → акции» дословно повторял эту строку, и лента
     # читала «Позиция: деньги → акции деньги (ставка 13,1%) → акции» (аудит B5).
-    return [_ev(f"position:{payload.get('asof_trading_day')}:{new}", "position_change",
+    #
+    # КЛЮЧ несёт момент обнаружения. Прежний «position:<день>:<куда>» гасил третью
+    # смену при развороте туда-обратно в пределах одной даты вердикта (правка
+    # данных в выходные: деньги → акции → деньги → акции): третье сообщение совпадало
+    # ключом с первым, телеграм отвечал «уже отправляли», и последним в канале
+    # оставалось «переход в деньги» при позиции «акции» (scripts/agentN/n11_flipflop.py).
+    # Одна и та же смена дважды не рождается — снимок позиции двигается каждым
+    # прогоном, — поэтому момент обнаружения однозначно именует смену.
+    stamp = now.astimezone(timezone.utc).strftime("%Y%m%dT%H%M")
+    return [_ev(f"position:{asof}:{new}:{stamp}", "position_change",
                 f"Позиция: переход в {'акции' if new == 'long' else 'деньги'}",
                 "warn" if new == "flat" else "info", now,
                 before=word[old], after=word[new],
                 detail=detail[0].upper() + detail[1:],
-                meaning="Позиция — итог двух условий: ворота (три признака состояния "
-                        "рынка, читаются ежедневно) и оценка рынка на неделю вперёд "
-                        "(решается по пятницам). Акции держим, только когда ворота "
-                        "открыты и оценка в плюсе.")]
+                meaning=POSITION_MEANING.format(thr=_num(_thr(pos), 1, False)),
+                exec_day=exec_day, exec_missed=exec_missed)]
 
 
-def _cell_change(payload, prev, now):
-    verdict = payload.get("verdict") or {}
-    cell = verdict.get("cell_code")
-    old = prev.get("cell")
-    if not cell or not old or cell == old:
-        return []
-    stats = verdict.get("cell_stats") or {}
-    label = verdict.get("cell_label") or ""
-    sev = "warn" if (stats.get("mean_fwd1m_pct") or 0) < 0 else "info"
-    # Слово «режим» на витрине занято с 02.09.2026: так называется РЕЖИМ ИЗ ТРЁХ
-    # поверх ворот с гистерезисом, и он меняется реже сырых признаков. Событие же
-    # стоит на сырой ячейке — и 15.09.2026 это разошлось вслух: сырая вола ушла на
-    # 0,3 п.п. ниже своего порога, в канал ушло «Режим рынка сменился» с
-    # ободряющей статистикой ячейки, а ворота остались закрытыми и позиция не
-    # двинулась. Заголовок называет ровно то, что сменилось, а строка ниже —
-    # читают ли это ворота; сырую ячейку как слой мы не трогаем (CONTRACT §3).
-    gate = (payload.get("states") or {}).get("gate") or {}
-    gate_code = gate.get("cell_code")
-    detail = None
-    if gate_code and gate_code != cell:
-        # Сочетание ворот чаще всего и есть то, что стояло ДО перехода: ворота
-        # отстают по построению. Повторять его словами значит печатать строку
-        # «было → стало» второй раз — называем его, только когда оно третье.
-        where = ("Ворота этого ещё не читают: пороги снятия у них дальше"
-                 if gate_code == old else
-                 f"Ворота читают своё сочетание — {wording.cell_words(gate_code)}: "
-                 "пороги снятия у них дальше")
-        detail = (f"Это сырые признаки. {where}, и ворота "
-                  f"{'открыты' if gate.get('open') else 'закрыты'}.")
-    name = wording.regime_name(label)
-    return [_ev(f"cell:{payload.get('asof_trading_day')}:{cell}", "state_cell_change",
-                "Признаки рынка сменились" + (f": {name}" if name else ""),
-                sev, now,
-                before=wording.cell_words(old),
-                after=wording.cell_words(cell),
-                detail=detail,
-                meaning=wording.cell_plain(stats))]
+# -------------------------------------------- предупреждение перед днём решения
+#
+# ПОЧЕМУ (аудит 20.11.2026, §9.2). Перед выходом 06.11 оценка рынка всю неделю стояла
+# ниже порога (02.11 −0,24; 03.11 −0,27; 05.11 −0,31 при пороге −0,2): пятничный выход
+# был виден с понедельника, и об этом не ушло ничего. Правило читает то, что слой
+# решения уже кладёт в verdict.position, и само ничего не решает.
 
-
-def _gate_still_holds(payload, flag):
-    """Сырой флаг снят, а у ворот тот же флаг стоит — вернуть оговорку, иначе None.
-
-    Зажигаются оба в одной точке, гаснут в разных: сырой — на своём пороге, флаг
-    ворот — на дальнем (RGBI −3 % вместо −3,9 %, тренд −2 % от MA200; у волы до
-    21.10.2026 — p60 вместо p80, с тех пор пороги совпадают). В этой полосе событие машины состояний уже говорит «отпустило», а
-    позиция по-прежнему стоит на закрытых воротах: на месячной сетке 11 месяцев по
-    облигациям и 20 по воле. Правило ВКЛЮЧЕНИЯ оговорки не просит — там пороги
-    совпадают, и слои зажигаются вместе. Слой событие не меняет (CONTRACT §3), оно
-    его называет.
-    """
-    states = payload.get("states") or {}
-    gate, cur = states.get("gate") or {}, states.get("current") or {}
-    if gate.get(flag) is None or cur.get(flag) is None or gate[flag] == cur[flag]:
+def _watch_direction(pos):
+    """Куда может смениться позиция в день решения: "flat" | "long" | None."""
+    comp, thr = pos.get("comp_daily"), _thr(pos)
+    if not isinstance(comp, (int, float)):
         return None
-    return ("Ворота этого ещё не читают: их флаг снимается дальше, и ворота "
-            + ("открыты." if gate.get("open") else "закрыты."))
+    state = pos.get("state")
+    if state == "long" and comp < -thr:
+        return "flat"
+    if state == "flat" and pos.get("gate_open") and pos.get("comp_state") != 1 and comp > thr:
+        return "long"
+    return None
 
 
-def _bond_flag(payload, prev, now):
-    cur = (payload.get("states") or {}).get("current") or {}
-    new, old = cur.get("bond"), prev.get("bond")
+def _position_watch(payload, prev, state, now, changed):
+    """«В день решения возможна смена позиции» и отбой, если смены не случилось.
+
+    Предупреждение — одно на пару (день решения, направление), только суточным
+    прогоном и только когда день расчёта сам не является днём решения. Отбой —
+    когда предупреждение ДОШЛО, день решения наступил, а позиция осталась прежней.
+    `changed` — в этом прогоне позиция сменилась: тогда ответом на предупреждение
+    служит само сообщение о смене.
+    """
+    pos = (payload.get("verdict") or {}).get("position") or {}
+    out = []
+    memo = state.get("watch") if isinstance(state.get("watch"), dict) else None
+    if not memo:
+        state.pop("watch", None)
+    asof = str(pos.get("decision_day") or payload.get("asof_trading_day") or "")[:10]
+    comp, thr = pos.get("comp_daily"), _thr(pos)
+    if memo:
+        day = str(memo.get("decision") or "")[:10]
+        if changed:
+            state.pop("watch", None)
+            memo = None
+        elif day and asof and asof >= day and pos.get("state") in ("long", "flat"):
+            state.pop("watch", None)
+            if memo.get("delivered") and isinstance(comp, (int, float)):
+                side = (f"пороге выхода −{_num(thr, 1, False)}" if memo.get("to") == "flat"
+                        else f"пороге входа +{_num(thr, 1, False)}")
+                when = (f"В день решения, {_wd(day, now)}," if asof == day
+                        else f"День решения был {_wd(day, now)}; на {_wd(asof, now)}")
+                out.append(_ev(f"position_watch_off:{day}:{memo.get('to')}",
+                               "position_watch_off",
+                               "День решения прошёл без смены позиции", "info", now,
+                               detail=f"{when} оценка рынка {_num(comp, 2, True)} при "
+                                      f"{side}. Позиция осталась прежней — "
+                                      f"{POSITION_WORD[pos['state']]}."))
+            memo = None
+    if payload.get("run_mode") != "daily" or pos.get("is_decision_day") or changed:
+        return out
+    to = _watch_direction(pos)
+    day = str(pos.get("next_decision") or "")[:10]
+    if to is None or not day:
+        return out
+    key = f"position_watch:{day}:{to}"
+    if memo and memo.get("key") == key:
+        return out      # об этом дне решения и этом направлении уже предупреждали
+    state["watch"] = {"key": key, "decision": day, "to": to, "delivered": False}
+    exec_day = exec_day_of(day)
+    old_word = "акции" if to == "flat" else _money_word(pos)
+    new_word = _money_word(pos) if to == "flat" else "акции"
+    side = (f"ниже порога −{_num(thr, 1, False)}" if to == "flat"
+            else f"выше порога +{_num(thr, 1, False)}")
+    lines = [f"Оценка рынка {_num(comp, 2, True)} — {side} (расчёт за {_wd(asof, now)}).",
+             f"День решения — {_wd(day, now)}: если оценка останется за порогом, позиция "
+             f"сменится: {old_word} → {new_word}."
+             + (f" Исполнение — на закрытии {_wd(exec_day, now)}." if exec_day else "")]
+    holder = _holder_line(pos)
+    if holder:
+        lines.append(holder)
+    return out + [_ev(key, "position_watch",
+                      f"В день решения возможен переход в {POSITION_WORD[to]}",
+                      "info", now, detail="\n".join(lines),
+                      meaning="Это предупреждение, а не решение: знак оценки читается "
+                              "только в день решения, и до него оценка может вернуться "
+                              "за порог.")]
+
+
+# ------------------------------------------------ новый месяц налоговой цены нефти
+#
+# ПОЧЕМУ (аудит 20.11.2026, §9.3). Октябрьская налоговая цена Urals пришла 05.11 и за
+# сутки до дня решения сдвинула оценку на 0,06: без неё 06.11 было бы −0,197, то есть
+# выхода из акций не случилось бы. Событие, решившее позицию, сообщения не дало.
+#
+# Память правила — ПОСЛЕДНИЙ СООБЩЁННЫЙ МЕСЯЦ (state["urals_alerted"]), а не дата
+# файла или снимок прошлого прогона: смена записи в истории не событие (урок
+# auction_failed 12.08.2026). Месяц назад, тот же месяц с поправленной ценой или
+# месяц глубокой давности (восстановление стора) — тишина.
+URALS_FRESH_DAYS = 62    # месяц выходит в первых числах следующего; два месяца — уже архив
+
+
+def _month_word(month, now):
+    """«октябрь» в текущем году события, «декабрь 2025» — для прошлого (стандарт §3)."""
+    name = wording.ru_month(month)
+    year = str(now.astimezone(wording.MSK).year)
+    return name[:-len(year)].strip() if name.endswith(" " + year) else name
+
+
+def _urals_visible_from(month):
+    """С какого дня расчёта панель видит месяц налоговой цены: конец месяца + лаг
+    доступности ряда из реестра (pub_lag_days). None — посчитать не удалось."""
+    try:
+        lag = (registry.SERIES.get("urals_tax") or {}).get("pub_lag_days") or 0
+        return datelib.apply_pub_lag(month, lag).isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
+def _urals_month(payload, prev, state, now):
+    pl = (_mons(payload).get("rub_barrel") or {}).get("payload") or {}
+    month, usd = pl.get("tax_month"), pl.get("urals_usd")
+    if not month or not isinstance(usd, (int, float)):
+        return []
+    month = str(month)[:10]
+    memo = state.get("urals_alerted") if isinstance(state.get("urals_alerted"), dict) else {}
+    last = str(memo.get("month") or "")[:10]
+    if not last:
+        state["urals_alerted"] = {"month": month, "usd": usd}   # первый раз — молча
+        return []
+    if month <= last:
+        return []
+    # Оценка пересчитывается только полным прогоном: интрадей-такт несёт вердикт
+    # прошлого расчёта, и «оценка после» была бы оценкой ДО. Ждём полного прогона —
+    # память при этом не двигаем, событие родится в нём.
+    if payload.get("run_mode") == "intraday" or payload.get("compute_error"):
+        return []
+    pos = (payload.get("verdict") or {}).get("position") or {}
+    # И полный прогон видит новый месяц не сразу: панель берёт значение месяца с даты
+    # ДОСТУПНОСТИ (конец месяца + лаг ряда), а день расчёта — последний день с
+    # закрытием. 05.11.2026 цена легла в хранилище днём, месячный прогон в 18:07 МСК
+    # считал по закрытию 03.11 и октябрьской цены в оценке ещё не имел; сдвиг на 0,06
+    # показал только вечерний расчёт за 05.11. Событие ждёт именно его.
+    visible = _urals_visible_from(month)
+    asof = str(pos.get("decision_day") or payload.get("asof_trading_day") or "")[:10]
+    if visible and asof and asof < visible:
+        return []
+    state["urals_alerted"] = {"month": month, "usd": usd}
+    age = _age_days(month, now)
+    if age is None or age > URALS_FRESH_DAYS:
+        return []
+    comp, was = pos.get("comp_daily"), prev.get("comp_daily")
+    oil, legs_n = _oil_contrib(pos)
+    oil_was = prev.get("oil_contrib")
+    lines = []
+    if isinstance(comp, (int, float)):
+        move = (f"{_num(was, 2, True)} → {_num(comp, 2, True)}"
+                if isinstance(was, (int, float)) else _num(comp, 2, True))
+        line = f"Оценка рынка: {move}"
+        if isinstance(oil, (int, float)) and isinstance(oil_was, (int, float)) and legs_n:
+            line += (f"; вклад нефти в рублях {_num(oil_was, 2, True)} → {_num(oil, 2, True)}"
+                     f" — сдвиг оценки на {_num((oil - oil_was) / legs_n, 2, True)}")
+        lines.append(line + ".")
+        thr = _thr(pos)
+        state_now = pos.get("state")
+        if state_now == "long":
+            gap = comp + thr
+            lines.append(f"Порог выхода из акций −{_num(thr, 1, False)}: "
+                         + (f"оценка ниже его на {_num(-gap, 2, False)}." if gap < 0
+                            else f"до него {_num(gap, 2, False)}."))
+        elif state_now == "flat" and pos.get("comp_state") != 1:
+            gap = thr - comp
+            lines.append(f"Порог входа в акции +{_num(thr, 1, False)}: "
+                         + (f"оценка выше его на {_num(-gap, 2, False)}." if gap < 0
+                            else f"до него {_num(gap, 2, False)}."))
+        elif state_now == "flat":
+            lines.append(f"Знак оценки — за акции; позицию держат закрытые {wording.GATE_WORD}.")
+    day = pos.get("decision_day") if pos.get("is_decision_day") else pos.get("next_decision")
+    if day:
+        lines.append(("День решения — сегодняшний расчёт, " if pos.get("is_decision_day")
+                      else "День решения — ") + f"{_wd(day, now)}.")
+    was_usd = memo.get("usd")
+    return [_ev(f"urals_month:{month}", "urals_month",
+                f"Вышла налоговая цена нефти за {_month_word(month, now)}", "info", now,
+                before=(f"${_num(was_usd, 2)} ({_month_word(last, now)})"
+                        if isinstance(was_usd, (int, float)) else None),
+                after=f"${_num(usd, 2)} за баррель Urals ({_month_word(month, now)})",
+                detail="\n".join(lines) or None,
+                meaning="Цена нефти входит в оценку рынка раз в месяц, поэтому сдвиг "
+                        "приходит разом. Позицию это само не меняет: знак оценки "
+                        "читается в день решения.")]
+
+
+# ------------------------------------------------------------ флаги ворот (журнал)
+#
+# Семейство стоит на флагах ВОРОТ (states.gate, с гистерезисом), а не на сырых
+# признаках (states.current), и идёт только в журнал страницы — JOURNAL_KINDS выше.
+# До 20.11.2026 было наоборот: событие рождалось на сырой ячейке, и индекс у
+# 200-дневной средней в пределах ±1 % давал «Признаки рынка сменились» восемь раз за
+# месяц при неизменных воротах и позиции. Прежние оговорки «ворота этого ещё не
+# читают» ушли вместе с причиной: событие теперь и есть то, что читают ворота.
+
+GATE_FLAGS = ("trend", "vol", "bond")
+
+
+def _gate_flags(block):
+    """(тренд, вола, облигации) из блока ворот — или None, если чего-то нет."""
+    if not isinstance(block, dict):
+        return None
+    flags = tuple(block.get(k) for k in GATE_FLAGS)
+    return None if any(f not in (0, 1) for f in flags) else flags
+
+
+def _gate_code(flags):
+    return "%s|%s|%s" % ("bull" if flags[0] == 1 else "bear",
+                         "stress" if flags[1] == 1 else "calm",
+                         "stress" if flags[2] == 1 else "ok")
+
+
+def _dist_text(payload, flag):
+    for row in (payload.get("states") or {}).get("distances") or []:
+        if isinstance(row, dict) and row.get("id") == flag and row.get("text"):
+            return wording.sentence(wording.ru_decimals(row["text"]))
+    return ""
+
+
+def _gate_effect(payload, prev, gate):
+    """Что смена флагов значит для ворот и повлияла ли она на позицию — одной фразой."""
+    was_open = (prev.get("gate") or {}).get("open")
+    is_open = gate.get("open")
+    word = wording.GATE_WORD.capitalize()
+    if is_open is None:
+        head = ""
+    elif was_open is None or bool(was_open) == bool(is_open):
+        head = f"{word} остались {'открытыми' if is_open else 'закрытыми'}"
+    else:
+        head = f"{word} {'открылись' if is_open else 'закрылись'}"
+    pos = (payload.get("verdict") or {}).get("position") or {}
+    new, old = pos.get("state"), prev.get("position")
+    tail = ""
+    if new in POSITION_WORD:
+        if old in POSITION_WORD and old != new:
+            tail = f"позиция сменилась: {POSITION_WORD[old]} → {POSITION_WORD[new]}"
+        else:
+            tail = f"позиция не изменилась — {POSITION_WORD[new]}"
+            comp = pos.get("comp_daily")
+            by = (pos.get("held_by") or {}).get("by")
+            if new == "flat" and by in ("comp", "both") and isinstance(comp, (int, float)):
+                tail += (", её держит оценка рынка" if by == "comp"
+                         else f", её держат и {wording.GATE_WORD}, и оценка рынка")
+                tail += f" ({_num(comp, 2, True)})"
+            elif new == "flat" and by == "gate":
+                tail += f", её держат {wording.GATE_WORD}"
+    return "; ".join(x for x in (head, tail) if x) + ("." if head or tail else "")
+
+
+def _gate_events(payload, prev, now):
+    """Смена флагов ворот -> события семейства (сливаются в одну запись журнала)."""
+    gate = (payload.get("states") or {}).get("gate")
+    new, old = _gate_flags(gate), _gate_flags(prev.get("gate"))
     if new is None or old is None or new == old:
         return []
-    dist = ""
-    for row in (payload.get("states") or {}).get("distances") or []:
-        if row.get("id") == "bond" and row.get("text"):
-            dist = wording.sentence(wording.ru_decimals(row["text"]))
-            break
     asof = payload.get("asof_trading_day")
-    if new == 1:
-        return [_ev(f"bond_on:{asof}", "bond_flag_on",
-                    "Долговой рынок вошёл в стресс", "warn", now,
-                    before="ОФЗ спокойны", after="ОФЗ под давлением",
-                    detail=dist,
-                    meaning="Индекс гособлигаций RGBI ушёл заметно ниже своего "
-                            "годового максимума. Пока так, покупка просадок в акциях "
-                            "не работает: на истории в такие месяцы она приносила "
-                            "убыток, а не прибыль.")]
-    lag = _gate_still_holds(payload, "bond")
-    return [_ev(f"bond_off:{asof}", "bond_flag_off",
-                "Долговой рынок вышел из стресса", "info", now,
-                before="ОФЗ под давлением", after="ОФЗ спокойны",
-                detail=" ".join(x for x in (dist, lag) if x) or None,
-                meaning="Гособлигации отыграли просадку. Покупка просадок в акциях "
-                        "снова имеет смысл: на спокойном долге такие месяцы в "
-                        "среднем закрывались в плюс примерно в двух случаях из трёх.")]
-
-
-def _buy_window(payload, prev, now):
-    cur = (payload.get("states") or {}).get("current") or {}
-    vol, bond = cur.get("vol"), cur.get("bond")
-    if vol != 1 or bond != 0:
-        return []
-    # Та же защита, что в _bond_flag: неизвестное прошлое — не переход. Состояния
-    # приходят с None после дня, когда панель не посчиталась (нет RGBI), и без
-    # этой строки следующий прогон зовёт «Окно входа» о ячейке, которая не менялась.
-    if prev.get("vol") is None or prev.get("bond") is None:
-        return []
-    if prev.get("vol") == 1 and prev.get("bond") == 0:
-        return []
-    trend = cur.get("trend")
-    prev_code = "%s|%s|%s" % ("bull" if prev.get("trend") == 1 else "bear",
-                             "stress" if prev.get("vol") == 1 else "calm",
-                             "stress" if prev.get("bond") == 1 else "ok")
-    stats = constants.CELL_STATS.get((trend, 1, 0)) or {}
-    return [_ev(f"buy_window:{payload.get('asof_trading_day')}", "buy_window_open",
-                "Окно входа: паника в акциях при спокойном долге", "info", now,
-                before=wording.cell_words(prev_code), after=wording.cell_words(
-                    f"{'bull' if trend == 1 else 'bear'}|stress|ok"),
-                detail=" ".join(x for x in (
-                    "Акции трясёт, а гособлигации держатся — редкое сочетание: "
-                    "продают из-за страха, а не из-за проблем с деньгами в системе.",
-                    _gate_still_holds(payload, "bond")) if x),
-                meaning=wording.cell_plain(stats))]
+    effect = _gate_effect(payload, prev, gate) or None
+    moved = [f for i, f in enumerate(GATE_FLAGS) if new[i] != old[i]]
+    before, after = wording.cell_words(_gate_code(old)), wording.cell_words(_gate_code(new))
+    out = []
+    if new[1] == 1 and new[2] == 0 and not (old[1] == 1 and old[2] == 0):
+        out.append(_ev(f"buy_window:{asof}", "buy_window_open",
+                       "Окно входа: паника в акциях при спокойном долге", "info", now,
+                       before=before, after=after,
+                       detail=" ".join(x for x in (
+                           "Акции трясёт, а гособлигации держатся — редкое сочетание: "
+                           "продают из-за страха, а не из-за проблем с деньгами в системе.",
+                           _dist_text(payload, "vol")) if x),
+                       meaning=effect))
+    if "bond" in moved:
+        on = new[2] == 1
+        out.append(_ev(f"bond_{'on' if on else 'off'}:{asof}",
+                       "bond_flag_on" if on else "bond_flag_off",
+                       "Долговой рынок вошёл в стресс" if on
+                       else "Долговой рынок вышел из стресса",
+                       "warn" if on else "info", now,
+                       before="ОФЗ под давлением" if not on else "ОФЗ спокойны",
+                       after="ОФЗ под давлением" if on else "ОФЗ спокойны",
+                       detail=_dist_text(payload, "bond") or None, meaning=effect))
+    # Расстояния до порогов — по тем флагам, о которых не сказали события выше;
+    # если сказали обо всех, запись всё равно несёт число (слияние дубль уберёт).
+    told = {"bond"} | ({"vol"} if any(e["kind"] == "buy_window_open" for e in out) else set())
+    rest = [f for f in moved if f not in told] or moved
+    detail = " ".join(x for x in (_dist_text(payload, f) for f in rest) if x)
+    out.append(_ev(f"cell:{asof}:{_gate_code(new)}", "state_cell_change",
+                   "Признаки рынка для ворот сменились",
+                   "info", now, before=before, after=after,
+                   detail=detail or None, meaning=effect))
+    return out
 
 
 def _priced(pl):
@@ -765,32 +1190,108 @@ def _parse_ts(text):
     return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
 
 
-def _source_down(state, current):
-    """Записи «источник сломан с …» для источников, которые ещё есть в сводке."""
-    raw = state.get("source_down")
+# РЯДЫ РЕШЕНИЯ — те, от которых зависит позиция. Тревога об источнике до 20.11.2026
+# была одна на СЕМЬЮ, а статус семьи — статус её худшего ряда. Пока семья биржевых
+# рядов помечена устаревшей из-за доходности ВДО (монитор, в решение не входит),
+# отказ индекса, RGBI или кривой ОФЗ в той же семье тревоги не давал: правило видело
+# «семья уже плохая — уже сообщали» (аудит 20.11.2026, §9.7; так обстояло дело с
+# 19.11). То же у семьи Минфина (налоговая цена нефти рядом с дефицитом бюджета) и
+# ЦБ. Теперь у каждого ряда решения свой снимок, своя выдержка и своя тревога, а
+# статус семьи для семейной тревоги считается БЕЗ них.
+#
+# Какие ряды — решает реестр (pipeline/lib/registry.py): роль «ядро» — слагаемые
+# оценки рынка (в том числе налоговая цена нефти, хотя она и не помечена
+# обязательной), и обязательные ряды ролей «состояние» и «сигнал».
+DECISION_ROLES = ("core", "state", "signal")
+BAD_CORE = ("stale", "error", "missing")
+_BAD_RANK = {"stale": 1, "missing": 2, "error": 3}
+
+
+def is_decision_series(spec):
+    """Ряд реестра, от которого зависит решение о позиции."""
+    spec = spec or {}
+    role = spec.get("role")
+    return role == "core" or (role in DECISION_ROLES and bool(spec.get("required")))
+
+
+def _family_units(payload):
+    """{семья: строка} — статус семьи БЕЗ рядов решения.
+
+    Витрина старого вида (без поля bad_series) отдаётся как есть: там семья — это
+    худший ряд, и правило работает по-прежнему.
+    """
+    out = {}
+    for name, meta in (payload.get("sources") or {}).items():
+        if not isinstance(meta, dict):
+            continue
+        bad = meta.get("bad_series")
+        if not isinstance(bad, list) or meta.get("status") not in BAD_SOURCE:
+            out[name] = meta
+            continue
+        rest = [r for r in bad if isinstance(r, dict) and not r.get("core")
+                and r.get("status") in BAD_SOURCE]
+        if not rest:
+            # Плохи только ряды решения: о них скажет своя тревога, семья для
+            # семейного правила здорова.
+            out[name] = dict(meta, status="ok", series=None, asof=None, stale_reason=None)
+            continue
+        worst = max(rest, key=lambda r: _BAD_RANK.get(r.get("status"), 0))
+        out[name] = dict(meta, **{k: worst.get(k) for k in
+                                  ("status", "series", "asof", "lag_min", "stale_reason")})
+    return out
+
+
+def _core_units(payload):
+    """{ряд решения: строка с полем family} — из sources[семья].core_series."""
+    out = {}
+    for family, meta in (payload.get("sources") or {}).items():
+        rows = meta.get("core_series") if isinstance(meta, dict) else None
+        if not isinstance(rows, dict):
+            continue
+        for sid, row in rows.items():
+            if isinstance(row, dict):
+                out[sid] = dict(row, family=family)
+    return out
+
+
+def _down_records(state, key, current):
+    """Записи «сломан с …» для тех, кто ещё есть в сводке."""
+    raw = state.get(key)
     if not isinstance(raw, dict):
         return {}
     return {name: dict(rec) for name, rec in raw.items()
             if name in current and isinstance(rec, dict) and _parse_ts(rec.get("since"))}
 
 
-def _sources(payload, prev, state, now):
+def _unit_events(units, old, down, payload, now, core=False):
+    """Тревоги и отбивки по набору «единиц»: семьям источников или рядам решения.
+
+    Логика одна — переход в плохой статус, выдержка на интрадей-такте, отбивка о
+    выздоровлении; различаются виды событий и слова. `down` мутируется.
+    """
     out = []
-    old = prev.get("sources") or {}
-    current = {name: meta for name, meta in (payload.get("sources") or {}).items()
-               if isinstance(meta, dict)}
-    down = _source_down(state, current)
     hold = payload.get("run_mode") == "intraday"
+    bad_set = BAD_CORE if core else BAD_SOURCE
     # Журнал того такта, что заметил сбой: интрадей-отказ в журнале суточного не найти.
     unit = "moex-radar-" + (payload.get("run_mode") if payload.get("run_mode") in
                             ("intraday", "daily", "weekly", "monthly", "manual") else "daily")
-    for name, meta in sorted(current.items()):
+    for name, meta in sorted(units.items()):
         st = meta.get("status")
-        was_bad = old.get(name) in BAD_SOURCE
+        was_bad = old.get(name) in bad_set
         series = meta.get("series")
         who = f"{name} ({series})" if series and series != name else name
         day = _day(meta.get("asof") or payload.get("asof_trading_day"), now)
-        if st not in BAD_SOURCE:
+        label = str(meta.get("label") or "").strip()
+        family = meta.get("family")
+        if core:
+            # «Индекс гособлигаций» (ряд rgbi, источник iss): данные от 17.11.
+            head = ((f"«{label}» " if label else "")
+                    + f"(ряд {who}" + (f", источник {family}" if family else "") + "): ")
+            data_from = head + f"данные от {day}."
+        else:
+            data_from = ((f"Ряд {series}: данные от " if series and series != name
+                          else "Данные в панели от ") + f"{day}.")
+        if st not in bad_set:
             # Источник в порядке: запись о сбое больше не нужна. Если сбой был
             # коротким и тревога выдерживалась, снимок держал прежний «ok», и
             # was_bad здесь ложно — отбивки без тревоги не бывает.
@@ -814,14 +1315,20 @@ def _sources(payload, prev, state, now):
                 lasted = (f" Сбой длился {wording.hours_minutes((now - since).total_seconds() / 60)}"
                           f" (с {wording.msk_when(since, now)})."
                           if since and now > since else "")
-                out.append(_ev(f"source_ok:{name}:{payload.get('asof_trading_day')}",
-                               "source_ok", f"источник {who} снова отвечает",
-                               "info", now,
-                               fact=(f"Ряд {series}: данные от " if series and series != name
-                                     else "Данные в панели от ") + f"{day}." + lasted,
-                               meaning="Жёлтая точка с карточек этого источника снята — "
-                                       "панель снова считает по свежим числам.",
-                               where="Смотреть: раздел «Источники» на панели."))
+                if core:
+                    out.append(_ev(f"core_series_ok:{name}:{_stamp(since or now)}",
+                                   "core_series_ok", f"ряд решения {name} снова обновляется",
+                                   "info", now, fact=data_from + lasted,
+                                   meaning="Решение о позиции снова считается по свежим "
+                                           "числам этого ряда.",
+                                   where="Смотреть: раздел «Источники» на панели."))
+                else:
+                    out.append(_ev(f"source_ok:{name}:{payload.get('asof_trading_day')}",
+                                   "source_ok", f"источник {who} снова отвечает",
+                                   "info", now, fact=data_from + lasted,
+                                   meaning="Жёлтая точка с карточек этого источника снята — "
+                                           "панель снова считает по свежим числам.",
+                                   where="Смотреть: раздел «Источники» на панели."))
             continue
         if was_bad:
             continue  # уже сообщали, повторять каждый прогон нельзя
@@ -839,7 +1346,7 @@ def _sources(payload, prev, state, now):
         # про неудачный опрос читалось как «всё хорошо».
         age = meta.get("lag_min")
         age_txt = (f" Последний удачный опрос {wording.hours_minutes(age)} назад."
-                   if isinstance(age, (int, float)) and st != "error" else "")
+                   if isinstance(age, (int, float)) and st == "stale" else "")
         waited = now - since
         if waited >= timedelta(minutes=1):
             age_txt = (f" Сбой с {wording.msk_when(since, now)}, длится "
@@ -849,6 +1356,8 @@ def _sources(payload, prev, state, now):
         # обе посылало владельца искать не там.
         if st == "error":
             word = "не отвечает"
+        elif st == "missing":
+            word = "пуст: в хранилище нет ни одной точки"
         elif meta.get("stale_reason") == "data":
             word = "отвечает, но отдаёт старые данные"
         else:
@@ -860,27 +1369,101 @@ def _sources(payload, prev, state, now):
         # той же причине принадлежит РЯДУ, а не источнику (оплачено 20.08.2026:
         # ISS сломал расчёт доходности ВДО, панель сказала «данные от 13.08», а
         # индекс был свежий).
-        # (series/who/day посчитаны выше — их же использует отбивка о выздоровлении.)
         # Время события — НАЧАЛО сбоя, а не конец выдержки: тревога, дождавшаяся
         # четвёртого такта, говорит о том, что сломалось пятнадцать минут назад.
-        out.append(_ev(f"source_stale:{name}:{payload.get('asof_trading_day')}",
-                       "source_stale", f"источник {who} {word}", "warn", since,
-                       fact=(f"Ряд {series}: данные от " if series and series != name
-                             else "Данные в панели от ")
-                            + f"{day}."
-                            + age_txt,
-                       meaning="Панель считает по последним удачным числам и выглядит "
-                               "рабочей — карточки этого источника помечены жёлтой точкой.",
-                       where=f"Смотреть: journalctl -u {unit} -n 50 "
-                             f"и раздел «Источники» на панели."))
-    state["source_down"] = down
+        where = (f"Смотреть: journalctl -u {unit} -n 50 "
+                 f"и раздел «Источники» на панели.")
+        if core:
+            # Ключ — по НАЧАЛУ сбоя, а не по дню вердикта: второй отказ того же ряда
+            # в тот же день — новая тревога, а не «уже отправляли».
+            out.append(_ev(f"core_series_stale:{name}:{_stamp(since)}",
+                           "core_series_stale", f"ряд решения {name} {word}", "warn", since,
+                           fact=data_from + age_txt,
+                           meaning="От этого ряда зависит решение о позиции: пока он не "
+                                   "обновится, панель считает позицию по его последнему "
+                                   "удачному числу.",
+                           where=where))
+        else:
+            out.append(_ev(f"source_stale:{name}:{payload.get('asof_trading_day')}",
+                           "source_stale", f"источник {who} {word}", "warn", since,
+                           fact=data_from + age_txt,
+                           meaning="Панель считает по последним удачным числам и выглядит "
+                                   "рабочей — карточки этого источника помечены жёлтой точкой.",
+                           where=where))
     return out
+
+
+def _stamp(moment):
+    return moment.astimezone(timezone.utc).strftime("%Y%m%dT%H%M")
+
+
+def _sources(payload, prev, state, now):
+    """Семьи источников (без рядов решения) и ряды решения — каждый своим правилом."""
+    families = _family_units(payload)
+    down = _down_records(state, "source_down", families)
+    out = _unit_events(families, prev.get("sources") or {}, down, payload, now)
+    state["source_down"] = down
+    series = _core_units(payload)
+    core_down = _down_records(state, "core_down", series)
+    out += _unit_events(series, prev.get("core_series") or {}, core_down, payload, now,
+                        core=True)
+    state["core_down"] = core_down
+    return out
+
+
+def _held(state, key):
+    return sorted(name for name, rec in (state.get(key) or {}).items()
+                  if isinstance(rec, dict) and rec.get("held"))
 
 
 def held_sources(state):
     """Источники, тревога о которых сейчас выдерживается."""
-    return sorted(name for name, rec in (state.get("source_down") or {}).items()
-                  if isinstance(rec, dict) and rec.get("held"))
+    return _held(state, "source_down")
+
+
+def held_core_series(state):
+    """Ряды решения, тревога о которых сейчас выдерживается."""
+    return _held(state, "core_down")
+
+
+# ----------------------------------------------------------------- падение расчёта
+#
+# Упавший расчёт суточного прогона публиковал вчерашний вердикт со свежим временем:
+# юнит зелёный, событий нет, страница выглядит обновлённой (аудит 20.11.2026, §9.7).
+# run.py кладёт в витрину поле compute_error («ТипОшибки @ время»), а это правило
+# даёт тревогу в канал отказов — с защёлкой до доставки (LATCH_FIELDS) и отбивкой,
+# когда расчёт снова прошёл.
+
+def _compute_failed(payload, prev, now, crash=None):
+    err, was = payload.get("compute_error"), prev.get("compute_error")
+    mode = payload.get("run_mode") if payload.get("run_mode") in (
+        "intraday", "daily", "weekly", "monthly", "manual") else "daily"
+    asof = payload.get("asof_trading_day")
+    day = now.astimezone(wording.MSK).strftime("%Y-%m-%d")
+    if err and not was:
+        kind = str(err).split(" @ ")[0].strip() or "ошибка"
+        note = str(crash or "").strip()
+        what = note if note.startswith(kind) else (f"{kind}: {note}" if note else kind)
+        state_now = ((payload.get("verdict") or {}).get("position") or {}).get("state")
+        tail = (f", позиция — {POSITION_WORD[state_now]}" if state_now in POSITION_WORD else "")
+        return [_ev(f"compute_failed:{day}", "compute_failed",
+                    "расчёт упал: на странице прежний вердикт", "warn", now,
+                    fact=f"Прогон {wording.msk_when(now, now)}: {wording.sentence(what[:200])} "
+                         f"Опубликован вердикт от {_day(asof, now)}{tail}.",
+                    meaning="Оценка и позиция на странице — от прошлого удачного расчёта, "
+                            "хотя время обновления свежее. Сообщения о смене позиции не "
+                            "будет, пока расчёт не пройдёт.",
+                    where=f"Смотреть: journalctl -u moex-radar-{mode} -n 80.")]
+    if was and not err and payload.get("run_mode") != "intraday":
+        since = str(was).split(" @ ")[-1].strip()
+        return [_ev(f"compute_ok:{_stamp(now)}", "compute_ok",
+                    "расчёт снова проходит", "info", now,
+                    fact=f"Вердикт пересчитан, расчёт за {_day(asof, now)}."
+                         + (f" Расчёт не проходил с {wording.msk_when(since, now)}."
+                            if _parse_ts(since) else ""),
+                    meaning="Оценка и позиция на странице снова от текущего расчёта.",
+                    where="Смотреть: страницу панели.")]
+    return []
 
 
 def _health(payload, prev, now):
@@ -954,6 +1537,10 @@ def _core_missing(payload, prev, now):
 # это оборачивалось: переход «ОФЗ вышли из стресса» рождал ТРИ сообщения подряд про
 # одно движение.
 #
+# С 20.11.2026 семейство стоит на флагах ворот и идёт только в журнал страницы
+# (JOURNAL_KINDS = это же семейство), но смысл слияния прежний: один поворот — одна
+# запись журнала с самым предметным заголовком, остальное подпунктами.
+#
 # Порядок — ОТ КОНКРЕТНОГО К ОБЩЕМУ: заголовком становится самый предметный факт,
 # остальное уходит подпунктами в «Что за этим стоит».
 #
@@ -971,6 +1558,7 @@ def _core_missing(payload, prev, now):
 # ИТОГ ворот и наклона, и смена режима без смены позиции (или наоборот) — две разные
 # новости.
 REGIME_FAMILY = ("buy_window_open", "bond_flag_on", "bond_flag_off", "state_cell_change")
+assert JOURNAL_KINDS == frozenset(REGIME_FAMILY), "семейство режима живёт только в журнале"
 
 SEVERITY_RANK = {"info": 0, "warn": 1}
 CAUSES_MAX = 4          # пять строк подряд читаются как шум (тот же предел у 837)
@@ -1013,7 +1601,7 @@ def merge_regime(events):
         # тоже объяснение, и терять её вместе с сообщением незачем. Дубль с уже
         # напечатанной подробностью главного не берём.
         detail = str(event.get("detail") or "").strip().rstrip(".")
-        if detail and detail != str(main.get("detail") or "").strip().rstrip("."):
+        if detail and detail != str(main.get("detail") or "").strip().rstrip(".")                 and detail not in causes:
             causes.append(detail)
         # СМЫСЛОВАЯ часть свёрнутого события — самое ценное, что в нём было
         # («покупка просадок снова в силе», историческая статистика режима).
@@ -1039,8 +1627,11 @@ def merge_regime(events):
     return [e for e in events if id(e) not in keep]
 
 
-def detect(payload, state, now=None, merge=True):
+def detect(payload, state, now=None, merge=True, crash=None):
     """Все переходы этого прогона. state мутируется (гистерезис знака ядра).
+
+    `crash` — текст исключения упавшего расчёта (run.py): уходит только в тревогу
+    канала отказов, в публичную витрину попадает лишь тип ошибки и время.
 
     `merge=False` отдаёт СЫРОЙ выход правил, без слияния семейства режима. Нужен
     проверкам, которые обходят все виды событий: после слияния часть видов в одном
@@ -1056,10 +1647,11 @@ def detect(payload, state, now=None, merge=True):
         # пайплайна начинается с пачки «событий» о том, что случилось до него:
         # проваленный на прошлой неделе аукцион и протухший с вечера источник.
         return events
-    events += _position_change(payload, prev, now)
-    events += _cell_change(payload, prev, now)
-    events += _bond_flag(payload, prev, now)
-    events += _buy_window(payload, prev, now)
+    changed = _position_change(payload, prev, now)
+    events += changed
+    events += _position_watch(payload, prev, state, now, bool(changed))
+    events += _urals_month(payload, prev, state, now)
+    events += _gate_events(payload, prev, now)
     events += _cb(payload, prev, now)
     events += _orfr(payload, prev, now)
     events += _auction(payload, prev, now)
@@ -1068,6 +1660,7 @@ def detect(payload, state, now=None, merge=True):
     events += _sources(payload, prev, state, now)
     events += _health(payload, prev, now)
     events += _core_missing(payload, prev, now)
+    events += _compute_failed(payload, prev, now, crash)
     return merge_regime(events) if merge else events
 
 
@@ -1093,6 +1686,10 @@ def dispatch(events, dry_run=False, enabled=True, now=None):
             ev["delivered"], ev["skip"] = False, "алерты выключены"
         elif dry_run:
             ev["delivered"], ev["skip"] = False, "dry-run"
+        elif is_journal(ev):
+            # Журнальное: только лента страницы (её пишет _feed_add). Ни телеграма,
+            # ни хаба — в сеть не ходим вовсе, и повторять здесь нечего.
+            ev["channel"], ev["outcome"], ev["delivered"] = JOURNAL, JOURNAL, True
         elif is_ops(ev):
             # Санитарное: только в ops-канал. Ни зеркала в хаб, ни ленты — это
             # сообщение для того, кто чинит, а не для того, кто читает рынок.
@@ -1107,7 +1704,8 @@ def dispatch(events, dry_run=False, enabled=True, now=None):
             # видно никому и в сеть не ходит ни один такт: config() отвечает сразу.
             ev["delivered"] = outcome in (telegram.SENT, telegram.DUP)
         else:
-            outcome = telegram.deliver(ev["key"], render(ev, now))
+            outcome = telegram.deliver(ev["key"], render(ev, now),
+                                       silent=ev.get("kind") in SILENT_KINDS)
             # DUP («такой ключ уже уходил») — это ДОСТАВЛЕНО. Считать его провалом
             # значит вечно держать событие в очереди повторов: cb_reminder рождается
             # на каждом из 56 интрадей-тактов и один вытеснял из очереди всё живое.
@@ -1131,11 +1729,40 @@ def dispatch(events, dry_run=False, enabled=True, now=None):
 
 
 def _fresh(ev, now):
+    """Имеет ли смысл повторять событие из очереди.
+
+    Обычное — сутки: дальше новость протухла. Главное (смена позиции) —
+    MUST_DELIVER_MAX_DAYS: оно не протухает, пока позиция та же, а при следующей
+    смене позиции его вытеснит новое такое же событие (_supersede).
+    """
     try:
         ts = datetime.fromisoformat(str(ev.get("ts")).replace("Z", "+00:00"))
     except ValueError:
         return False
-    return now - ts < timedelta(hours=PENDING_MAX_HOURS)
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    limit = (timedelta(days=MUST_DELIVER_MAX_DAYS) if must_deliver(ev)
+             else timedelta(hours=PENDING_MAX_HOURS))
+    return now - ts < limit
+
+
+def _supersede(pending, events, now):
+    """Новая смена позиции вытесняет недоставленные прежние.
+
+    Доставлять обе незачем: читателю нужна позиция, которая стоит сейчас. Но о том,
+    что прежнее сообщение не дошло, новое обязано сказать — иначе «переход в деньги»
+    приходит человеку, который не знал, что панель была в акциях.
+    """
+    fresh = [e for e in events if must_deliver(e)]
+    lost = [e for e in pending if must_deliver(e)]
+    if not fresh or not lost:
+        return pending
+    newest = fresh[-1]
+    notes = [f"Сообщение о предыдущей смене ({str(e.get('title') or '').split(': ')[-1]}, "
+             f"{wording.msk_when(e.get('ts'), now)}) до канала не дошло." for e in lost]
+    newest["detail"] = "\n".join([newest.get("detail") or ""] + notes).strip()
+    newest["text"] = wording.plain_text(newest)
+    return [e for e in pending if not must_deliver(e)]
 
 
 def payload_events(new_events=None, state=None):
@@ -1171,8 +1798,15 @@ def _requeue(batch):
     Срез с головы ([:40]) выбрасывал самое свежее событие — а именно свежее и есть
     новость. Плюс дедуп: без него одна и та же напоминалка занимала всю очередь.
     """
-    return [{k: e[k] for k in EVENT_FIELDS if k in e}
-            for e in _dedup(batch) if not e.get("delivered")][-PENDING_MAX:]
+    left = [{k: e[k] for k in EVENT_FIELDS if k in e}
+            for e in _dedup(batch) if not e.get("delivered")]
+    # Главное событие срез очереди не трогает: потерять его из-за сорока мелких
+    # повторов — та же потеря смены позиции, только другим путём.
+    main = [e for e in left if must_deliver(e)]
+    room = max(PENDING_MAX - len(main), 0)
+    rest = [e for e in left if not must_deliver(e)]
+    keep = {id(e) for e in main} | {id(e) for e in (rest[-room:] if room else [])}
+    return [e for e in left if id(e) in keep]
 
 
 def _feed_add(state, events):
@@ -1242,29 +1876,35 @@ def seed_from_payload(state, payload, now=None):
 LATCH_FIELDS = {
     "health_review": ("health", "health_review_due"),
     "core_missing": ("core_value", "cell"),
+    # Падение расчёта: пока тревога не доставлена, снимок помнит «расчёт проходил»,
+    # и следующий такт (он несёт то же поле compute_error) родит её заново.
+    "compute_failed": ("compute_error",),
 }
 
 
-def _keep_prev_source(snap, prev_last, name):
-    prev_sources = prev_last.get("sources") or {}
+def _keep_prev_source(snap, prev_last, name, section="sources"):
+    prev_sources = prev_last.get(section) or {}
     if name in prev_sources:
-        snap.setdefault("sources", {})[name] = prev_sources[name]
+        snap.setdefault(section, {})[name] = prev_sources[name]
     else:
         # Источник впервые появился уже сломанным: раньше его в снимке не
         # было — убираем и сейчас, чтобы переход случился заново.
-        (snap.get("sources") or {}).pop(name, None)
+        (snap.get(section) or {}).pop(name, None)
 
 
-def _snapshot_keeping_undelivered(payload, prev_last, batch, now, held=()):
+def _snapshot_keeping_undelivered(payload, prev_last, batch, now, held=(), held_core=()):
     """Снимок текущего состояния, но защёлки недоставленных событий откатываются назад.
 
     `held` — источники на выдержке: о сбое ещё не сообщали, поэтому снимок держит их
     прежний статус. Иначе следующий такт увидел бы «уже сломан» и промолчал как
-    «уже сообщали», а выздоровление прислало бы отбивку без тревоги.
+    «уже сообщали», а выздоровление прислало бы отбивку без тревоги. `held_core` —
+    то же для рядов решения.
     """
     snap = snapshot(payload, now)
     for name in held:
         _keep_prev_source(snap, prev_last, name)
+    for name in held_core:
+        _keep_prev_source(snap, prev_last, name, "core_series")
     for event in batch:
         if event.get("delivered"):
             continue
@@ -1279,18 +1919,103 @@ def _snapshot_keeping_undelivered(payload, prev_last, batch, now, held=()):
             name = parts[1] if len(parts) > 2 else None
             if name:
                 _keep_prev_source(snap, prev_last, name)
+        if kind == "core_series_stale":
+            parts = str(event.get("key") or "").split(":")
+            name = parts[1] if len(parts) > 2 else None
+            if name:
+                _keep_prev_source(snap, prev_last, name, "core_series")
     return snap
 
 
-def run(payload, dry_run=False, enabled=True, now=None, seed_payload=None, log=None):
-    """Полный цикл: определить переходы, повторить недоставленное, отправить, сохранить."""
+def _stuck_events(batch, state, now, log=None):
+    """Тревога «главное событие не доходит» и отбивка, когда оно дошло.
+
+    Главное событие (смена позиции) ждёт доставки в очереди, но ждать молча нельзя:
+    владелец не знает, что ему не пришло то, по чему он действует. Канал отказов
+    обвязки ходит другим ботом и может быть жив, когда рыночный лежит, — тревога
+    уходит туда и сама несёт суть решения («было → стало», день исполнения). Если
+    лежат оба канала, остаётся строка в журнале прогона: это не лечится.
+    """
+    stuck = state.get("stuck") if isinstance(state.get("stuck"), dict) else {}
+    out = []
+    for ev in batch:
+        if not must_deliver(ev):
+            continue
+        key = ev.get("key")
+        ts = _parse_ts(ev.get("ts"))
+        waited = (now - ts) if ts else timedelta(0)
+        late = wording.days_hours(waited.total_seconds() / 60)
+        title = str(ev.get("title") or "").strip().rstrip(".")
+        if ev.get("delivered"):
+            if key in stuck:
+                stuck.pop(key, None)
+                out.append(_ev(f"delivery_ok:{key}", "delivery_ok",
+                               "сообщение о смене позиции доставлено", "info", now,
+                               fact=f"«{title}» дошло до канала рынка с опозданием {late}.",
+                               meaning="Очередь главных сообщений пуста.",
+                               where="Смотреть: канал рынка."))
+            continue
+        if ev.get("outcome") != telegram.FAIL or waited < STUCK_AFTER:
+            continue
+        if log:
+            log(f"ГЛАВНОЕ СОБЫТИЕ НЕ ДОСТАВЛЕНО: {key} ждёт {late} — канал рынка не принимает")
+        if key in stuck:
+            continue        # тревога уже ушла: повторять её каждым тактом нельзя
+        move = " → ".join(x for x in (ev.get("before"), ev.get("after")) if x)
+        when = ""
+        if ev.get("exec_day"):
+            close = wording.exec_close(ev["exec_day"])
+            when = (" Исполнять на закрытии " + _wd(ev["exec_day"], now)
+                    + (" — оно уже прошло." if close and now >= close else " — оно ещё впереди."))
+        out.append(_ev(f"delivery_stuck:{key}", "delivery_stuck",
+                       "смена позиции не доходит до канала рынка", "warn", now,
+                       fact=f"«{title}»" + (f": {move}" if move else "") + "."
+                            + when
+                            + f" Событие от {wording.msk_when(ts, now)}, не доставлено {late}.",
+                       meaning="Канал рынка в Телеграме не принимает сообщения. Панель "
+                               "повторяет отправку каждым прогоном — до доставки, но не "
+                               f"дольше {MUST_DELIVER_MAX_DAYS} суток и не дольше следующей "
+                               "смены позиции.",
+                       where="Смотреть: страницу панели (позиция там уже новая) и "
+                             "journalctl -u moex-radar-intraday -n 50."))
+    state["stuck"] = stuck
+    return out
+
+
+def _mark_stuck(extra, state):
+    """Тревога о недоставке ушла (или уже уходила) — запомнить, чтобы не повторять."""
+    stuck = state.get("stuck") if isinstance(state.get("stuck"), dict) else {}
+    for ev in extra:
+        if ev.get("kind") == "delivery_stuck" and ev.get("delivered"):
+            stuck[str(ev.get("key"))[len("delivery_stuck:"):]] = ev.get("ts")
+    state["stuck"] = stuck
+
+
+def prepare(payload, dry_run=False, enabled=True, now=None, seed_payload=None, log=None,
+            crash=None):
+    """Первая половина цикла: найти переходы, поднять очередь, спросить разбор.
+
+    Ничего не отправляет и состояния не пишет. -> (batch, ctx): batch уже годится
+    для ленты страницы (payload_events), ctx отдаётся в deliver.
+
+    ПОЧЕМУ ЦИКЛ РАЗРЕЗАН (20.11.2026). Сообщение уходило раньше публикации
+    страницы: ссылка «Открыть панель» из сообщения о смене позиции вела на
+    страницу, где позиция ещё прежняя. Теперь порядок в run.py такой: prepare →
+    лента в payload → публикация → deliver. Событие должно попасть в ленту ДО
+    публикации (и с тем же разбором, что уйдёт в телеграм) — поэтому правила и
+    разбор остаются до неё, а после неё только отправка. Причины прежнего порядка,
+    кроме этой, в истории нет (порядок стоит с первой редакции, 013f25e).
+    Обрыв между публикацией и deliver безопасен: состояние ещё не записано, и
+    следующий прогон найдёт те же переходы заново.
+    """
     now = now or datetime.now(timezone.utc)
     state = load_state()
     if seed_payload is not None:
         seed_from_payload(state, seed_payload, now)
     prev_last = dict(state.get("last") or {})
-    events = detect(payload, state, now)
+    events = detect(payload, state, now, crash=crash)
     pending = [e for e in (state.get("pending") or []) if _fresh(e, now)]
+    pending = _supersede(pending, events, now)
     batch = _dedup(pending + events)
     # Комментарий проставляется ДО отправки и ДО записи в ленту: он должен уехать
     # одинаковым во все три места — телеграм, хаб и журнал витрины. В dry-run в сеть
@@ -1298,29 +2023,63 @@ def run(payload, dry_run=False, enabled=True, now=None, seed_payload=None, log=N
     #
     # СПРАШИВАЕМ ТОЛЬКО ПРО НОВОЕ. Часть правил рождает событие заново на КАЖДОМ такте
     # (cb_reminder — все 169 тактов в канун заседания), и телеграм гасит их дедупом уже
-    # после того, как комментатор сходил к модели. Модель отвечает 150–200 с, а alerts.run
+    # после того, как комментатор сходил к модели. Модель отвечает 150–200 с, а разбор
     # стоит ДО публикации при дедлайне такта 300 с — то есть лишний запрос платит не
     # деньгами, а риском не обновить витрину. Событие, чей ключ уже лежит в ленте, своё
     # уже получило: второй разбор ему не нужен и второй раз он никуда не уедет.
+    #
+    # Журнальным (флаги ворот) разбор не заказывается вовсе: они не уходят читателю
+    # сообщением, и платить моделью за строку журнала незачем.
     if enabled and not dry_run:
         known = {e.get("key") for e in (state.get("feed") or [])}
-        fresh = [e for e in batch if e.get("key") not in known]
+        fresh = [e for e in batch if e.get("key") not in known and not is_journal(e)]
         try:
             commentary.annotate(fresh, payload, log=log)
         except Exception as exc:  # noqa: BLE001 — украшение не имеет права сорвать доставку
             if log:
                 log(f"комментатор упал: {type(exc).__name__}: {exc}")
-    dispatch(batch, dry_run=dry_run, enabled=enabled, now=now)
+    ctx = {"state": state, "prev_last": prev_last, "events": events, "payload": payload,
+           "now": now, "dry_run": dry_run, "enabled": enabled, "log": log}
+    return batch, ctx
 
-    _feed_add(state, events)
-    state["last"] = _snapshot_keeping_undelivered(payload, prev_last, batch, now,
-                                                  held=held_sources(state))
+
+def deliver(batch, ctx):
+    """Вторая половина цикла: отправить, записать состояние. -> batch с исходами."""
+    state, now, payload = ctx["state"], ctx["now"], ctx["payload"]
+    dry_run, enabled, log = ctx["dry_run"], ctx["enabled"], ctx.get("log")
+    dispatch(batch, dry_run=dry_run, enabled=enabled, now=now)
+    if enabled and not dry_run:
+        extra = _stuck_events(batch, state, now, log=log)
+        if extra:
+            dispatch(extra, dry_run=dry_run, enabled=enabled, now=now)
+            _mark_stuck(extra, state)
+            batch += extra
+        # Отбой предупреждения имеет смысл, только если само предупреждение дошло.
+        watch = state.get("watch") if isinstance(state.get("watch"), dict) else None
+        if watch and any(e.get("key") == watch.get("key") and e.get("delivered")
+                         for e in batch):
+            watch["delivered"] = True
+
+    _feed_add(state, ctx["events"])
+    state["last"] = _snapshot_keeping_undelivered(payload, ctx["prev_last"], batch, now,
+                                                  held=held_sources(state),
+                                                  held_core=held_core_series(state))
     state["pending"] = _requeue(batch)
     if not dry_run:
         # В dry-run состояние НЕ трогаем: иначе прогон «на посмотреть» съедает
         # переход, и настоящий прогон о нём уже не сообщит.
         save_state(state)
     return batch
+
+
+def run(payload, dry_run=False, enabled=True, now=None, seed_payload=None, log=None,
+        crash=None):
+    """Полный цикл одним вызовом: определить переходы, повторить недоставленное,
+    отправить, сохранить. Боевой прогон (run.py) зовёт половины порознь, с
+    публикацией страницы между ними; этот вызов — для проверок и ручных прогонов."""
+    batch, ctx = prepare(payload, dry_run=dry_run, enabled=enabled, now=now,
+                         seed_payload=seed_payload, log=log, crash=crash)
+    return deliver(batch, ctx)
 
 
 def needs_seed():

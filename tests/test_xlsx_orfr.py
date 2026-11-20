@@ -98,6 +98,139 @@ def build_workbook(rows, sheet_name="РА По участникам", skip_empty
     return buf.getvalue()
 
 
+# Строки настоящего ORFR_2025-12_2026-01.xlsx, лист «рис. 21» (тот же блок, что позже
+# стал листом «РА По участникам»; «Прочие Банки» с заглавной — как в файле).
+OLD_HEADER = ["Годы", "Месяцы/кварталы", "Нерезиденты", "НФО", "Прочие Банки", "СЗКО",
+              "Физические лица", "Доверительное управление", "Нефинансовые организации"]
+OLD_ROWS = [
+    ["Покупки /продажи акций по категориям участников на вторичных биржевых торгах "
+     "(в среднем в месяц), млрд руб."],
+    ["Источник: ПАО Московская Биржа."],
+    [],
+    OLD_HEADER,
+    [2025, "I квартал", 1.86, -4.63, -16.97, 8.5, 10.71, 3.29, -2.77],
+    [None, "II квартал", 2.54, -13.76, -8.41, 7.81, 18.28, -8.87, 2.41],
+    [None, "III квартал", -4.0, -17.84, -0.37, 12.67, 21.34, -11.08, -0.71],
+    [None, "Октябрь", -1.52, 3.8, -1.76, -2.86, 13.3, -9.64, -1.31],
+    [None, "Ноябрь", -2.99, 10.5, -0.85, -5.68, -22.33, 19.82, 1.51],
+    [None, "Декабрь", -12.85, -34.31, 2.27, 1.93, 0.44, 50.59, -8.07],
+    [2026, "Январь", 5.34, 14.49, 1.87, -12.9, 2.44, -10.42, -0.82],
+]
+
+
+class OldWorkbookCase(unittest.TestCase):
+    """Таблица к выпуску за декабрь 2025 — январь 2026: лист называется «рис. 21»."""
+
+    def setUp(self):
+        self.orfr = need(self, "pipeline.fetch.orfr", "parse_workbook", "equity_sheet")
+        self.x = need(self, "pipeline.lib.xlsx", "open_bytes", "XlsxError")
+        self.book = build_workbook(OLD_ROWS, sheet_name="рис. 21")
+
+    def test_лист_находится_по_заголовку_а_месяцы_разбираются(self):
+        sheet = self.orfr.equity_sheet(self.x.open_bytes(self.book))
+        self.assertEqual(sheet, "рис. 21")
+        months, _notes = self.orfr.parse_workbook(self.book, "2026-01", sheet=sheet)
+        # Кварталы — среднемесячные и в месячный ряд не идут; год тянется от ячейки.
+        self.assertEqual(sorted(months), ["2025-10", "2025-11", "2025-12", "2026-01"])
+        self.assertEqual(months["2025-11"]["szko"], -5.68)
+        self.assertEqual(months["2025-11"]["other_banks"], -0.85)
+        self.assertEqual(months["2025-12"]["szko"], 1.93)
+        self.assertEqual(months["2025-12"]["other_banks"], 2.27)
+
+    def test_лист_про_облигации_потоками_акций_не_считается(self):
+        # Рядом лежат листы с теми же колонками участников про ОФЗ и корпоративные
+        # облигации. мутация: искать лист только по колонкам -> в ряд потоков акций
+        # уезжают покупки облигаций.
+        rows = [["Покупки/продажи ОФЗ по категориям участников, млрд руб."], [], [],
+                OLD_HEADER, [2025, "Ноябрь", 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]]
+        with self.assertRaises(self.x.XlsxError):
+            self.orfr.equity_sheet(self.x.open_bytes(build_workbook(rows, "рис. 7")))
+
+    def test_фетчер_по_прежнему_читает_лист_по_имени(self):
+        # Без явного листа старая книга — отказ, а не тихий выбор похожего листа.
+        with self.assertRaises(self.x.XlsxError):
+            self.orfr.parse_workbook(self.book, "2026-01")
+
+
+class BackfillGapsCase(unittest.TestCase):
+    """ops/backfill_orfr_gaps.py: долив пропусков, существующие точки не трогаются."""
+
+    def setUp(self):
+        import importlib.util
+        import os
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        self.store = need(self, "pipeline.lib.store", "upsert_points", "load_series")
+        self.tmp = TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        prev = os.environ.get("STATE_DIR")
+        os.environ["STATE_DIR"] = self.tmp.name
+        self.addCleanup(lambda: os.environ.pop("STATE_DIR", None) if prev is None
+                        else os.environ.__setitem__("STATE_DIR", prev))
+        path = Path(__file__).resolve().parents[1] / "ops" / "backfill_orfr_gaps.py"
+        spec = importlib.util.spec_from_file_location("backfill_orfr_gaps", path)
+        self.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.mod)
+        self.book = Path(self.tmp.name) / "ORFR_2025-12_2026-01.xlsx"
+        self.book.write_bytes(build_workbook(OLD_ROWS, sheet_name="рис. 21"))
+        # Боевые ряды на 20.11.2026: у СЗКО и прочих банков нет ноября и декабря 2025,
+        # у остальных категорий месяцы есть (значения — из копии стора аудита).
+        seed = {"fiz": {"2025-10-31": 13.3, "2025-11-30": -22.3, "2025-12-31": 0.4,
+                        "2026-01-31": 2.44},
+                "nfo_du": {"2025-10-31": -9.6, "2025-11-30": 19.8, "2025-12-31": 50.6,
+                           "2026-01-31": -10.42},
+                "nfo_own": {"2025-10-31": 4.5, "2025-11-30": 16.0, "2025-12-31": -34.3,
+                            "2026-01-31": 12.38},
+                "szko": {"2025-10-31": -2.9, "2026-01-31": -12.9},
+                "other_banks": {"2025-10-31": -1.8, "2026-01-31": 1.87},
+                "nonres": {"2025-10-31": -1.5, "2025-11-30": -3.0, "2025-12-31": -12.9,
+                           "2026-01-31": 5.34}}
+        for cat, points in seed.items():
+            self.store.upsert_points("orfr_flows_%s" % cat, points)
+
+    def run_script(self, *argv):
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = self.mod.main([str(self.book)] + list(argv))
+        return code, out.getvalue()
+
+    def points(self, cat):
+        return self.store.load_series("orfr_flows_%s" % cat)["points"]
+
+    def test_без_apply_ничего_не_пишется(self):
+        code, out = self.run_script()
+        self.assertEqual(code, 0)
+        self.assertNotIn("2025-11-30", self.points("szko"))
+        self.assertIn("долил бы 4", out)
+
+    def test_apply_доливает_только_пропуски(self):
+        self.run_script("--apply")
+        self.assertEqual(self.points("szko")["2025-11-30"], -5.68)
+        self.assertEqual(self.points("szko")["2025-12-31"], 1.93)
+        self.assertEqual(self.points("other_banks")["2025-11-30"], -0.85)
+        self.assertEqual(self.points("other_banks")["2025-12-31"], 2.27)
+        # мутация: писать все месяцы таблицы -> затравка пересобрана молча: у НФО за
+        # ноябрь 2025 в ряду 16,0, в таблице 10,5 — пересмотр ЦБ, решать не скрипту.
+        self.assertEqual(self.points("nfo_own")["2025-11-30"], 16.0)
+        self.assertEqual(self.points("fiz")["2025-11-30"], -22.3)
+        self.assertEqual(self.points("szko")["2025-10-31"], -2.9)
+
+    def test_расхождения_названы_но_не_исправлены(self):
+        _code, out = self.run_script("--apply")
+        self.assertIn("orfr_flows_nfo_own 2025-11-30: в ряду 16.0, в таблице 10.5", out)
+        self.assertIn("НЕ меняю", out)
+
+    def test_копия_ряда_остаётся_рядом(self):
+        self.run_script("--apply")
+        copy = self.store.raw_dir() / "orfr_flows_szko.json.before-orfr-fill"
+        self.assertTrue(copy.exists())
+        self.assertFalse((self.store.raw_dir()
+                          / "orfr_flows_fiz.json.before-orfr-fill").exists(),
+                         "ряд без долива копировать незачем")
+
+
 class ReaderCase(unittest.TestCase):
     def setUp(self):
         self.x = need(self, "pipeline.lib.xlsx", "open_bytes", "XlsxError")

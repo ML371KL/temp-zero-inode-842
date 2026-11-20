@@ -94,7 +94,7 @@ def _n(v, nd=2, plus=True):
 
 # ------------------------------------------------------------ дневной композит
 
-def daily_composite(panel, mf):
+def daily_composite(panel, mf, components=None, window=None):
     """Дневной ряд композита «как compute_core, если бы сегодня был любой день истории».
 
     Для дня t в месяце M у каждой ноги окно = сырые значения ЗАКРЫТЫХ месяцев до M
@@ -104,16 +104,22 @@ def daily_composite(panel, mf):
     дне закрытого месяца ряд ОБЯЗАН совпасть с mf["composite"] (тест сверяет ≤1e-9):
     это и есть доказательство, что дневное число — то же самое ядро, а не его
     родственник. Цена — O(дней×60) на ногу, при 7 тыс. дней это доли секунды.
+
+    components и window — ТОЛЬКО для справки (голосование настроек, compute/evidence.py):
+    другой состав ног ([{"id", "sign"}], колонки берутся из panel["cols"], месячные
+    значения — из mf["raw"]) и другое окно нормировки в месяцах. По умолчанию — боевые
+    constants.CORE_COMPONENTS и Z_WINDOW_MONTHS: позицию считает именно этот вызов, и
+    его результат закреплён tests/test_rule_freeze.py.
     """
     dates = panel.get("dates") or []
     cols = panel.get("cols") or {}
     n = len(dates)
     labels = mf.get("dates") or []
     month_pos = {calc.month_key(lab): i for i, lab in enumerate(labels)}
-    win, zmin, clip = (constants.Z_WINDOW_MONTHS, constants.Z_MIN_MONTHS,
-                       constants.Z_CLIP)
+    win, zmin, clip = (constants.Z_WINDOW_MONTHS if window is None else window,
+                       constants.Z_MIN_MONTHS, constants.Z_CLIP)
     total, used = [0.0] * n, [0] * n
-    for comp in constants.CORE_COMPONENTS:
+    for comp in (constants.CORE_COMPONENTS if components is None else components):
         cid, sgn = comp["id"], comp["sign"]
         raw = (mf.get("raw") or {}).get(cid) or []
         vals = cols.get(cid) or [None] * n
@@ -517,19 +523,33 @@ def comp_leg_moves(panel, mf, target):
     return out
 
 
+# Оговорка к сдвигам (switch_distance.legs_note): каждый сдвиг посчитан при неподвижных
+# остальных показателях. Строка условий (_legs_line) говорит это сама; у чисел
+# switch_distance.legs её до 20.11.2026 не было, и витрина печатала сдвиги без неё.
+LEGS_NOTE = "каждый сдвиг — при неизменных остальных; на деле показатели двигаются вместе"
+
+
 def _leg_text(cid, delta):
-    """Сдвиг ноги словами читателя (без слов «нога», «z», «композит»)."""
+    """Сдвиг показателя словами читателя — ОТ НЫНЕШНЕГО ЗНАЧЕНИЯ.
+
+    До 20.11.2026 сдвиг нефти читался «рублёвая бочка ниже своего тренда ещё на 33%»:
+    бочка была ВЫШЕ тренда на 47%, а имелось в виду «дешевле нынешней на 33%» (аудит
+    20.11.2026, §4.5). Все три текста теперь сравнивают с тем, что стоит в расчёте
+    сейчас; у нефти это средняя цена последнего учтённого месяца, а не сегодняшняя
+    котировка, — и текст говорит именно так.
+    """
     if delta is None:
         return None
     if cid == "usd_mom63":
         f = (math.exp(delta) - 1) * 100
-        return f"доллар {'дороже' if f > 0 else 'дешевле'} сегодняшнего на {_n(abs(f), 0, False)}%"
+        return f"доллар на {_n(abs(f), 0, False)}% {'дороже' if f > 0 else 'дешевле'}, чем сейчас"
     if cid == "slope_10_2":
-        return (f"кривая ОФЗ {'круче' if delta > 0 else 'положе'} на "
-                f"{_n(abs(delta), 1, False)} п.п. (10 лет минус 2 года)")
+        return (f"кривая ОФЗ на {_n(abs(delta), 1, False)} п.п. "
+                f"{'круче' if delta > 0 else 'положе'}, чем сейчас (10 лет минус 2 года)")
     if cid == "urals_rub_gap":
         f = (math.exp(delta) - 1) * 100
-        return f"рублёвая бочка {'выше' if f > 0 else 'ниже'} своего тренда ещё на {_n(abs(f), 0, False)}%"
+        return (f"нефть в рублях на {_n(abs(f), 0, False)}% "
+                f"{'дороже' if f > 0 else 'дешевле'}, чем сейчас в расчёте")
     return None
 
 
@@ -541,13 +561,14 @@ def switch_distance(panel, mf, state, comp_state, flags):
     позиция «деньги»; vol_calm_status — ok | slow_beyond | beyond | no_data);
     comp_target и legs — порог оценки рынка, который сейчас решает (вход выше +0,2 у
     «денег» без знака «за акции», выход ниже −0,2 у «акций»), и сдвиг каждой ноги,
-    которого хватило бы одного. Аудит 03.10.2026, рекомендация 11.
+    которого хватило бы одного; legs_note — оговорка к этим сдвигам (LEGS_NOTE), когда
+    они есть. Аудит 03.10.2026, рекомендация 11.
     """
     cols = panel.get("cols") or {}
     thr = constants.DECISION["comp_threshold"]
     out = {"calm_step_pct": CALM_STEP * 100, "vol_calm_days_min": None,
            "vol_calm_days_max": None, "vol_calm_status": None,
-           "comp_target": None, "legs": []}
+           "comp_target": None, "legs": [], "legs_note": None}
     if state == FLAT and flags.get("vol") == 1:
         q60 = calc.last_valid(cols.get("vol_thresh60") or [])[1]
         ret1 = cols.get("ret1") or []
@@ -570,6 +591,8 @@ def switch_distance(panel, mf, state, comp_state, flags):
             if leg["delta"] is not None:
                 leg["delta"] = round(leg["delta"], 4)
             out["legs"].append(leg)
+        if any(leg.get("text") for leg in out["legs"]):
+            out["legs_note"] = LEGS_NOTE
     return out
 
 
@@ -673,7 +696,7 @@ def _held_by(state, gate_is_open, cs):
 
 
 def _position_block(dates, cols, states, hyst, gate_open, comp_live, comp_state,
-                    is_dec, pos, reasons, dist=None):
+                    is_dec, pos, reasons, dist=None, tr_last=None):
     n = len(dates)
     last = n - 1
     state = LONG if pos[last] else FLAT
@@ -733,7 +756,8 @@ def _position_block(dates, cols, states, hyst, gate_open, comp_live, comp_state,
         # дописывает run.build_full: ему нужен стор.
         "journal": track.journal(dates, pos, reasons, cols.get("mcftr"), cols.get("deposit"),
                                  curve=track.curve_positions(dates, cols.get("slope_10_2"),
-                                                             is_dec, START)),
+                                                             is_dec, START),
+                                 tr_last=tr_last),
     }
 
 
@@ -784,14 +808,17 @@ def compute_decision(panel, mf, states=None):
     last = n - 1
     dist = switch_distance(panel, mf, LONG if pos[last] else FLAT, comp_state[last],
                            {k: hyst[k][last] for k in ("trend", "vol", "bond")})
+    # Счёт денег идёт по последний день с СОБСТВЕННОЙ точкой индекса полной доходности
+    # (track.own_last): на позицию не влияет, только на журнал и волны.
+    tr_last = track.own_last(panel)
     block = _position_block(dates, cols, states, hyst, gate_open, comp_live,
-                            comp_state, is_dec, pos, reasons, dist)
+                            comp_state, is_dec, pos, reasons, dist, tr_last)
     # Прозрачность (аудит 10.11.2026, этап 2): какая нога держит знак решения и что
     # говорит простая кривая. На позицию не влияют — только добавленные поля.
     block["held_by"].update(leg_contribs(panel, mf, comp_state[last]))
     block["curve"] = curve_now(dates, cols, is_dec)
     try:
-        skills = {"waves": skills_mod.waves(dates, cols.get("mcftr"), pos),
+        skills = {"waves": skills_mod.waves(dates, cols.get("mcftr"), pos, through=tr_last),
                   "div_gap": skills_mod.div_gap(dates, cols),
                   "against": skills_mod.against(dates, cols.get("mcftr"), pos)}
     except Exception as exc:  # noqa: BLE001 — справка не имеет права ронять позицию
@@ -805,5 +832,6 @@ def compute_decision(panel, mf, states=None):
             "gate_open": gate_open, "is_decision_day": is_dec, "pos": pos,
             "reasons": reasons, "bits": hyst, "raw_bits": raw,
             "pos_prev_rule": pos0, "reasons_prev_rule": reasons0,
+            "tr_last": tr_last,
         },
     }

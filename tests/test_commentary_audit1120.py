@@ -1,0 +1,253 @@
+"""ИИ-разбор событий о позиции после аудита 20.11.2026 (отчёт аудита, §9.4).
+
+Разбор к выходу из акций 06.11.2026 назвал причиной стресс облигаций и индекс ниже
+средней: «если RGBI вернётся выше порога стресса, а индекс закрепится над
+долгосрочной средней, основания для денег ослабнут». На деле ворота были открыты, а
+вышла панель из-за оценки рынка, знак которой держала нефть. Во вход модели не
+уходили ни оценка, ни её слагаемые, ни условия смены; проверка разбора ловила числа
+и слова, но не смысл.
+
+Здесь закреплено: что уходит модели для событий о позиции, какие слова ей разрешены
+и какие подделки разбора теперь отбрасываются — и какие по-прежнему нет.
+"""
+
+import json
+import unittest
+
+from tests import need
+from tests.test_alerts import payload, position_block, tile_cb
+
+EVENT = {"key": "position:2026-11-06:flat:20261106T2055", "kind": "position_change",
+         "severity": "warn", "ts": "2026-11-06T20:55:01Z",
+         "title": "Позиция: переход в деньги", "before": "акции",
+         "after": "деньги (ставка 13,3%)",
+         "detail": "Оценка рынка ушла ниже −0,2 в день решения: −0,31.",
+         "meaning": "Позиция — итог двух условий."}
+RATE = {"key": "cb_decision:x", "kind": "cb_decision", "title": "Банк России снизил ставку",
+        "before": "15,00%", "after": "14,00%", "ts": "2026-11-06T20:55:01Z"}
+
+
+def panel():
+    """Витрина дня 06.11.2026 в объёме входа модели: ворота открыты, решала оценка."""
+    out = payload(position=position_block("flat", by_score=True, cash_rate=13.3),
+                  monitors=[tile_cb(key_rate=14.0),
+                            {"id": "deposit_spread", "payload": {"deposit_pct": 13.3,
+                                                                 "dy_trail_pct": 8.7}}])
+    out["states"]["distances"] = [
+        {"id": "trend", "value": -0.6, "threshold": 0.0},
+        {"id": "vol", "value": 18.1, "threshold": 28.3},
+        {"id": "bond", "value": -7.9, "threshold": -3.9}]
+    return out
+
+
+class Case(unittest.TestCase):
+    def setUp(self):
+        self.mod = need(self, "pipeline.lib.commentary", "request_body", "decision_context",
+                        "guard_rules", "GUARD_ALLOW", "SYSTEM")
+        self.guard = need(self, "pipeline.lib.llm_guard", "check", "review")
+
+    def user(self, events, pl=None):
+        return json.loads(self.mod.request_body(events, pl or panel())["messages"][0]["content"])
+
+
+class TestDecisionGoesToTheModel(Case):
+
+    def test_событие_о_позиции_несёт_причину_оценку_и_слагаемые(self):
+        """мутация: убрать блок «решение» из входа -> модели снова нечем назвать
+        настоящую причину, а стресс ОФЗ из market_now остаётся единственной опорой.
+        """
+        got = self.user([EVENT])["events"][0]["решение"]
+        self.assertEqual(got["причина_смены"], "оценка рынка ушла ниже −0,2 в день решения")
+        self.assertEqual((got["оценка_рынка"], got["порог_решения"]), (-0.31, 0.2))
+        self.assertIs(got["ворота_открыты"], True)
+        self.assertEqual(got["слагаемые_оценки"], {
+            "курс доллара": {"вклад": -0.15, "оценка_без_него": -0.39},
+            "кривая ОФЗ": {"вклад": 0.82, "оценка_без_него": -0.88},
+            "нефть в рублях": {"вклад": -1.6, "оценка_без_него": 0.34}})
+        self.assertEqual((got["знак_держит"], got["оценка_без_него"]), ("нефть в рублях", 0.34))
+        self.assertEqual(got["что_сменит_позицию"],
+                         ["оценка рынка выше +0,2 в день решения (сейчас −0,31)"])
+        self.assertEqual(got["следующий_день_решения"], "2026-08-14")
+
+    def test_имена_из_таблицы_модели_во_вход_не_идут(self):
+        # мутация: слать label из held_by -> «Гэп рублёвой бочки к тренду» во входе,
+        # а оттуда в текст разбора.
+        text = json.dumps(self.user([EVENT])["events"][0]["решение"], ensure_ascii=False)
+        for inner in ("бочк", "моментум", "Гэп", "usd_mom63", "urals_rub_gap"):
+            self.assertNotIn(inner, text)
+
+    def test_чужому_событию_блок_не_даётся(self):
+        # Числа блока — числа СВОЕГО события: проверка разбора не должна разрешать
+        # их событию о ставке ЦБ из той же пачки.
+        rows = self.user([RATE, EVENT])["events"]
+        self.assertNotIn("решение", rows[0])
+        self.assertIn("решение", rows[1])
+
+    def test_сила_сигнала_и_доля_настроек_читаются_если_есть(self):
+        # Их параллельно добавляет другой исполнитель: есть — уходят, нет — не падаем.
+        pl = panel()
+        self.assertNotIn("сила_сигнала", self.user([EVENT], pl)["events"][0]["решение"])
+        pl["verdict"]["strength"] = {"label": "слабый", "step": 2}
+        pl["verdict"]["vote"] = {"for_long": 14, "of": 27}
+        got = self.user([EVENT], pl)["events"][0]["решение"]
+        self.assertEqual(got["сила_сигнала"], {"label": "слабый", "step": 2})
+        self.assertEqual(got["доля_настроек_за_акции"], {"for_long": 14, "of": 27})
+
+    def test_витрина_без_позиции_и_без_held_by_не_роняет(self):
+        self.assertIsNone(self.mod.decision_context(payload()))
+        pl = panel()
+        for key in ("held_by", "conditions", "comp_daily"):
+            pl["verdict"]["position"].pop(key)
+        got = self.user([EVENT], pl)["events"][0]["решение"]
+        self.assertNotIn("слагаемые_оценки", got)
+        self.assertEqual(got["позиция"], "деньги")
+
+    def test_промпт_требует_объяснять_только_этими_фактами(self):
+        system = self.mod.SYSTEM
+        self.assertIn("Объясняй смену ТОЛЬКО этими фактами", system)
+        self.assertIn("позицию НЕ меняли", system)
+        # Одно внешнее слово и в факте, и в разборе: «ворота» больше не под запретом.
+        self.assertNotIn("ячейку, ворота", system)
+        self.assertIn("«ворота»", system)
+
+
+class TestGuard(Case):
+    """Что проверка разбора теперь отбрасывает у события 06.11 — и что нет."""
+
+    EXTRA = None
+
+    def check(self, text, events=None, pl=None):
+        events = events or [EVENT]
+        pl = pl or panel()
+        body = self.mod.request_body(events, pl)["messages"][0]["content"]
+        rules = self.mod.guard_rules(events, pl)
+        own = list(rules.get("*") or []) + list(rules.get(0) or [])
+        return self.guard.check(text, body, 0, False, self.mod.SYSTEM.split("ФОРМАТ:")[0],
+                                self.mod.GUARD_ALLOW, own)
+
+    def kinds(self, res):
+        return [c[2] for c in res["cut"]]
+
+    TRUE = ("Правило вышло из акций из-за оценки рынка: она опустилась до −0,31 при пороге "
+            "−0,2. Знак оценки держит нефть в рублях: без неё оценка была бы +0,34. "
+            "Ворота при этом открыты. Если оценка поднимется выше +0,2 в день решения, "
+            "то позиция вернётся в акции.")
+
+    def test_правдивый_разбор_проходит_целиком(self):
+        """мутация: не передавать allow -> фраза «ворота при этом открыты» вырезана,
+        хотя это слово стоит строкой выше в факте сообщения.
+        """
+        res = self.check(self.TRUE)
+        self.assertEqual(res["cut"], [])
+        self.assertEqual(res["text"], self.TRUE)
+
+    def test_без_разрешения_слово_ворота_режется_как_раньше(self):
+        # Общий модуль проверки не изменил поведения по умолчанию (общие векторы).
+        body = self.mod.request_body([EVENT], panel())["messages"][0]["content"]
+        res = self.guard.check(self.TRUE, body, 0)
+        self.assertEqual(self.kinds(res), ["внутренние слова"])
+
+    def test_ложная_причина_отбрасывается(self):
+        """Тот самый разбор 06.11: причина — стресс облигаций, условие — RGBI.
+
+        мутация: убрать FALSE_CAUSE_RULES -> разбор проходит целиком, все его числа
+        честно взяты из входа.
+        """
+        res = self.check("Правило вышло в деньги, потому что облигации в стрессе: RGBI "
+                         "(индекс гособлигаций) на 7,9% ниже годового максимума. Пока "
+                         "облигации не восстановятся выше порога 3,9%, оснований "
+                         "возвращаться в акции нет. Если RGBI отыграет просадку, то "
+                         "позиция вернётся в акции.")
+        self.assertIsNone(res["text"])
+        self.assertEqual(res["kind"], "причина")
+
+    def test_число_приписанное_индексу_у_средней_отбрасывается_как_ложная_причина(self):
+        # 7,9 % — просадка RGBI, а фраза приписывает его индексу и 200-дневной
+        # средней. Ловится не подменой числа (её проверка не видит), а тем, что
+        # индекс у средней причиной этой смены не был.
+        res = self.check("Индекс МосБиржи сейчас на 7,9% ниже своей 200-дневной средней, а "
+                         "волатильность 28,3% уже на пороге нервной торговли. Если индекс "
+                         "вернётся к средней, то давление ослабнет.")
+        self.assertIsNone(res["text"])
+        self.assertIn("причина", self.kinds(res))
+
+    def test_условие_возврата_через_индекс_у_средней_тоже_вырезается(self):
+        # мутация: ловить только «ниже/выше средней» -> «если индекс вернётся к
+        # средней» остаётся условием возврата, хотя позицию сменила оценка рынка.
+        res = self.check("Правило вышло из акций из-за оценки рынка. Знак оценки держит "
+                         "нефть в рублях. Если индекс вернётся к средней, то давление "
+                         "ослабнет.")
+        self.assertEqual(self.kinds(res), ["причина"])
+        self.assertNotIn("к средней", res["text"])
+
+    def test_прямой_совет_отбрасывается(self):
+        # мутация: убрать ADVICE_RULE -> «разумнее продать» уходит читателю.
+        res = self.check("Сейчас разумнее продать акции и переложить деньги во вклад под "
+                         "13,3% годовых. Если ставка вклада снизится, то стоит вернуться "
+                         "в акции.")
+        self.assertIsNone(res["text"])
+        self.assertEqual(self.kinds(res), ["совет", "совет"])
+
+    def test_перевёрнутый_смысл_отбрасывается(self):
+        # мутация: убрать правило направления -> «перешло из денег в акции» под
+        # сообщением о переходе в деньги.
+        res = self.check("Правило перешло из денег в акции: фон для акций стал лучше, чем "
+                         "для вклада. Если кривая ОФЗ станет круче, то сигнал усилится.")
+        self.assertIsNone(res["text"])
+        self.assertIn("смысл", self.kinds(res))
+
+    def test_условие_возврата_не_считается_перевёрнутым_смыслом(self):
+        res = self.check("Оценка рынка опустилась ниже порога, и правило вышло из акций. "
+                         "Если оценка поднимется выше +0,2, то правило перешло бы в акции "
+                         "снова. Знак оценки держит нефть в рублях.")
+        self.assertNotIn("смысл", self.kinds(res))
+
+    def test_прогноз_вне_словаря_по_прежнему_проходит(self):
+        """ЧЕСТНАЯ ГРАНИЦА проверки: уверенное будущее без слов из словаря прогнозов
+        («будет снижена», «отреагируют ростом») она не ловит. Тест закрепляет это как
+        известный пробел: позеленевшая мутация здесь — повод обновить отчёт, а не код.
+        """
+        res = self.check("Ключевая ставка 14% будет снижена на декабрьском заседании, и "
+                         "акции отреагируют ростом. Если этого не случится, то рынок "
+                         "останется слабым.")
+        self.assertIsNotNone(res["text"])
+
+    def test_когда_позицию_сменили_ворота_облигации_причиной_быть_могут(self):
+        """мутация: применять правило ложной причины всегда -> разбор смены по
+        воротам, где стресс ОФЗ и есть причина, вырезается целиком.
+        """
+        pl = payload(position=position_block("flat"))        # причина — ворота закрылись
+        res = self.check("Гособлигации вошли в стресс, и защитное условие сработало: "
+                         "правило вышло из акций. Если просадка облигаций сократится, "
+                         "то ворота откроются.", pl=pl)
+        self.assertEqual(res["cut"], [])
+
+    def test_кривая_офз_не_путается_со_стрессом_облигаций(self):
+        # Кривая ОФЗ — слагаемое оценки: о ней говорить нужно.
+        res = self.check("Оценку рынка тянет вниз нефть в рублях, а кривая ОФЗ её "
+                         "поддерживает. Если наклон кривой ОФЗ вырастет, то оценка "
+                         "поднимется.")
+        self.assertEqual(res["cut"], [])
+
+    def test_правила_события_не_задевают_соседа_по_пачке(self):
+        rules = self.mod.guard_rules([RATE, EVENT], panel())
+        self.assertNotIn(0, rules, "у решения ЦБ своих запретов нет")
+        self.assertIn(1, rules)
+        self.assertEqual(len(rules["*"]), 1, "совет режется у всех событий")
+
+    def test_журнальному_событию_разбор_не_заказывается(self):
+        # мутация: убрать фильтр is_journal из annotate -> за строку журнала о
+        # флагах ворот платят запросом к модели.
+        asked = []
+        gate = {"key": "cell:x", "kind": "state_cell_change", "title": "Признаки сменились"}
+        orig = self.mod.comments
+        self.mod.comments = lambda evs, pl, log=None: asked.append([e["key"] for e in evs])
+        try:
+            self.mod.annotate([gate, dict(EVENT)], panel())
+        finally:
+            self.mod.comments = orig
+        self.assertEqual(asked, [[EVENT["key"]]])
+
+
+if __name__ == "__main__":
+    unittest.main()

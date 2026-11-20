@@ -20,7 +20,12 @@
 * внутренние слова панели и служебные имена полей;
 * чужая письменность, латиница внутри русского слова, транслит;
 * предел 600 знаков и 4 предложения;
-* метки блоков ===N=== строго 0…n−1 без повторов.
+* метки блоков ===N=== строго 0…n−1 без повторов;
+* правила ПАНЕЛИ (с 20.11.2026, необязательные параметры `allow` и `rules`): панель
+  может разрешить своё внешнее слово из общего словаря внутренних («ворота» у 842:
+  так слой назван в фактической части сообщения) и добавить свои запреты для
+  конкретного события — ложная причина, прямой совет, перевёрнутый смысл. Без этих
+  параметров проверка ведёт себя ровно как раньше: общие векторы от них не зависят.
 
 Нарушившее правило предложение ВЫРЕЗАЕТСЯ, если после этого остаётся хотя бы два
 предложения; иначе разбор отбрасывается целиком и событие уходит без него. Всё
@@ -410,10 +415,36 @@ _TRANSLIT = re.compile(r"(?<![A-Za-z])[a-z]{5,}(?![A-Za-z])")
 _TRANSLIT_OK = {"bitcoin", "ethereum", "nasdaq", "treasuries", "futures", "options", "hedge", "spread",
                 "basis", "carry", "funding", "stablecoin"}
 
-KINDS = ("числа", "прогноз", "внутренние слова", "язык", "длина", "метки", "брак текста")
+# Три последних вида даёт только панель своими правилами (параметр rules): общий
+# словарь их не порождает, и на общие векторы они не влияют.
+KINDS = ("числа", "прогноз", "внутренние слова", "язык", "длина", "метки", "брак текста",
+         "причина", "совет", "смысл")
 
 
-def _sentence_fault(sentence, ev, strict):
+def _allowed(word, allow):
+    """Внутреннее слово, которое панель разрешила: allow — начала слов в нижнем регистре."""
+    if not allow:
+        return False
+    low = _low(word)
+    return any(low.startswith(stem) for stem in allow)
+
+
+def _rule_fault(low, rules):
+    """Правила панели: (образец, вид, причина[, исключение]) -> (вид, причина) | None.
+
+    Образец ищется в нормализованной фразе (нижний регистр, «ё» как «е», тире как
+    дефис); исключение — образец, при котором правило фразу не трогает.
+    """
+    for rule in rules or ():
+        pattern, kind, why = rule[0], rule[1], rule[2]
+        unless = rule[3] if len(rule) > 3 else None
+        m = pattern.search(low)
+        if m and not (unless is not None and unless.search(low)):
+            return kind, f"{why}: {m.group(0)}"
+    return None
+
+
+def _sentence_fault(sentence, ev, strict, allow=None, rules=None):
     """-> (вид, причина) | None."""
     low = _low(sentence)
     if _FOREIGN.search(sentence):
@@ -425,7 +456,7 @@ def _sentence_fault(sentence, ev, strict):
     tr = [w for w in _TRANSLIT.findall(sentence) if w not in _TRANSLIT_OK]
     if tr:
         return "язык", "транслит: " + ", ".join(tr[:3])
-    j = _JARGON.search(sentence)
+    j = next((m for m in _JARGON.finditer(sentence) if not _allowed(m.group(0), allow)), None)
     if j:
         return "внутренние слова", "внутреннее слово: " + j.group(0)
     # Курс направлением при strict режется и внутри «если»; общий словарь у всех панелей —
@@ -437,6 +468,9 @@ def _sentence_fault(sentence, ev, strict):
             f = None
     if f:
         return "прогноз", "прогноз: " + f.group(0)
+    own = _rule_fault(low, rules)
+    if own:
+        return own
     stray = stray_numbers(sentence, ev) if ev is not None else []
     if stray:
         return "числа", "числа не из входа: " + ", ".join(stray[:4])
@@ -459,12 +493,14 @@ def _whole_fault(text):
     return None
 
 
-def check(text, user_input=None, index=0, strict=False, extra=None):
+def check(text, user_input=None, index=0, strict=False, extra=None, allow=None, rules=None):
     """Проверить разбор одного события.
 
     user_input — вход модели (JSON-строка или объект), index — номер события в нём,
     strict — запрет прогноза курса без исключения для «если» (843), extra — текст
-    промпта до раздела формата: его предметные числа модели тоже даны.
+    промпта до раздела формата: его предметные числа модели тоже даны. allow —
+    начала внутренних слов, которые панель разрешает своему разбору; rules — её
+    собственные запреты для этого события: [(образец, вид, причина[, исключение])].
     -> {"text": итог | None, "cut": [[фраза, причина, вид]], "reject": причина | None,
         "kind": вид брака | None}
     """
@@ -477,7 +513,7 @@ def check(text, user_input=None, index=0, strict=False, extra=None):
         ev = Evidence(user_input, index, extra) if user_input is not None else None
         kept = []
         for s in sentences(text):
-            fault = _sentence_fault(s, ev, strict)
+            fault = _sentence_fault(s, ev, strict, allow, rules)
             if fault:
                 res["cut"].append([short(s), fault[1], fault[0]])
             else:
@@ -504,11 +540,13 @@ def check(text, user_input=None, index=0, strict=False, extra=None):
         return res
 
 
-def review(text, user_input, n, strict=False, say=None, extra=None):
+def review(text, user_input, n, strict=False, say=None, extra=None, allow=None, rules=None):
     """Весь ответ модели -> (список комментариев длиной n с None на месте брака, сводка).
 
     Сводка — для недельного учёта: {"shown", "cut", "rejected": {вид: число}}. say —
     журнал: каждое вырезанное и отброшенное уходит туда с причиной и началом текста.
+    allow — как у check; rules — правила панели по событиям: {номер: [правила],
+    "*": [правила для всех]}.
     """
     def log(msg):
         if say:
@@ -529,7 +567,8 @@ def review(text, user_input, n, strict=False, say=None, extra=None):
             log(f"событие {i}: разбора в ответе нет")
             summary["rejected"]["метки"] = summary["rejected"].get("метки", 0) + 1
             continue
-        res = check(block, user_input, i, strict, extra)
+        own = list((rules or {}).get("*") or []) + list((rules or {}).get(i) or [])
+        res = check(block, user_input, i, strict, extra, allow, own)
         for phrase, why, _kind in res["cut"]:
             log(f"событие {i}: вырезано — {why}: «{phrase}»")
         summary["cut"] += len(res["cut"]) if res["text"] else 0
