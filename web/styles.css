@@ -578,6 +578,9 @@ a.pill { text-decoration: none; }
 /* Контроль в деньгах (лаборатория). */
 .control__status { display: inline-flex; align-items: center; gap: 6px; font-size: 15px; font-weight: 600; }
 .control__lines { max-width: 110ch; margin-top: 0; }
+/* Таблица контроля — семь колонок: на телефоне заголовки рвались по буквам. Три строки
+ * над ней говорят те же числа словами, поэтому на узком экране остаются только они. */
+@media (max-width: 620px) { .control__table { display: none; } }
 .control__facts { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--hair); }
 .control__ic { margin-top: 16px; }
 .control__ic > .card__foot { margin-top: 8px; }

@@ -1600,7 +1600,9 @@
         })));
       }
       var saidRule = c.rule !== 'recalc';
-      kids.push(h('div', { 'class': 'tablewrap', style: 'margin-top:14px' }, [
+      // На телефоне таблицы нет: семь колонок в 326 пикселей не помещаются, а строки выше
+      // несут те же числа словами (styles.css, .control__table).
+      kids.push(h('div', { 'class': 'tablewrap control__table', style: 'margin-top:14px' }, [
         h('table', { 'class': 'data' }, [
           h('caption', { text: (saidRule
             ? 'Правило — что панель говорила, до её запуска — пересчёт; в скобках — пересчёт нынешней версией за всё окно. '
