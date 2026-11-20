@@ -225,7 +225,7 @@
       });
       if (!isNum(value)) {
         kids.push(el('text', { x: padX, y: padTop - 10, 'class': 'tick' },
-          [document.createTextNode('композит не рассчитан')]));
+          [document.createTextNode('оценка не рассчитана')]));
       }
       if (isNum(value)) {
         var mx = x(value);
@@ -241,7 +241,7 @@
       return el('svg', {
         'class': 'fig', width: W, height: H, viewBox: '0 0 ' + W + ' ' + H,
         role: 'img',
-        'aria-label': 'Шкала композита от минус трёх до плюс трёх, текущее значение ' +
+        'aria-label': 'Шкала оценки рынка от минус трёх до плюс трёх, текущее значение ' +
           (isNum(value) ? fmtNum(value, 2, true) : 'не рассчитано')
       }, kids);
     });
@@ -305,10 +305,16 @@
       var years = {}, order = [];
       pts.forEach(function (p, i) { var yr = p[0].slice(0, 4); if (!(yr in years)) { years[yr] = i; order.push(yr); } });
       var step = Math.max(1, Math.round(order.length / Math.max(3, Math.floor(iw / 90))));
-      order.forEach(function (yr, k) {
-        if (k % step) return;
-        var i = years[yr];
-        kids.push(el('text', { x: x(i), y: H - 6, 'text-anchor': 'middle', 'class': 'tick' },
+      // Подпись года ставится, только когда до следующей подписи есть место. Срез
+      // «24 месяца» начинается в декабре: год из одной точки получал подпись в 14px от
+      // следующего, и «2024» с «2025» печатались друг на друге (аудит 20.11.2026).
+      // Уступает левая: у короткого хвоста года подписи нет, у полного года — есть.
+      var YEAR_GAP = 34;
+      var shown = order.filter(function (yr, k) { return !(k % step); });
+      shown.forEach(function (yr, k) {
+        var px = x(years[yr]);
+        if (k + 1 < shown.length && x(years[shown[k + 1]]) - px < YEAR_GAP) return;
+        kids.push(el('text', { x: px, y: H - 6, 'text-anchor': 'middle', 'class': 'tick' },
           [document.createTextNode(yr)]));
       });
 
@@ -633,21 +639,25 @@
     box.render(function (W) {
       if (pts.length < 2) return emptyFig(W, H + LBL, 'нет данных: истории меньше двух точек');
       var Hs = H + LBL;
-      var padY = 5, iw = W - 6, ih = H - padY * 2;
       var lo = Infinity, hi = -Infinity;
       pts.forEach(function (p) { lo = Math.min(lo, p[1]); hi = Math.max(hi, p[1]); });
       if (hi - lo < 1e-9) { hi += 1; lo -= 1; }
-      var x = function (i) { return 1 + i / (pts.length - 1) * iw; };
+      var hasZero = !!opts.zero && lo < 0 && hi > 0;
+      // Подписи «0» отведено своё поле слева: пока она стояла над осью в начале ряда,
+      // линия ряда проходила прямо по цифре (аудит 20.11.2026).
+      var padL = hasZero ? 13 : 1;
+      var padY = 5, iw = W - 5 - padL, ih = H - padY * 2;
+      var x = function (i) { return padL + i / (pts.length - 1) * iw; };
       var y = function (v) { return padY + (1 - (v - lo) / (hi - lo)) * ih; };
       var d = pts.map(function (p, i) { return (i ? 'L' : 'M') + x(i).toFixed(1) + ' ' + y(p[1]).toFixed(1); }).join(' ');
       var kids = [];
-      if (opts.zero && lo < 0 && hi > 0) {
+      if (hasZero) {
         // Ноль — не сетка, а ось: весь смысл графика здоровья модели в том, ушёл
         // ли IC под ноль, а классом gridline эта линия давала к поверхности 1,29
         // и была не видна. Плюс подпись «0» — линия без подписи не отвечает,
         // что она означает.
-        kids.push(el('line', { x1: 1, y1: y(0), x2: 1 + iw, y2: y(0), 'class': 'axisline' }));
-        kids.push(el('text', { x: 1, y: y(0) - 3, 'class': 'tick' }, [document.createTextNode('0')]));
+        kids.push(el('line', { x1: padL, y1: y(0), x2: padL + iw, y2: y(0), 'class': 'axisline' }));
+        kids.push(el('text', { x: 1, y: clamp(y(0) + 3.5, 10, H - 2), 'class': 'tick' }, [document.createTextNode('0')]));
       }
       kids.push(el('path', { d: d, 'class': 'series', stroke: color, 'stroke-width': 1.75 }));
       var last = pts[pts.length - 1];
@@ -656,8 +666,8 @@
       // по самому ряду, а не по вызову, — вызывающий про это ничего не сообщает.
       var monthly = pts.length > 2 && (Date.parse(pts[pts.length - 1][0]) - Date.parse(pts[0][0])) / (pts.length - 1) > 20 * 864e5;
       var fmtEnd = monthly ? fmtMon : fmtDay;
-      kids.push(el('text', { x: 1, y: Hs - 3, 'class': 'tick' }, [document.createTextNode(fmtEnd(pts[0][0]))]));
-      kids.push(el('text', { x: 1 + iw, y: Hs - 3, 'text-anchor': 'end', 'class': 'tick' },
+      kids.push(el('text', { x: padL, y: Hs - 3, 'class': 'tick' }, [document.createTextNode(fmtEnd(pts[0][0]))]));
+      kids.push(el('text', { x: padL + iw, y: Hs - 3, 'text-anchor': 'end', 'class': 'tick' },
         [document.createTextNode(fmtEnd(last[0]))]));
       var svg = el('svg', {
         'class': 'fig', width: W, height: Hs, viewBox: '0 0 ' + W + ' ' + Hs, role: 'img',
@@ -672,7 +682,7 @@
       svg.appendChild(hit);
       hit.addEventListener('pointermove', function (e) {
         var r = svg.getBoundingClientRect();
-        var i = clamp(Math.round((e.clientX - r.left - 1) / iw * (pts.length - 1)), 0, pts.length - 1);
+        var i = clamp(Math.round((e.clientX - r.left - padL) / iw * (pts.length - 1)), 0, pts.length - 1);
         showTip(tip, x(i), y(pts[i][1]), [
           { title: monthly ? fmtMon(pts[i][0]) : fmtDay(pts[i][0]) },
           { k: opts.label || 'значение', v: fmtNum(pts[i][1], dg, false) + (opts.unit || '') }
@@ -753,9 +763,13 @@
       .map(function (r) { return { t: Date.parse(String(r[0])), d: String(r[0]), v: +r[1] }; })
       .filter(function (s) { return isFinite(s.t); });
     var endT = opts.end ? Date.parse(String(opts.end)) : NaN;
+    // Короткая лента (opts.months): месячные засечки вместо годовых — для отрезка
+    // «с запуска панели», где годовой засечки не было бы ни одной. opts.axis === false —
+    // лента без подписей оси: верхняя из пары, у которой ось общая с нижней.
+    var MON = ['янв', 'фев', 'мар', 'апр', 'мая', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
     box.render(function (W) {
       if (!segs.length) return emptyFig(W, H, 'нет данных: история позиции пуста');
-      var padT = 8, bandH = 22;
+      var padT = opts.axis === false ? 2 : 8, bandH = opts.band || 22;
       var lastT = segs[segs.length - 1].t;
       var t0 = segs[0].t, t1 = isFinite(endT) && endT > lastT ? endT : lastT + 30 * 864e5;
       var x = function (t) { return (t - t0) / (t1 - t0) * W; };
@@ -771,18 +785,45 @@
         x: 0.5, y: padT + 0.5, width: Math.max(1, W - 1), height: bandH - 1,
         fill: 'none', stroke: tok('--axis'), 'stroke-width': 1
       }));
-      // Годовые засечки — редкие, чтобы подписи не столкнулись (как у ленты ячеек).
-      var y0 = new Date(t0).getUTCFullYear(), y1 = new Date(t1).getUTCFullYear();
-      var step = Math.max(1, Math.round((y1 - y0 + 1) / Math.max(3, Math.floor(W / 78))));
-      for (var yr = y0 + 1; yr <= y1; yr++) {
-        if ((yr - y0) % step) continue;
-        var px = x(Date.UTC(yr, 0, 1));
-        if (px < 0 || px > W) continue;
+      function tickAt(px, label) {
         kids.push(el('line', { x1: px, y1: padT + bandH, x2: px, y2: padT + bandH + 4, 'class': 'axisline' }));
         kids.push(el('text', {
           x: px, y: padT + bandH + 17, 'class': 'tick',
           'text-anchor': px < 14 ? 'start' : (px > W - 14 ? 'end' : 'middle')
-        }, [document.createTextNode(String(yr))]));
+        }, [document.createTextNode(label)]));
+      }
+      var y0 = new Date(t0).getUTCFullYear(), y1 = new Date(t1).getUTCFullYear();
+      if (opts.axis === false) {
+        // без оси
+      } else if (opts.months) {
+        var cur = new Date(t0);
+        var mt = Date.UTC(cur.getUTCFullYear(), cur.getUTCMonth() + 1, 1), lastPx = -99;
+        while (mt <= t1) {
+          var mp = x(mt);
+          if (mp - lastPx >= 44 && mp <= W - 20) { tickAt(mp, MON[new Date(mt).getUTCMonth()]); lastPx = mp; }
+          var md = new Date(mt);
+          mt = Date.UTC(md.getUTCFullYear(), md.getUTCMonth() + 1, 1);
+        }
+      } else {
+        // Годовые засечки — редкие, чтобы подписи не столкнулись (как у ленты ячеек).
+        var step = Math.max(1, Math.round((y1 - y0 + 1) / Math.max(3, Math.floor(W / 78))));
+        for (var yr = y0 + 1; yr <= y1; yr++) {
+          if ((yr - y0) % step) continue;
+          var px = x(Date.UTC(yr, 0, 1));
+          if (px < 0 || px > W) continue;
+          tickAt(px, String(yr));
+        }
+      }
+      // Отметка даты на ленте (opts.mark — запуск панели): всё правее неё панель уже
+      // говорила вживую, всё левее — пересчёт. Скобка над лентой, без подписи: подпись
+      // стоит строкой под лентой, на 13 пикселях ширины ей места нет.
+      var markT = opts.mark ? Date.parse(String(opts.mark)) : NaN;
+      if (isFinite(markT) && markT > t0 && markT < t1) {
+        var mx = Math.min(x(markT), W - 4);
+        kids.push(el('path', {
+          d: 'M' + mx.toFixed(1) + ' ' + (padT - 1) + ' V' + (padT - 5) + ' H' + (W - 0.5) + ' V' + (padT - 1),
+          fill: 'none', stroke: tok('--ink'), 'stroke-width': 1.5
+        }));
       }
       var cross = el('rect', { x: 0, y: padT, width: 2, height: bandH, fill: 'none', stroke: tok('--ink'), 'stroke-width': 1.5, opacity: 0 });
       kids.push(cross);
