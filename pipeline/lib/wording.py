@@ -25,7 +25,8 @@ __all__ = ["esc", "num", "pct", "signed", "ru_day", "ru_month", "plural",
            "ru_decimals", "hours_minutes", "msk_when", "sentence", "regime_name", "points",
            "KIND", "OPS_KIND", "cell_words", "cell_plain", "render_market",
            "render_ops", "plain_text", "pp", "bp", "ru_date", "emoji", "footer",
-           "PANEL_LABEL", "PANEL_URL"]
+           "PANEL_LABEL", "PANEL_URL", "LEG_NAMES", "leg_name", "ru_weekday_date",
+           "days_hours", "exec_close", "GATE_WORD"]
 
 TG_LIMIT = 4000          # предел телеграма 4096; запас на служебные хвосты
 MINUS = "−"         # типографский минус: в тексте рядом стоят дефисы переносов
@@ -175,6 +176,50 @@ def hours_minutes(minutes):
 
 MSK = timezone(timedelta(hours=constants.MSK_OFFSET_HOURS))
 
+_WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
+
+
+def ru_weekday_date(value, ref=None):
+    """'2026-11-09' -> «пн 09.11»: день недели и дата, год — только у чужого года.
+
+    Сообщение о решении называет день исполнения (аудит 20.11.2026): «на следующем
+    закрытии» заставляло считать по календарю, а в пятницу вечером следующее
+    закрытие — понедельник. Сокращение, а не «в понедельник»: одна форма годится во
+    всех падежах («от пт 06.11», «на закрытии пн 09.11»).
+    """
+    raw = str(value or "")[:10]
+    try:
+        when = date.fromisoformat(raw)
+    except ValueError:
+        return raw or "н/д"
+    return f"{_WEEKDAYS[when.weekday()]} {ru_date(raw, ref)}"
+
+
+def days_hours(minutes):
+    """2165 -> «1 сут 12 ч»: опоздание досылки. До суток — как hours_minutes."""
+    try:
+        total = int(round(float(minutes)))
+    except (TypeError, ValueError):
+        return "н/д"
+    if total < 24 * 60:
+        return hours_minutes(total)
+    days, hours = divmod(total // 60, 24)
+    return f"{days} сут" + (f" {hours} ч" if hours else "")
+
+
+def exec_close(day):
+    """Момент закрытия дня исполнения (UTC) — по constants.TRADING_DAY_END_MSK.
+
+    None, если дата не разобралась: тогда о закрытии сообщение молчит, а не гадает.
+    """
+    try:
+        when = date.fromisoformat(str(day or "")[:10])
+        hour, minute = (int(x) for x in constants.TRADING_DAY_END_MSK.split(":"))
+    except (TypeError, ValueError):
+        return None
+    return datetime(when.year, when.month, when.day, hour, minute, tzinfo=MSK
+                    ).astimezone(timezone.utc)
+
 
 def msk_when(moment, ref=None):
     """Момент по Москве для читателя: «17:05 МСК» в тот же день, что `ref`, иначе
@@ -225,6 +270,12 @@ KIND = {
     "deposit_uptick":    {"emoji": "📈", "label": "вышли новые данные"},
     # Повод посмотреть, а не сигнал (аудит 10.11.2026): рынок растёт при позиции «деньги».
     "against_rally":     {"emoji": "📈", "label": "рынок растёт вопреки оценке"},
+    # Предупреждение о дне решения и его отбой (аудит 20.11.2026): значок календаря,
+    # а не 🔔 — это ещё не смена позиции, и выглядеть как она сообщение не должно.
+    "position_watch":     {"emoji": "🗓", "label": "предупреждение перед днём решения"},
+    "position_watch_off": {"emoji": "🗓", "label": "отбой предупреждения"},
+    # Новый месяц налоговой цены нефти: выход статистики, которая двигает оценку.
+    "urals_month":        {"emoji": "🗓", "label": "вышли новые данные"},
 }
 DEFAULT_KIND = {"emoji": "ℹ️", "label": "событие"}
 DIRECTION_EMOJI = {"up": "📈", "down": "📉"}
@@ -280,7 +331,41 @@ OPS_KIND = {
     "core_missing":      "🔴",
     "lease_lost":        "🟡",
     "payload_oversize":  "🟡",
+    # Аудит 20.11.2026. Красным — то, от чего зависит решение о позиции: ряд решения
+    # не обновляется, расчёт упал, главное сообщение не доходит до канала рынка.
+    "core_series_stale": "🔴",
+    "core_series_ok":    "🟢",
+    "compute_failed":    "🔴",
+    "compute_ok":        "🟢",
+    "delivery_stuck":    "🔴",
+    "delivery_ok":       "🟢",
 }
+
+
+# ----------------------------------------------- имена слагаемых оценки рынка
+#
+# Оценка рынка — среднее трёх слагаемых. Внутри они зовутся «ногами» и носят имена
+# из таблицы модели («Девальвационный моментум», «Гэп рублёвой бочки к тренду»);
+# наружу — в факт сообщения и во вход ИИ-разбора — идут только эти три имени (аудит
+# 20.11.2026: разбор к выходу 06.11 назвал причиной стресс облигаций, потому что ни
+# оценки, ни её слагаемых модель не видела вовсе).
+LEG_NAMES = {
+    "usd_mom63": "курс доллара",
+    "slope_10_2": "кривая ОФЗ",
+    "urals_rub_gap": "нефть в рублях",
+}
+
+# Одно внешнее слово для слоя из трёх признаков, который закрывает позицию: «ворота».
+# Так он назван на странице и в руководстве, так его пишет фактическая часть
+# сообщений — и то же слово разрешено ИИ-разбору (commentary.GUARD_ALLOW). До
+# 20.11.2026 факт говорил «ворота открыты», а проверка разбора вырезала фразу с этим
+# словом: разбор не мог сослаться на то, что читатель видит строкой выше.
+GATE_WORD = "ворота"
+
+
+def leg_name(leg_id):
+    """Внешнее имя слагаемого оценки; незнакомое — пустая строка, а не внутренний код."""
+    return LEG_NAMES.get(str(leg_id or ""), "")
 
 
 # ------------------------------------------------------- имена состояний рынка
@@ -437,9 +522,22 @@ def _late_line(event, now):
         return None
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
-    if (now - ts).total_seconds() < LATE_AFTER_MIN * 60:
+    late_min = (now - ts).total_seconds() / 60
+    if late_min < LATE_AFTER_MIN:
         return None
-    return f"⏳ <i>Досылка: событие от {esc(msk_when(ts, now))}</i>"
+    line = f"Досылка: событие от {msk_when(ts, now)}"
+    # У события с днём исполнения (смена позиции) опоздание — не мелочь: читатель
+    # обязан сразу видеть, НАСКОЛЬКО сообщение опоздало и успевает ли он к закрытию,
+    # на котором решение исполняется (аудит 20.11.2026). Статус закрытия считается в
+    # момент ОТПРАВКИ, а не рождения события: за время в очереди он меняется.
+    close = exec_close(event.get("exec_day")) if event.get("exec_day") else None
+    if close is not None:
+        line += f", опоздание {days_hours(late_min)}"
+        if not event.get("exec_missed"):
+            when = ru_weekday_date(event["exec_day"], now)
+            line += (f". Закрытие исполнения ({when}) уже прошло" if now >= close
+                     else f". Закрытие исполнения ({when}) ещё впереди")
+    return f"⏳ <i>{esc(line)}</i>"
 
 
 def _assemble(lines, tail, limit=TG_LIMIT):
