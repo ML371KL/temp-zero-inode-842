@@ -446,7 +446,8 @@ def oil_now(store, panel, mf, min_age_days=None):
     месяца; цена — средняя за прошлый месяц, обновляется около 5-го числа. Блок
     называет месяц, который сейчас стоит в расчёте (leg_month), и его возраст в днях
     от конца этого месяца (leg_age_days). Когда возраст больше min_age_days
-    (constants.OIL_NOW_MIN_AGE_DAYS), заполняется estimate:
+    (constants.OIL_NOW_MIN_AGE_DAYS) и в текущем месяце не меньше
+    constants.OIL_NOW_MIN_SESSIONS сессий с ценой нефти, заполняется estimate:
 
       цена текущего месяца = средняя Brent с начала месяца × средний курс с начала
       месяца × (налоговая цена ÷ (Brent × курс)) месяца, стоящего в расчёте;
@@ -503,6 +504,8 @@ def oil_now(store, panel, mf, min_age_days=None):
     b_leg, _ = _month_mean(dates, brent, end[:7])
     if not (calc.is_num(b_now) and calc.is_num(fx_now) and calc.is_num(b_leg) and b_leg > 0):
         return out
+    if sessions < constants.OIL_NOW_MIN_SESSIONS:
+        return out      # один-три дня месяца — не оценка, а шум (constants)
     ratio = urals_usd / b_leg       # курс в числителе и знаменателе один и тот же
     est = b_now * fx_now * ratio
     tail = rub[-23:] + [est]

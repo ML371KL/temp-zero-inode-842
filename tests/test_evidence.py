@@ -475,6 +475,26 @@ class TestOilNow(Base):
         self.assertIsNotNone(self.E.oil_now(self.store, self.pnl, self.mf,
                                             min_age_days=27)["estimate"])
 
+    def test_мало_сессий_в_месяце_оценки_нет(self):
+        """Панель обрезана в первые дни июня 2024: сессий с ценой нефти в месяце на одну
+        меньше нормы и ровно норма. Возраст майской цены порогом не ограничен (параметр),
+        но «средняя с начала месяца» по нескольким дням — шум, а не оценка.
+        Мутация: убрать условие на число сессий → оценка появляется и на коротком месяце."""
+        from pipeline.compute import core as core_mod
+        need = self.K.OIL_NOW_MIN_SESSIONS
+        dates = self.pnl["dates"]
+        june = [i for i, d in enumerate(dates) if d[:7] == "2024-06"]
+        self.assertGreater(len(june), need)
+        for keep, expect in ((need - 1, False), (need, True)):
+            cut = june[keep - 1] + 1
+            pnl = {"dates": dates[:cut], "coverage": self.pnl.get("coverage"),
+                   "cols": {k: v[:cut] for k, v in self.pnl["cols"].items()}}
+            mf = core_mod.monthly_frame(pnl)
+            o = self.E.oil_now(self.store, pnl, mf, min_age_days=0)
+            if o is None or o["leg_month"] != "2024-05":
+                self.skipTest("на обрезанной панели майская цена ещё не в расчёте")
+            self.assertEqual(o["estimate"] is not None, expect, f"сессий в июне: {keep}")
+
     def test_цена_текущего_месяца_и_оценка_рынка_с_ней(self):
         o = self.E.oil_now(self.store, self.pnl, self.mf)
         est = o["estimate"]
