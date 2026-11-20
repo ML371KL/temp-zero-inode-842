@@ -94,7 +94,7 @@ def _n(v, nd=2, plus=True):
 
 # ------------------------------------------------------------ дневной композит
 
-def daily_composite(panel, mf):
+def daily_composite(panel, mf, components=None, window=None):
     """Дневной ряд композита «как compute_core, если бы сегодня был любой день истории».
 
     Для дня t в месяце M у каждой ноги окно = сырые значения ЗАКРЫТЫХ месяцев до M
@@ -104,16 +104,22 @@ def daily_composite(panel, mf):
     дне закрытого месяца ряд ОБЯЗАН совпасть с mf["composite"] (тест сверяет ≤1e-9):
     это и есть доказательство, что дневное число — то же самое ядро, а не его
     родственник. Цена — O(дней×60) на ногу, при 7 тыс. дней это доли секунды.
+
+    components и window — ТОЛЬКО для справки (голосование настроек, compute/evidence.py):
+    другой состав ног ([{"id", "sign"}], колонки берутся из panel["cols"], месячные
+    значения — из mf["raw"]) и другое окно нормировки в месяцах. По умолчанию — боевые
+    constants.CORE_COMPONENTS и Z_WINDOW_MONTHS: позицию считает именно этот вызов, и
+    его результат закреплён tests/test_rule_freeze.py.
     """
     dates = panel.get("dates") or []
     cols = panel.get("cols") or {}
     n = len(dates)
     labels = mf.get("dates") or []
     month_pos = {calc.month_key(lab): i for i, lab in enumerate(labels)}
-    win, zmin, clip = (constants.Z_WINDOW_MONTHS, constants.Z_MIN_MONTHS,
-                       constants.Z_CLIP)
+    win, zmin, clip = (constants.Z_WINDOW_MONTHS if window is None else window,
+                       constants.Z_MIN_MONTHS, constants.Z_CLIP)
     total, used = [0.0] * n, [0] * n
-    for comp in constants.CORE_COMPONENTS:
+    for comp in (constants.CORE_COMPONENTS if components is None else components):
         cid, sgn = comp["id"], comp["sign"]
         raw = (mf.get("raw") or {}).get(cid) or []
         vals = cols.get(cid) or [None] * n
