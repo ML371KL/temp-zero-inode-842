@@ -209,10 +209,19 @@ class TestStalenessFollowsTheSchedule(unittest.TestCase):
         self.assertEqual(got, datetime(2026, 8, 13, 6, 20, tzinfo=timezone.utc))
 
     def test_такт_ищется_и_через_выходные(self):
-        # Суточный режим — только по будням: в воскресенье последний такт пятничный.
+        # Суточный режим: будни вечером и утро ПОСЛЕ торгового дня (вторник–суббота,
+        # 04:30 UTC — такт добавлен 20.11.2026). В воскресенье последний такт —
+        # субботний утренний, в понедельник до 16:05 — он же.
         got = self.schedule.last_run_at(
             "daily", datetime(2026, 8, 16, 12, 0, tzinfo=timezone.utc))
-        self.assertEqual(got, datetime(2026, 8, 14, 20, 55, tzinfo=timezone.utc))
+        self.assertEqual(got, datetime(2026, 8, 15, 4, 30, tzinfo=timezone.utc))
+        got = self.schedule.last_run_at(
+            "daily", datetime(2026, 8, 17, 12, 0, tzinfo=timezone.utc))
+        self.assertEqual(got, datetime(2026, 8, 15, 4, 30, tzinfo=timezone.utc))
+        # Понедельничного утреннего такта нет: воскресенье — не торговый день.
+        got = self.schedule.last_run_at(
+            "daily", datetime(2026, 8, 18, 4, 0, tzinfo=timezone.utc))
+        self.assertEqual(got, datetime(2026, 8, 17, 20, 55, tzinfo=timezone.utc))
 
     def test_незнакомый_режим_не_угадывается(self):
         self.assertIsNone(self.schedule.last_run_at(
@@ -237,15 +246,23 @@ class TestStalenessFollowsTheSchedule(unittest.TestCase):
 
     # --------------------------------------------------------- рыночные ряды
     def test_дневные_ряды_переживают_выходные(self):
-        # Момент записи берётся СВОЙ для каждого ряда: интрадей-такт закрывает день
-        # в 21:00, суточный — в 20:55, и ряд, живущий в обоих режимах, обязан быть
-        # свежим по позднему из них.
-        cases = {"imoex": "2026-08-14T21:00:05Z", "rgbi": "2026-08-14T21:00:05Z",
-                 "usd_cbr": "2026-08-14T20:55:29Z", "zcyc": "2026-08-14T20:55:29Z"}
+        # Последний такт недели у суточного режима — субботний утренний (04:30 UTC,
+        # добавлен 20.11.2026): он досчитывает ряды, которые биржа отдаёт ночью.
+        # Записанный им ряд обязан оставаться свежим до понедельничного утра.
+        cases = {"imoex": "2026-08-15T04:30:41Z", "rgbi": "2026-08-15T04:30:41Z",
+                 "usd_cbr": "2026-08-15T04:30:52Z", "zcyc": "2026-08-15T04:31:10Z"}
         for sid, fetched in cases.items():
-            for when in ("2026-08-15 23:00", "2026-08-16 23:00"):
+            for when in ("2026-08-15 23:00", "2026-08-16 23:00", "2026-08-17 06:00"):
                 with self.subTest(sid=sid, when=when):
                     self.assertEqual(self.status(sid, fetched, when), "ok")
+
+    def test_пропущенный_субботний_такт_виден(self):
+        # Утренний такт субботы не состоялся: ряд записан пятничным вечером, а
+        # плановый опрос после этого был. Через сутки это уже отказ, а не выходные.
+        # мутация: не считать утренний такт плановым -> пропуск прогона, который
+        # страхует решение дня, не виден до понедельника.
+        self.assertEqual(self.status("zcyc", "2026-08-14T20:55:29Z", "2026-08-16 23:00"),
+                         "stale")
 
     def test_будний_пропуск_остаётся_отказом(self):
         # Со среды пропущены такты четверга и пятницы, возраст 49 ч против нормы 26.

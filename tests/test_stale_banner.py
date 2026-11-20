@@ -140,7 +140,17 @@ class PayloadPromiseCase(unittest.TestCase):
 
     def test_ночью_обещание_указывает_на_утренний_такт(self):
         from datetime import datetime, timezone
+        # Ночь на понедельник: утреннего суточного такта нет (воскресенье — не
+        # торговый день), первая публикация — витринный такт 07:00 UTC.
+        got = self.sched.next_publish_at(datetime(2026, 8, 17, 2, 53, tzinfo=timezone.utc))
+        self.assertEqual(got.strftime("%Y-%m-%dT%H:%M:%SZ"), "2026-08-17T07:00:00Z")
+        # Ночь после торгового дня (пятница 14.08): в 04:30 UTC приходит утренний
+        # суточный прогон — такт добавлен 20.11.2026.
+        # мутация: забыть про утренний такт в обещании -> баннер «Данные устарели»
+        # молчит о несостоявшемся утреннем прогоне до 10:30 МСК.
         got = self.sched.next_publish_at(datetime(2026, 8, 14, 2, 53, tzinfo=timezone.utc))
+        self.assertEqual(got.strftime("%Y-%m-%dT%H:%M:%SZ"), "2026-08-14T04:30:00Z")
+        got = self.sched.next_publish_at(datetime(2026, 8, 14, 4, 31, tzinfo=timezone.utc))
         self.assertEqual(got.strftime("%Y-%m-%dT%H:%M:%SZ"), DUE_MORNING)
 
     def test_в_сессии_обещание_это_ближайший_пятиминутный_такт(self):
