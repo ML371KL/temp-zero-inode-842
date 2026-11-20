@@ -739,5 +739,57 @@ class TestPrepareThenDeliver(AuditCase):
         self.assertEqual(len([t for t in self.market() if "Позиция: переход в деньги" in t]), 1)
 
 
+
+class TestDecisionSeriesGrouped(AuditCase):
+    """Отказ источника целиком — одна тревога о его рядах решения, а не по ряду.
+
+    С 20.11.2026 до проверки текстов (вечер того же дня) полный отказ ISS давал
+    сообщение о семье и по сообщению на каждый ряд решения, столько же отбивок.
+    """
+
+    def kinds(self, events):
+        return [e["kind"] for e in events]
+
+    def test_отказ_источника_целиком_две_тревоги_а_не_по_ряду(self):
+        # мутация: убрать _group_core -> три сообщения вместо двух.
+        self.seed(payload(sources=iss()))
+        evs = self.run_at(payload(sources=iss(vdo="error", zcyc="error", imoex="error")))
+        self.assertEqual(self.kinds(evs), ["source_stale", "core_series_stale"])
+        alarm = self.ops()[-1]
+        self.assertTrue(alarm.startswith("🔴 <b>Рынок РФ · Ряды решения imoex, zcyc "
+                                         "(источник iss) не отвечают</b>"), alarm)
+        self.assertIn("«Индекс МосБиржи» (ряд imoex, источник iss)", alarm)
+        self.assertIn("«Кривая бескупонной доходности ОФЗ» (ряд zcyc (zcyc_y10), "
+                      "источник iss)", alarm)
+        self.assertIn("От этих рядов зависит решение о позиции", alarm)
+        self.assertEqual(self.state()["last"]["core_series"],
+                         {"zcyc": "error", "imoex": "error"})
+
+    def test_отбивка_одна_на_источник(self):
+        self.seed(payload(sources=iss()))
+        self.run_at(payload(sources=iss(vdo="error", zcyc="error", imoex="error")))
+        evs = self.run_at(payload(sources=iss()), 2)
+        self.assertEqual(self.kinds(evs), ["source_ok", "core_series_ok"])
+        self.assertTrue(self.ops()[-1].startswith(
+            "🟢 <b>Рынок РФ · Ряды решения imoex, zcyc (источник iss) снова обновляются</b>"),
+            self.ops()[-1])
+
+    def test_разные_причины_общим_словом(self):
+        self.seed(payload(sources=iss()))
+        self.run_at(payload(sources=iss(zcyc="error", imoex="stale")))
+        self.assertIn("Ряды решения imoex, zcyc (источник iss) не обновляются", self.ops()[-1])
+
+    def test_недоставленная_общая_тревога_рождается_заново(self):
+        # мутация: защёлка берёт ключ «imoex+zcyc» одним именем -> снимок помнит
+        # «error», и тревога о рядах решения потеряна навсегда.
+        self.seed(payload(sources=iss()))
+        self.down = {"ops"}
+        self.run_at(payload(sources=iss(zcyc="error", imoex="error")))
+        self.assertEqual(self.state()["last"]["core_series"], {"zcyc": "ok", "imoex": "ok"})
+        self.down = set()
+        self.run_at(payload(sources=iss(zcyc="error", imoex="error")), 30)
+        self.assertEqual(len([t for t in self.ops() if "Ряды решения imoex, zcyc" in t]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

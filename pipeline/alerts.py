@@ -1481,6 +1481,56 @@ def _stamp(moment):
     return moment.astimezone(timezone.utc).strftime("%Y%m%dT%H%M")
 
 
+# Сказуемое тревоги ряда решения во множественном числе — для общей тревоги рядов
+# одного источника (_group_core).
+_CORE_WORD_PLURAL = {
+    "не отвечает": "не отвечают",
+    "пуст: в хранилище нет ни одной точки": "пусты: в хранилище нет ни одной точки",
+    "отвечает, но отдаёт старые данные": "отвечают, но отдают старые данные",
+    "не опрашивался вовремя": "не опрашивались вовремя",
+}
+
+
+def _group_core(events, units):
+    """Тревоги и отбивки рядов решения одного источника за прогон — одним сообщением.
+
+    С 20.11.2026 у каждого ряда решения своя тревога, и полный отказ ISS давал пять
+    сообщений (семья и четыре ряда) и пять отбивок. Состояние по-прежнему у каждого
+    ряда своё (core_down, last.core_series): сливается только сообщение. Ключ несёт
+    все ряды через «+» — защёлка недоставленной тревоги разбирает его обратно.
+    """
+    groups = {}
+    for ev in events:
+        name = str(ev.get("key") or "").split(":")[1]
+        family = (units.get(name) or {}).get("family") or name
+        groups.setdefault((ev["kind"], family), []).append((name, ev))
+    out = []
+    for (kind, family), group in groups.items():
+        if len(group) == 1:
+            out.append(group[0][1])
+            continue
+        names = [name for name, _ in group]
+        evs = [ev for _, ev in group]
+        stamp = min(str(ev["key"]).split(":")[2] for ev in evs)
+        listed = ", ".join(names)
+        if kind == "core_series_stale":
+            words = {ev["title"][len(f"ряд решения {name} "):] for name, ev in group}
+            word = _CORE_WORD_PLURAL.get(words.pop()) if len(words) == 1 else None
+            title = f"ряды решения {listed} (источник {family}) " + (word or "не обновляются")
+            meaning = ("От этих рядов зависит решение о позиции: пока они не обновятся, "
+                       "панель считает позицию по их последним удачным числам.")
+        else:
+            title = f"ряды решения {listed} (источник {family}) снова обновляются"
+            meaning = "Решение о позиции снова считается по свежим числам этих рядов."
+        first = min(evs, key=lambda ev: ev.get("ts") or "")
+        merged = dict(first, key=f"{kind}:{'+'.join(names)}:{stamp}", title=title,
+                      fact="\n".join(ev.get("fact") or "" for ev in evs).strip(),
+                      meaning=meaning)
+        merged["text"] = wording.plain_text(merged)
+        out.append(merged)
+    return out
+
+
 def _sources(payload, prev, state, now):
     """Семьи источников (без рядов решения) и ряды решения — каждый своим правилом."""
     families = _family_units(payload)
@@ -1489,8 +1539,8 @@ def _sources(payload, prev, state, now):
     state["source_down"] = down
     series = _core_units(payload)
     core_down = _down_records(state, "core_down", series)
-    out += _unit_events(series, prev.get("core_series") or {}, core_down, payload, now,
-                        core=True)
+    out += _group_core(_unit_events(series, prev.get("core_series") or {}, core_down,
+                                    payload, now, core=True), series)
     state["core_down"] = core_down
     return out
 
@@ -2038,10 +2088,11 @@ def _snapshot_keeping_undelivered(payload, prev_last, batch, now, held=(), held_
             if name:
                 _keep_prev_source(snap, prev_last, name)
         if kind == "core_series_stale":
+            # Общая тревога рядов одного источника несёт их все через «+» (_group_core).
             parts = str(event.get("key") or "").split(":")
             name = parts[1] if len(parts) > 2 else None
-            if name:
-                _keep_prev_source(snap, prev_last, name, "core_series")
+            for one in (name.split("+") if name else ()):
+                _keep_prev_source(snap, prev_last, one, "core_series")
     return snap
 
 
