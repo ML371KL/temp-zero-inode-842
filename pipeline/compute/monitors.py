@@ -18,7 +18,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from pipeline.lib import calc, registry, schedule
 from pipeline.lib.constants import (
-    CB_MEETINGS_2026,
+    CB_MEETINGS,
     MONITOR_TIERS,
     MSK_OFFSET_HOURS,
     SEP_NODE,
@@ -788,7 +788,7 @@ def _t_dividends(store, now):
 
 def _t_cb_meeting(store, now):
     today = _msk_now(now).date()
-    future = [m for m in CB_MEETINGS_2026 if _d(m) and _d(m) >= today]
+    future = [m for m in CB_MEETINGS if _d(m) and _d(m) >= today]
     nxt = future[0] if future else None
     key_pts, key_meta = _ser(store, "key_rate")
     cons_pts, cons_meta = _ser(store, "cb_consensus")
@@ -807,7 +807,7 @@ def _t_cb_meeting(store, now):
     # 24.07 → 27.07, 19.06 → 22.06). К этому моменту nxt — уже СЛЕДУЮЩЕЕ заседание,
     # поэтому сюрприз надо считать от консенсуса только что прошедшего, и только пока
     # оно свежее недели: иначе старое заседание опять начнёт подставляться.
-    past = [m for m in CB_MEETINGS_2026 if _d(m) and _d(m) <= today]
+    past = [m for m in CB_MEETINGS if _d(m) and _d(m) <= today]
     last_meeting = past[-1] if past else None
     last_fresh = bool(last_meeting and (today - _d(last_meeting)).days <= CB_DECISION_FRESH_DAYS)
     last_cons = cons_map.get(last_meeting) if last_fresh else None
@@ -849,7 +849,10 @@ def _t_cb_meeting(store, now):
         "rusfar_asof": rus_asof,
         "spread_pp": _r(spread, 2),
         "priced_text": priced,
-        "calendar": CB_MEETINGS_2026,
+        "calendar": list(CB_MEETINGS),
+        # Сколько заседаний впереди знает календарь панели: на последнем тайл
+        # напоминает дописать следующий год (constants.CB_MEETINGS).
+        "calendar_left": len(future),
     }
     # Недельный ИПЦ — вход в ожидания ставки, а не предиктор акций (тайл снят
     # аудитом 02.09.2026): одной строкой здесь, где он и читается — перед заседанием.
@@ -883,9 +886,11 @@ def _t_cb_meeting(store, now):
     # не может протухнуть по определению — индикатор свежести у тайла был мёртв.
     # Дата заседания живёт в payload.next_meeting и печатается отдельной строкой.
     data_asof = max([d for d in (key_asof, rus_asof) if d], default=None)
+    last_known = (f" После заседания {_dmy(nxt)} календарь заседаний в панели "
+                  f"заканчивается." if (nxt and len(future) == 1) else "")
     return _tile("cb_meeting", status, data_asof, headline, payload,
                  "Сюрприз ЦБ против консенсуса — качественная правда о двух великих "
-                 "разворотах (n=2), статистики за этим нет.",
+                 "разворотах (n=2), статистики за этим нет." + last_known,
                  key_meta.get("fetched_at") or rus_meta.get("fetched_at"))
 
 

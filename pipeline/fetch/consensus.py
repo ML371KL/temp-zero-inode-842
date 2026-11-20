@@ -245,7 +245,7 @@ def _next_meetings(now=None):
     """Заседания, до которых осталось не больше окна поиска (ближайшее первым)."""
     today = dates.fmt_date(dates.today_msk() if now is None else now)
     out = []
-    for day in getattr(constants, "CB_MEETINGS_2026", ()):
+    for day in getattr(constants, "CB_MEETINGS", ()):
         if not day or day <= today:
             continue
         if dates.fmt_date(dates.add_days(dates.parse_date(day), -LOOKBACK_DAYS)) <= today:
