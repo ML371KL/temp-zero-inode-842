@@ -476,6 +476,29 @@ class TestCleanHySeries(HyCase):
                          self.LIVE_TAIL, "первая копия — единственная улика — затёрта")
         self.assertTrue((self.store.raw_dir() / "rucbhycp_yield.json.before-median.2").exists())
 
+    def test_затравочные_нули_аукционов_убираются_а_провалы_остаются(self):
+        """24.06 и 08.07.2026: на доске PACT строк нет вовсе (живой запрос 20.11.2026)
+        — аукционов не было. 15.07 и 30.09 — строка с нулём: аукцион шёл и провалился.
+
+        мутация: убирать все нули -> пропадают настоящие провалы 15.07 и 30.09.
+        """
+        self.store.upsert_points("ofz_auctions", {
+            "2026-06-17": 120.04, "2026-06-24": 0.0, "2026-07-01": 10.3649,
+            "2026-07-08": 0.0, "2026-07-15": 0.0, "2026-09-30": 0.0})
+        self.script(["--only", "auctions"])
+        self.assertIn("2026-06-24", self.store.load_series("ofz_auctions")["points"])
+        self.script(["--apply", "--only", "auctions"])
+        self.assertEqual(sorted(self.store.load_series("ofz_auctions")["points"]),
+                         ["2026-06-17", "2026-07-01", "2026-07-15", "2026-09-30"])
+        self.assertTrue((self.store.raw_dir() / "ofz_auctions.json.before-median").exists())
+
+    def test_день_с_объёмом_скрипт_аукционов_не_трогает(self):
+        # Если за «фантомный» день в ряду лежит объём, это уже не затравочный ноль.
+        self.store.upsert_points("ofz_auctions", {"2026-06-24": 55.5})
+        self.script(["--apply", "--only", "auctions"])
+        self.assertEqual(self.store.load_series("ofz_auctions")["points"],
+                         {"2026-06-24": 55.5})
+
     def test_после_чистки_новый_код_биржевые_точки_не_возвращает(self):
         """Чистка и фетчер вместе: то, что убрано, через окно догрузки не приходит.
 

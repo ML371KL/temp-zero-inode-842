@@ -1,7 +1,12 @@
-"""Аукционы ОФЗ: размещение по данным биржи + анонс ближайшего аукциона.
+"""Аукционы ОФЗ: итог дня по Минфину, биржевая доска как сверка, анонс ближайшего.
 
 Ряд `ofz_auctions`. Тир `monitor` — предиктивность не доказана, ряд читается глазами
 как индикатор фискальной премии в длинном конце.
+
+С 20.11.2026 число дня — ОФИЦИАЛЬНЫЙ ИТОГ МИНФИНА (аукционы плюс доразмещение) из
+его телеграм-канала; биржевая доска решает, был ли аукцион, и остаётся сверкой и
+резервом (см. блок «официальный итог» ниже). Всё, что написано дальше про доску,
+по-прежнему верно — и объясняет, почему одной доски мало.
 
 ПОЧЕМУ БИРЖА, А НЕ МИНФИН. Официальный и полный источник — годовой файл Минфина
 «Результаты проведенных аукционов по размещению государственных ценных бумаг»
@@ -48,7 +53,7 @@
 import re
 
 from . import (FetchError, RETRO_DAYS, dates, http, incremental_start, make_meta,
-               store)
+               store, tg)
 
 ISS = "https://iss.moex.com/iss"
 BOARD = "PACT"                      # «Аукцион: адресные заявки» — режим размещения ОФЗ
@@ -71,6 +76,112 @@ ANNOUNCE_RE = re.compile(r"о\s+проведении.{0,60}?аукцион\w*\s+
 ANNOUNCE_DAY = re.compile(r"проведении\s+(\d{1,2})\s+([а-яё]{3,9})\s+(20\d\d)", re.I)
 _MONTHS = {"январ": 1, "феврал": 2, "март": 3, "апрел": 4, "ма": 5, "июн": 6,
            "июл": 7, "август": 8, "сентябр": 9, "октябр": 10, "ноябр": 11, "декабр": 12}
+
+
+# ------------------------------------------------ официальный итог: канал Минфина
+#
+# Биржевая доска занижает день на 4–29 % (аудит 20.11.2026): в неё не попадает
+# доразмещение после аукциона (ДРПА), а иногда и часть самого аукциона.
+#     11.11.2026  Минфин 88,87 (из них ДРПА 23,18)   доска 62,70
+#     18.11.2026  Минфин 73,742                      доска 70,64
+#     21.10.2026  Минфин 177,128                     доска 136,24
+#     07.10.2026  Минфин 80,996 (ДРПА 41,87)         доска 38,07
+# Сайт Минфина с прод-машины недоступен (503), но тот же текст итогов ведомство
+# публикует в своём телеграм-канале вечером дня аукциона — и конвейер этот канал уже
+# читает ради бюджета (fetch/tg.py). Пост устроен одинаково из недели в неделю:
+#
+#     Минфин России на аукционе разместил два выпуска ОФЗ на общую сумму 73,742 млрд
+#     рублей по номиналу
+#     🔹 На аукционе по размещению ОФЗ-ПД выпуска № 26233RMFS … было продано бумаг на
+#     общую сумму 27,918 млрд рублей. …
+#     🔹 Минфин России информирует о результатах проведения 18 ноября 2026 г.
+#     дополнительного размещения после аукциона (ДРПА): … размещенный объем выпуска –
+#     2 877,000 млн рублей; …
+#
+# ЧУЖОЕ ЧИСЛО В РЯД ПОПАСТЬ НЕ ДОЛЖНО, поэтому пост принимается, только если:
+#   1) это собственный релиз, а не перепечатка («📰 ТАСС: …» отсекает tg.find);
+#   2) заголовок — слово в слово итог аукциона ОФЗ «по номиналу» (RESULT_HEAD);
+#   3) сумма по выпускам плюс ДРПА сходится с числом заголовка: заголовок бывает
+#      округлён («около 140 млрд», «1 трлн»), поэтому в ряд идёт сумма частей, а
+#      заголовок её только подтверждает;
+#   4) пост привязан к дню: вышел в день аукциона, а если в нём есть ДРПА — дата
+#      ДРПА в тексте та же;
+#   5) число не меньше биржевого (OFFICIAL_FLOOR): официальный итог включает всё,
+#      что видела доска.
+# Не прошёл хоть один пункт — день остаётся биржевым, и тайл говорит это прямо.
+TG_CHANNEL = "minfin"
+TG_QUERY = "на аукционе разместил"          # поиск по каналу: лента глубже недели не видна
+TG_KEYS = ("на аукцион", "разместил", "офз", "по номиналу")
+_NUM = r"(\d[\d ]*(?:,\d+)?)"
+RESULT_HEAD = re.compile(
+    r"^Минфин России на аукцион(?:е|ах) разместил\b[^.\n]{0,60}?\bОФЗ\b[^.\n]{0,20}?"
+    r"на (?:общую )?сумму (?:около )?" + _NUM + r" (млрд|трлн) рублей по номиналу", re.I)
+SOLD_RE = re.compile(
+    r"На аукционе по размещению ОФЗ\S*\s+выпуска\s+№\s*(\w+)[^🔹]{0,120}?"
+    r"было продано бумаг на общую сумму\s+" + _NUM + r"\s+млрд рублей", re.I)
+DRPA_DAY_RE = re.compile(
+    r"результатах проведения\s+(\d{1,2})\s+([а-яё]+)\s+(20\d\d)\s*г\w*\.?\s+"
+    r"дополнительного размещения", re.I)
+DRPA_VOL_RE = re.compile(
+    r"размещ[её]нный объ[её]м выпуска\s*[–—-]\s*" + _NUM + r"\s+млн рублей", re.I)
+# Заголовок против суммы частей: «около 140» при 139,993 и «1 трлн» при 1000,000.
+HEAD_TOL_BN, HEAD_TOL_SHARE = 0.6, 0.01
+# Официальный итог не может быть меньше биржевого; три процента — на округление.
+OFFICIAL_FLOOR = 0.97
+# Расхождение, меньше которого старую точку не переписываем (история до 2026-08
+# собрана по файлам Минфина и уже совпадает с итогом до копеек).
+BACKFILL_MIN_DIFF = 0.05
+OFFICIAL_DAYS_KEEP = 80
+
+
+def _ru_number(raw):
+    return float(str(raw).replace(" ", "").replace("\xa0", "").replace(",", "."))
+
+
+def parse_result(text, published):
+    """Пост канала Минфина -> итог аукционов дня или None.
+
+    {date, total_bn, auction_bn, drpa_bn, issues, head_bn}: total_bn — всё
+    размещённое за день по номиналу (аукционы + ДРПА), млрд руб.
+    """
+    head = RESULT_HEAD.match(tg.headline(text or ""))
+    if not head or not published:
+        return None
+    head_bn = _ru_number(head.group(1)) * (1000.0 if head.group(2).lower() == "трлн" else 1.0)
+    sold = [(m.group(1), _ru_number(m.group(2))) for m in SOLD_RE.finditer(text)]
+    if not sold:
+        return None                         # состава нет — заголовку одному не верим
+    auction_bn = sum(v for _, v in sold)
+    drpa_bn = sum(_ru_number(m.group(1)) for m in DRPA_VOL_RE.finditer(text)) / 1000.0
+    total = auction_bn + drpa_bn
+    if abs(total - head_bn) > max(HEAD_TOL_BN, HEAD_TOL_SHARE * head_bn):
+        return None                         # части не сходятся с заголовком
+    day = str(published)[:10]
+    drpa_day = DRPA_DAY_RE.search(text)
+    if drpa_day:
+        month = next((v for stem, v in _MONTHS.items()
+                      if drpa_day.group(2).lower().startswith(stem)), None)
+        stated = (None if not month else
+                  "%s-%02d-%02d" % (drpa_day.group(3), month, int(drpa_day.group(1))))
+        if stated != day:
+            return None                     # пост про другой день
+    return {"date": day, "total_bn": round(total, 3), "auction_bn": round(auction_bn, 3),
+            "drpa_bn": round(drpa_bn, 3), "issues": [s for s, _ in sold],
+            "head_bn": round(head_bn, 3)}
+
+
+def minfin_results(pages=1):
+    """{день: итог} по постам канала Минфина. Отказ сети -> FetchError.
+
+    Одна страница поиска — двадцать постов, то есть около пяти месяцев аукционов:
+    хватает и на текущий день, и на то, чтобы досчитать прошлые биржевые точки.
+    """
+    out = {}
+    for msg in tg.find(TG_CHANNEL, TG_KEYS, pages=pages, query=TG_QUERY):
+        got = parse_result(msg.get("text"), msg.get("published"))
+        if got and got["date"] not in out:  # сообщения идут от свежих к старым
+            out[got["date"]] = dict(got, url=msg.get("url"))
+    return out
 
 
 def _num(value):
@@ -208,12 +319,16 @@ def next_auction(max_pages=6, max_age_days=30):
 
 
 def auctions(series_id="ofz_auctions", start=None, end=None, bootstrap=False):
-    """-> ("ofz_auctions", {дата: биржевой объём размещения, млрд руб}, meta).
+    """-> ("ofz_auctions", {дата: размещено за день по номиналу, млрд руб}, meta).
 
-    Точка создаётся ТОЛЬКО за дни, когда аукцион реально шёл. Нулей на плановые
-    среды без аукциона фетчер не выдумывает: «аукциона не было» и «аукцион провалился»
-    — разные состояния рынка, и склеивать их одним нулём значит стереть ровно ту
-    разницу, ради которой этот ряд и ведётся.
+    Точка создаётся ТОЛЬКО за дни, когда аукцион реально шёл (есть строки доски).
+    Нулей на плановые среды без аукциона фетчер не выдумывает: «аукциона не было» и
+    «аукцион провалился» — разные состояния рынка, и склеивать их одним нулём значит
+    стереть ровно ту разницу, ради которой этот ряд и ведётся.
+
+    ЧИСЛО ДНЯ — официальный итог Минфина (аукционы + доразмещение) из его канала;
+    биржевая доска говорит, БЫЛ ли аукцион, и служит сверкой и резервом. Оба числа
+    лежат в meta.last, источник числа — в meta.last.source.
     """
     frm = dates.parse_date(start or incremental_start(
         series_id, RETRO_DAYS,
@@ -243,6 +358,55 @@ def auctions(series_id="ofz_auctions", start=None, end=None, bootstrap=False):
         points[key] = summary["placed_bln"]
         summaries[key] = summary
 
+    # Официальные итоги. Отказ канала — не отказ ряда: день остаётся биржевым.
+    official, official_note = {}, None
+    try:
+        official = minfin_results()
+    except FetchError as exc:
+        official_note = "канал Минфина не прочитан (%s)" % str(exc)[:120]
+        http.LOG("%s: %s" % (series_id, official_note))
+    stored = store.load_series(series_id) or {}
+    old_points = stored.get("points") or {}
+    old_meta = stored.get("meta") or {}
+    official_days = {str(d)[:10] for d in (old_meta.get("official_days") or [])}
+    rejected = []
+    for key, summary in summaries.items():
+        board = summary["placed_bln"]
+        summary["placed_board_bn"] = board
+        off = official.get(key)
+        if off and off["total_bn"] >= board * OFFICIAL_FLOOR:
+            points[key] = off["total_bn"]
+            official_days.add(key)
+            summary.update(source="minfin_tg", placed_bln=off["total_bn"],
+                           placed_official_bn=off["total_bn"],
+                           auction_bn=off["auction_bn"], drpa_bn=off["drpa_bn"],
+                           official_url=off.get("url"), failed=off["total_bn"] <= 0)
+        else:
+            official_days.discard(key)
+            summary.update(source="moex_pact", placed_official_bn=None,
+                           auction_bn=None, drpa_bn=None, official_url=None)
+            if off:
+                rejected.append([key, off["total_bn"], board])
+    # Прошлые дни ряда, записанные биржевым числом: если итог Минфина за этот день
+    # нашёлся и он не меньше записанного — в ряд идёт итог. Так шов «биржа с
+    # августа» затягивается сам, без ручной пересборки. Дней, которых в ряду нет,
+    # пост не создаёт: был ли аукцион, решает доска.
+    backfilled = []
+    for key, off in sorted(official.items()):
+        old = old_points.get(key)
+        if key in summaries or not isinstance(old, (int, float)):
+            continue
+        if off["total_bn"] < old * OFFICIAL_FLOOR:
+            rejected.append([key, off["total_bn"], old])
+            continue
+        official_days.add(key)
+        if abs(off["total_bn"] - old) >= BACKFILL_MIN_DIFF:
+            points[key] = off["total_bn"]
+            backfilled.append([key, old, off["total_bn"]])
+    if backfilled:
+        http.LOG("%s: %d прошлых дней переведены с биржевого числа на итог Минфина "
+                 "(последний %s: %s -> %s)" % ((series_id, len(backfilled)) + tuple(backfilled[-1])))
+
     ahead, title, news_url = next_auction()
     # Если в окне аукционов не было, «последним аукционом» остаётся тот, что фетчер
     # уже разбирал, а НЕ последняя точка ряда: в затравке дни отменённых аукционов
@@ -250,7 +414,7 @@ def auctions(series_id="ofz_auctions", start=None, end=None, bootstrap=False):
     # когда его не проводили («Аукцион 05.08 не состоялся» при паузе с 20.07).
     last = dict(summaries[max(summaries)], date=max(summaries)) if summaries else {}
     if not last:
-        prev = ((store.load_series(series_id) or {}).get("meta") or {}).get("last")
+        prev = old_meta.get("last")
         if isinstance(prev, dict) and prev.get("date"):
             last = dict(prev)
     # ТОЛЬКО из собственного разбора (свежего или запомненного в meta.last): в
@@ -258,8 +422,8 @@ def auctions(series_id="ofz_auctions", start=None, end=None, bootstrap=False):
     # нулевую точку за «последний аукцион» — тайл объявлял несостоявшимся аукцион
     # дня, которого не проводили. Нет памяти — честное «неизвестно».
     last_day = last.get("date")
-    # Спроса у биржи нет: показываем это явным None, чтобы тайл написал «нет данных»,
-    # а не унаследовал число из затравки и не выдал его за свежее.
+    # Спроса нет ни у биржи, ни в посте Минфина: показываем это явным None, чтобы
+    # тайл написал «нет данных», а не унаследовал число из затравки.
     last.setdefault("demand_bn", None)
     if "placed_bln" in last:
         last["placed_bn"] = last.pop("placed_bln")
@@ -268,18 +432,32 @@ def auctions(series_id="ofz_auctions", start=None, end=None, bootstrap=False):
     if last_day:
         weeks = max(0, (dates.today_msk() - dates.parse_date(last_day)).days // 7)
     status = "ok"
-    note = "биржевой объём размещения (доска %s), без ДРПА; спрос биржа не раскрывает" % BOARD
+    by_official = last.get("source") == "minfin_tg"
+    if by_official:
+        note = ("размещено за день по номиналу — итог Минфина (канал t.me/%s), с "
+                "доразмещением после аукциона; биржевая доска %s — сверка"
+                % (TG_CHANNEL, BOARD))
+    else:
+        note = ("биржевой объём размещения (доска %s), без доразмещения после аукциона: "
+                "итог Минфина за последний аукцион не получен" % BOARD)
     if failures and not points:
         status, note = "error", "доска %s не ответила: %s" % (BOARD, "; ".join(failures[:2]))
-    elif not points:
+    elif not summaries:
         note = ("аукционов в окне %s..%s не было; последний — %s"
                 % (dates.fmt_date(frm), dates.fmt_date(till), last_day or "неизвестно"))
+    if official_note:
+        note = "%s; %s" % (note, official_note)
     return series_id, points, make_meta(
-        "moex_pact", url, points, status=status, note=note, unit="rub_bln",
+        "minfin_tg+moex_pact", url, points, status=status, note=note, unit="rub_bln",
         asof=last_day,
-        method="moex_pact", last=last, weeks_since=weeks,
+        method=last.get("source") or "moex_pact", last=last, weeks_since=weeks,
         next_auction=ahead, next_auction_title=title, next_auction_url=news_url,
         value_keys=["placed_bn", "demand_bn", "failed", "issue"],
         failures=failures or None,
-        splice="история до 2026-08 собрана по файлам Минфина и включает ДРПА; "
-               "новые точки — биржевые и на дни с доразмещением ниже на 5–18%")
+        official_days=sorted(official_days)[-OFFICIAL_DAYS_KEEP:],
+        official_backfilled=backfilled or None,
+        official_rejected=rejected or None,
+        official_error=official_note,
+        splice="дни из meta.official_days — итог Минфина с доразмещением (как и история "
+               "до 2026-08 по файлам Минфина); остальные точки с 2026-08 — биржевая "
+               "доска, без доразмещения и ниже итога на 4–29%")

@@ -546,10 +546,50 @@ class TestТайлыНаЖивыхДанных(TileCase):
         self.assertEqual(p["premium_bp"], 5)
         self.assertFalse(p["failed"])
         self.assertIn("Аукцион 13.08", t["headline"])
-        self.assertIn("размещено 43.2 млрд", t["headline"])
-        self.assertIn("при спросе 87.5 млрд", t["headline"])
-        self.assertIn("bid-to-cover 2.03", t["headline"])
+        # Тексты тайла с 20.11.2026 сразу в русской записи (запятая, «−»).
+        self.assertIn("размещено 43,2 млрд", t["headline"])
+        self.assertIn("при спросе 87,5 млрд", t["headline"])
+        self.assertIn("bid-to-cover 2,03", t["headline"])
         self.assertNotIn("провален", t["headline"])
+
+    def test_ofz_итог_минфина_назван_и_доразмещение_видно(self):
+        """Аукцион 11.11.2026: Минфин 88,874 млрд, из них ДРПА 23,184; доска 62,70.
+
+        мутация: показывать биржевое число без оговорки -> «размещено 62,7 млрд» при
+        официальном итоге 88,9 (занижение на 29 %).
+        """
+        self.put("ofz_auctions", {"2026-11-11": 88.874},
+                 {"last": {"date": "2026-11-11", "issue": "SU26235RMFS0, SU26250RMFS9",
+                           "placed_bn": 88.874, "placed_board_bn": 62.7021,
+                           "placed_official_bn": 88.874, "auction_bn": 65.69,
+                           "drpa_bn": 23.184, "source": "minfin_tg", "failed": False,
+                           "official_url": "https://t.me/minfin/9472", "demand_bn": None},
+                  "method": "minfin_tg"})
+        t = self.tile("ofz_auctions", now=datetime(2026, 11, 12, 9, 0, tzinfo=UTC))
+        p = t["payload"]
+        self.assertEqual(p["placed_bn"], 88.9)
+        self.assertEqual(p["placed_source"], "minfin")
+        self.assertEqual(p["placed_board_bn"], 62.7)
+        self.assertEqual(p["drpa_bn"], 23.2)
+        self.assertIn("Аукцион 11.11: размещено 88,9 млрд, из них доразмещение после "
+                      "аукциона 23,2 млрд", t["headline"])
+        self.assertIn("итог Минфина", t["note"])
+        self.assertIn("биржевая доска показывает 62,7 млрд", t["note"])
+        self.assertNotIn("без доразмещения", t["headline"])
+
+    def test_ofz_биржевое_число_названо_биржевым(self):
+        # Пост Минфина не найден или не разобран: число с доски, и тайл это говорит.
+        # Запись старого формата (без поля source) — тоже биржевая.
+        # мутация: молчать об источнике -> биржевое число читается как итог дня.
+        self.put("ofz_auctions", {"2026-11-18": 70.6442},
+                 {"last": {"date": "2026-11-18", "placed_bn": 70.6442, "failed": False,
+                           "demand_bn": None}, "method": "moex_pact"})
+        t = self.tile("ofz_auctions", now=datetime(2026, 11, 19, 9, 0, tzinfo=UTC))
+        self.assertIn("размещено 70,6 млрд по биржевой доске, без доразмещения",
+                      t["headline"])
+        self.assertIn("итог Минфина за этот день не получен", t["note"])
+        self.assertEqual(t["payload"]["placed_source"], "board")
+        self.assertIsNone(t["payload"]["drpa_bn"])
 
     def test_ofz_нулевое_размещение_названо_словами(self):
         """Несостоявшийся аукцион — словами, а не «размещено 0.0 млрд» крупным кеглем."""
@@ -560,7 +600,7 @@ class TestТайлыНаЖивыхДанных(TileCase):
         self.assertTrue(t["payload"]["failed"])
         self.assertIn("не состоялся", t["headline"])
         self.assertIn("размещения не было", t["headline"])
-        self.assertNotIn("0.0 млрд", t["headline"])
+        self.assertNotIn("0,0 млрд", t["headline"])
 
     def test_polymarket_доля_нормализуется_в_проценты_один_раз(self):
         """Ряд приходит долями (0.35): в заголовке 35%, а не 0% и не 3500%.

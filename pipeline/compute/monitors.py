@@ -1062,6 +1062,13 @@ def _t_ofz_auctions(store, now):
     status = _st("ofz_auctions", pts, meta, now)
     weeks = meta.get("weeks_since")
     ahead = meta.get("next_auction")
+    # ОТКУДА ЧИСЛО (аудит 20.11.2026). Официальный итог Минфина включает
+    # доразмещение после аукциона, биржевая доска — нет, и разница доходит до 29 %
+    # (11.11.2026: 88,9 против 62,7 млрд). Тайл называет источник прямо; оба числа —
+    # в payload. Запись старого формата (без поля source) — биржевая.
+    official = last_meta.get("source") == "minfin_tg"
+    board = last_meta.get("placed_board_bn")
+    drpa = last_meta.get("drpa_bn") if official else None
     payload = {
         "date": asof,
         "issue": last_meta.get("issue"),
@@ -1073,23 +1080,34 @@ def _t_ofz_auctions(store, now):
         "weeks_since": weeks,
         "next_auction": ahead,
         "method": meta.get("method"),
+        "placed_source": "minfin" if official else "board",
+        "placed_board_bn": _r(board, 1),
+        "placed_official_bn": _r(last_meta.get("placed_official_bn"), 1),
+        "auction_bn": _r(last_meta.get("auction_bn"), 1) if official else None,
+        "drpa_bn": _r(drpa, 1),
+        "official_url": last_meta.get("official_url") if official else None,
         "recent": [[d, _r(v, 1)] for d, v in pts[-12:]],
     }
-    # Спрос теперь бывает пустым штатно: биржа его не раскрывает, а сайт Минфина с
-    # прод-машины недоступен. Молчание про спрос — это «нет данных», и печатать
-    # «при спросе н/д млрд» нельзя: единица, приклеенная к отсутствующему числу.
-    demand_txt = f" при спросе {_n(demand, 1)} млрд" if demand is not None else ""
-    btc_txt = f", bid-to-cover {_n(btc, 2)}" if btc is not None else ""
+    # Спрос бывает пустым штатно: ни биржа, ни пост Минфина его не называют.
+    # Молчание про спрос — это «нет данных», и печатать «при спросе н/д млрд»
+    # нельзя: единица, приклеенная к отсутствующему числу.
+    demand_txt = f" при спросе {_ru(demand, 1)} млрд" if demand is not None else ""
+    btc_txt = f", bid-to-cover {_ru(btc, 2)}" if btc is not None else ""
+    if official:
+        src_txt = (f", из них доразмещение после аукциона {_ru(drpa, 1)} млрд"
+                   if drpa else "")
+    else:
+        src_txt = " по биржевой доске, без доразмещения"
     if failed and (placed is None or placed <= 0):
         # «размещено 0,0 млрд» крупным кеглем неотличимо от аукциона, где ноль реально
         # разместили. Провал по нулю называем словами.
         headline = f"Аукцион {_ddmm(asof)} не состоялся: размещения не было"
     elif failed:
-        headline = (f"Аукцион {_ddmm(asof)} провален: размещено {_n(placed, 1)} млрд"
-                    f"{demand_txt}{btc_txt}")
+        headline = (f"Аукцион {_ddmm(asof)} провален: размещено {_ru(placed, 1)} млрд"
+                    f"{src_txt}{demand_txt}{btc_txt}")
     else:
-        headline = (f"Аукцион {_ddmm(asof)}: размещено {_n(placed, 1)} млрд"
-                    f"{demand_txt}{btc_txt}")
+        headline = (f"Аукцион {_ddmm(asof)}: размещено {_ru(placed, 1)} млрд"
+                    f"{src_txt}{demand_txt}{btc_txt}")
     # Пауза в размещениях — самостоятельное состояние рынка, а не «старые данные».
     # С 20.07.2026 аукционы приостановлены, и заголовок без этой оговорки читался бы
     # как свежая новость про аукцион месячной давности.
@@ -1098,11 +1116,16 @@ def _t_ofz_auctions(store, now):
                     if headline.startswith("Аукцион ") else headline)
     if ahead:
         headline += f". Назначен следующий: {_ddmm(ahead)}"
-    return _tile("ofz_auctions", status, asof, headline, payload,
-                 "Провал аукциона читаем как индикатор фискальной премии в длинном конце, "
-                 "а не как торговый сигнал для акций. Объём — биржевой (доска PACT), без "
-                 "доразмещения после аукциона; спрос биржа не раскрывает, а сайт Минфина "
-                 "с прод-машины недоступен.",
+    note = ("Провал аукциона читаем как индикатор фискальной премии в длинном конце, "
+            "а не как торговый сигнал для акций. ")
+    if official:
+        note += ("Объём — итог Минфина по номиналу, с доразмещением после аукциона"
+                 + (f"; биржевая доска показывает {_ru(board, 1)} млрд" if board else "")
+                 + ".")
+    else:
+        note += ("Объём — по биржевой доске, без доразмещения после аукциона: итог "
+                 "Минфина за этот день не получен.")
+    return _tile("ofz_auctions", status, asof, headline, payload, note,
                  meta.get("fetched_at"))
 
 

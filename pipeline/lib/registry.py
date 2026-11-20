@@ -207,10 +207,12 @@ SERIES = {
     "ofz_auctions": dict(fetcher="auctions.auctions", args={}, cadence="weekly",
                          pub_lag_days=0, sla="iss_daily", required=False, role="monitor",
                          label="Аукционы ОФЗ",
-                         note="источник — биржевая доска PACT, а не Минфин: minfin.gov.ru "
-                              "отдаёт 503 с прод-машины даже на статику. Биржа даёт "
-                              "размещение и различает «провалился»/«не проводился», но НЕ "
-                              "даёт спрос и не включает ДРПА (docs/SOURCES.md)"),
+                         note="число дня — официальный итог Минфина (аукционы плюс "
+                              "доразмещение) из его телеграм-канала t.me/s/minfin; "
+                              "биржевая доска PACT решает, БЫЛ ли аукцион (различает "
+                              "«провалился»/«не проводился»), служит сверкой и резервом. "
+                              "Сайт minfin.gov.ru с прод-машины отдаёт 503. Спроса нет "
+                              "ни там, ни там (docs/SOURCES.md)"),
     "budget_deficit": dict(fetcher="minfin.budget", args={}, cadence="monthly", pub_lag_days=12,
                            poll_window=(9, 16), sla="minfin_monthly", required=False,
                            role="monitor", label="Исполнение федерального бюджета"),
