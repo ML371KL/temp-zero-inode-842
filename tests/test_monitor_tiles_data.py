@@ -546,10 +546,50 @@ class TestТайлыНаЖивыхДанных(TileCase):
         self.assertEqual(p["premium_bp"], 5)
         self.assertFalse(p["failed"])
         self.assertIn("Аукцион 13.08", t["headline"])
-        self.assertIn("размещено 43.2 млрд", t["headline"])
-        self.assertIn("при спросе 87.5 млрд", t["headline"])
-        self.assertIn("bid-to-cover 2.03", t["headline"])
+        # Тексты тайла с 20.11.2026 сразу в русской записи (запятая, «−»).
+        self.assertIn("размещено 43,2 млрд", t["headline"])
+        self.assertIn("при спросе 87,5 млрд", t["headline"])
+        self.assertIn("bid-to-cover 2,03", t["headline"])
         self.assertNotIn("провален", t["headline"])
+
+    def test_ofz_итог_минфина_назван_и_доразмещение_видно(self):
+        """Аукцион 11.11.2026: Минфин 88,874 млрд, из них ДРПА 23,184; доска 62,70.
+
+        мутация: показывать биржевое число без оговорки -> «размещено 62,7 млрд» при
+        официальном итоге 88,9 (занижение на 29 %).
+        """
+        self.put("ofz_auctions", {"2026-11-11": 88.874},
+                 {"last": {"date": "2026-11-11", "issue": "SU26235RMFS0, SU26250RMFS9",
+                           "placed_bn": 88.874, "placed_board_bn": 62.7021,
+                           "placed_official_bn": 88.874, "auction_bn": 65.69,
+                           "drpa_bn": 23.184, "source": "minfin_tg", "failed": False,
+                           "official_url": "https://t.me/minfin/9472", "demand_bn": None},
+                  "method": "minfin_tg"})
+        t = self.tile("ofz_auctions", now=datetime(2026, 11, 12, 9, 0, tzinfo=UTC))
+        p = t["payload"]
+        self.assertEqual(p["placed_bn"], 88.9)
+        self.assertEqual(p["placed_source"], "minfin")
+        self.assertEqual(p["placed_board_bn"], 62.7)
+        self.assertEqual(p["drpa_bn"], 23.2)
+        self.assertIn("Аукцион 11.11: размещено 88,9 млрд, из них доразмещение после "
+                      "аукциона 23,2 млрд", t["headline"])
+        self.assertIn("итог Минфина", t["note"])
+        self.assertIn("биржевая доска показывает 62,7 млрд", t["note"])
+        self.assertNotIn("без доразмещения", t["headline"])
+
+    def test_ofz_биржевое_число_названо_биржевым(self):
+        # Пост Минфина не найден или не разобран: число с доски, и тайл это говорит.
+        # Запись старого формата (без поля source) — тоже биржевая.
+        # мутация: молчать об источнике -> биржевое число читается как итог дня.
+        self.put("ofz_auctions", {"2026-11-18": 70.6442},
+                 {"last": {"date": "2026-11-18", "placed_bn": 70.6442, "failed": False,
+                           "demand_bn": None}, "method": "moex_pact"})
+        t = self.tile("ofz_auctions", now=datetime(2026, 11, 19, 9, 0, tzinfo=UTC))
+        self.assertIn("размещено 70,6 млрд по биржевой доске, без доразмещения",
+                      t["headline"])
+        self.assertIn("итог Минфина за этот день не получен", t["note"])
+        self.assertEqual(t["payload"]["placed_source"], "board")
+        self.assertIsNone(t["payload"]["drpa_bn"])
 
     def test_ofz_нулевое_размещение_названо_словами(self):
         """Несостоявшийся аукцион — словами, а не «размещено 0.0 млрд» крупным кеглем."""
@@ -560,7 +600,7 @@ class TestТайлыНаЖивыхДанных(TileCase):
         self.assertTrue(t["payload"]["failed"])
         self.assertIn("не состоялся", t["headline"])
         self.assertIn("размещения не было", t["headline"])
-        self.assertNotIn("0.0 млрд", t["headline"])
+        self.assertNotIn("0,0 млрд", t["headline"])
 
     def test_polymarket_доля_нормализуется_в_проценты_один_раз(self):
         """Ряд приходит долями (0.35): в заголовке 35%, а не 0% и не 3500%.
@@ -609,7 +649,7 @@ class TestТайлыНаЖивыхДанных(TileCase):
         t = self.tile("polymarket")
         self.assertIn("31.12.2026", t["headline"])
         self.assertNotIn("01.01.2027", t["headline"])
-        self.assertIn("+6.0 п.п. за неделю", t["headline"])
+        self.assertIn("+6,0 п.п. за неделю", t["headline"])
 
     def test_futoi_нетто_z_и_держатели_не_путаются(self):
         """Нетто-позиция, z-скор и ЧИСЛО ЛИЦ — три разные величины в одном заголовке.
@@ -789,9 +829,11 @@ class TestТайлыНаЖивыхДанных(TileCase):
         self.assertEqual(p["ig_spread_pp"], 2.8)
         self.assertEqual(p["chg_21d_pp"], 2.3)
         self.assertEqual(p["pct_1y"], 100.0)
-        self.assertIn("ВДО 24.5%", t["headline"])
-        self.assertIn("спред к ОФЗ 2Y 10.3 п.п.", t["headline"])
+        # Тексты тайла с 20.11.2026 сразу в русской записи (запятая, «−»).
+        self.assertIn("ВДО 24,5%", t["headline"])
+        self.assertIn("спред к ОФЗ 2Y 10,3 п.п.", t["headline"])
         self.assertIn("(100-й перцентиль", t["headline"])
+        self.assertFalse(p["window_gap"])
 
     def test_retail_доли_и_народный_портфель(self):
         """Активные счета против открытых и концентрация по ЭМИТЕНТУ, не по строке.
@@ -975,16 +1017,16 @@ class TestВсеТайлыРазом(TileCase):
 
 
 class TestHyEstimateIsLabelled(TileCase):
-    """Оценка панели не выдаётся за число биржи.
+    """Тайл называет, что за число показано: медиана состава или число биржи.
 
-    Когда доходность ВДО посчитана из состава индекса (биржа сломала свой расчёт
-    14.08.2026), тайл обязан это сказать: метод расходится с биржевым до 0,4 п.п.,
-    и читатель, сверяющий панель с сайтом MOEX, должен понимать, почему числа
-    разные. Панель уже держит это правило для реинвеста дивидендов.
+    Аудит 20.11.2026. Решает ПЕРЕЧЕНЬ оценённых дней (meta.estimated_days), а не
+    поле meta.method: оно описывает последний прогон и переживает его. Вечером
+    19.11.2026 подпись «посчитано из состава, покрытие 91 %» стояла над биржевым
+    числом 95,99 % — поля остались в meta от дневного прогона.
     """
 
-    def build(self, meta_extra):
-        self.put("rucbhycp_yield", {"2026-08-17": 27.0, "2026-08-18": 29.2},
+    def build(self, meta_extra, hy=None):
+        self.put("rucbhycp_yield", hy or {"2026-08-17": 27.0, "2026-08-18": 29.2},
                  meta=dict({"unit": "pct"}, **meta_extra))
         self.put("rucbcpns_yield", {"2026-08-17": 15.8, "2026-08-18": 15.9},
                  meta={"unit": "pct"})
@@ -992,39 +1034,194 @@ class TestHyEstimateIsLabelled(TileCase):
         self.put("zcyc_y2", {"2026-08-17": 14.7, "2026-08-18": 14.8})
         return self.tile("hy_spread")
 
-    def test_оценка_помечена_в_подписи(self):
-        tile = self.build({"method": "constituents", "estimate_cover_pct": 99.9})
-        self.assertIn("оценка, а не число биржи", tile["note"])
-        # Конвейер печатает числа «по-английски» (точка), запятую ставит фронт
-        # через ruText — так во всей панели.
-        self.assertIn("99.9% веса", tile["note"])
+    def test_медиана_названа_в_заголовке_и_подписи(self):
+        tile = self.build({"method": "constituents", "estimate_asof": "2026-08-18",
+                           "estimate_cover_pct": 99.8, "exchange_last": ["2026-08-17", 85.65],
+                           "estimated_days": ["2026-08-17", "2026-08-18"]})
+        # мутация: не называть метод -> читатель сверяет 29,2 % с 85,65 % на сайте
+        # биржи и не понимает, почему числа разные.
+        self.assertIn("ВДО 29,2% (медиана доходности бумаг индекса)", tile["headline"])
+        self.assertIn("медиана доходности бумаг индекса", tile["note"])
+        self.assertIn("котировки есть у 99,8% веса", tile["note"])
+        self.assertEqual(tile["payload"]["hy_method"], "median")
         self.assertEqual(tile["payload"]["method"], "constituents")
+        self.assertEqual(tile["payload"]["exchange_yield"], 85.65)
 
-    def test_отброшенные_бумаги_названы_вслух(self):
-        """«Покрытие 92,8%» читается как «столько нашлось», а столько ОСТАЛОСЬ.
+    def test_поля_прошлой_оценки_не_делают_биржевое_число_оценкой(self):
+        """(в) Вечер 19.11.2026: в meta — поля дневной оценки, в ряду — число биржи.
 
-        Разница важна для направления ошибки: режутся самые доходные строки, то
-        есть оценка смещена вниз. 26.08.2026 без отсева тайл показывал 45,9%
-        вместо 29,7% — молчать о том, что часть корзины выкинута, нельзя.
+        мутация: решать по meta.method -> подпись «медиана… котировки есть у 91 %»
+        над биржевым числом.
         """
-        tile = self.build({"method": "constituents", "estimate_cover_pct": 92.8,
-                           "estimate_dropped": {"count": 21, "weight_pct": 7.04,
-                                                "fence_pct": 56.05}})
-        self.assertIn("отброшено 21", tile["note"])
-        self.assertIn("7.0%", tile["note"])
-        self.assertIn("смещена скорее вниз", tile["note"])
-        self.assertEqual(tile["payload"]["estimate_dropped_n"], 21)
-        self.assertEqual(tile["payload"]["estimate_dropped_weight_pct"], 7.04)
+        tile = self.build({"method": "constituents", "estimate_asof": "2026-08-18",
+                           "estimate_cover_pct": 91.0,
+                           "estimate_dropped": {"count": 14, "weight_pct": 8.68},
+                           "estimated_days": ["2026-08-17"]})
+        self.assertNotIn("медиана", tile["headline"])
+        self.assertNotIn("медиана", tile["note"])
+        self.assertNotIn("91", tile["note"])
+        self.assertEqual(tile["payload"]["hy_method"], "exchange")
+        self.assertNotIn("method", tile["payload"])
 
-    def test_ничего_не_отброшено_лишней_фразы_нет(self):
-        tile = self.build({"method": "constituents", "estimate_cover_pct": 99.9,
-                           "estimate_dropped": {"count": 0, "weight_pct": 0.0}})
+    def test_покрытие_чужого_дня_не_показывается(self):
+        # Оценка этого прогона не посчиталась: на тайле вчерашняя медиана, а её
+        # покрытия meta уже не знает. Чужое число к ней не приклеиваем.
+        tile = self.build({"method": "constituents", "estimate_asof": "2026-08-17",
+                           "estimate_cover_pct": 99.8,
+                           "estimated_days": ["2026-08-17", "2026-08-18"]})
+        self.assertIn("медиана доходности бумаг индекса", tile["note"])
+        self.assertNotIn("99,8", tile["note"])
+        self.assertIsNone(tile["payload"]["estimate_cover_pct"])
+
+    def test_про_смещение_оценки_вниз_тайл_больше_не_говорит(self):
+        tile = self.build({"method": "constituents", "estimate_asof": "2026-08-18",
+                           "estimate_cover_pct": 92.8,
+                           "estimate_dropped": {"count": 21, "weight_pct": 7.04},
+                           "estimated_days": ["2026-08-18"]})
+        self.assertNotIn("смещена", tile["note"])
         self.assertNotIn("отброшено", tile["note"])
 
     def test_биржевое_число_ничем_не_помечается(self):
         tile = self.build({})
-        self.assertNotIn("оценка", tile["note"])
+        self.assertNotIn("медиана", tile["note"])
         self.assertNotIn("method", tile["payload"])
+
+    def test_спред_ig_берётся_за_свой_последний_день(self):
+        # Медиана ВДО есть за 18.08, биржевая доходность IG — только за 17.08
+        # (строку дня биржа отдаёт ночью). Спред IG — за 17.08, обе ноги оттуда:
+        # 15,8 − 14,7 = 1,1. мутация: требовать тот же день, что у ВДО -> None
+        # каждый вечер; мутация: IG 17.08 минус база 18.08 -> 1,0.
+        self.put("rucbhycp_yield", {"2026-08-17": 27.0, "2026-08-18": 29.2},
+                 meta={"estimated_days": ["2026-08-18"]})
+        self.put("rucbcpns_yield", {"2026-08-10": 15.5, "2026-08-17": 15.8})
+        self.put("zcyc_y2", {"2026-08-10": 14.5, "2026-08-17": 14.7, "2026-08-18": 14.8})
+        p = self.tile("hy_spread")["payload"]
+        self.assertEqual(p["ig_spread_pp"], 1.1)
+        self.assertEqual(p["ig_spread_asof"], "2026-08-17")
+        # IG недельной давности к сегодняшнему ВДО не приклеивается.
+        self.put("rucbcpns_yield", {"2026-08-10": 15.5})
+        self.assertIsNone(self.tile("hy_spread")["payload"]["ig_spread_pp"])
+
+    def test_старая_пара_при_свежем_ряде_не_зелёная(self):
+        # У свежих точек ВДО нет базы того же дня: на тайле пара месячной давности.
+        # мутация: статус только по meta ряда -> зелёный тайл со старым числом.
+        self.put("rucbhycp_yield", {"2026-07-10": 27.0, "2026-08-17": 29.2},
+                 meta={"asof": "2026-08-17"})
+        self.put("zcyc_y2", {"2026-07-10": 14.7})
+        t = self.tile("hy_spread")
+        self.assertEqual(t["asof"], "2026-07-10")
+        self.assertEqual(t["status"], "stale")
+
+    def test_после_пропуска_свежая_точка_берёт_базу_прошлого_дня(self):
+        # Утро после чистки ряда: медиана за 17.08 есть, КБД за 17.08 ещё нет, а
+        # прошлая общая дата — месяц назад. На тайле свежая точка против базы
+        # 14.08 (три дня, выходные), и день базы назван: 29,2 − 14,6 = 14,6.
+        # мутация: держаться последней общей даты -> «ВДО 27,0 %» месячной давности.
+        self.put("rucbhycp_yield", {"2026-07-10": 27.0, "2026-08-17": 29.2},
+                 meta={"asof": "2026-08-17", "estimated_days": ["2026-08-17"]})
+        self.put("zcyc_y2", {"2026-07-10": 14.7, "2026-08-14": 14.6})
+        t = self.tile("hy_spread")
+        p = t["payload"]
+        self.assertEqual(t["asof"], "2026-08-17")
+        self.assertEqual((p["hy_yield"], p["base_yield"], p["spread_pp"]), (29.2, 14.6, 14.6))
+        self.assertEqual(p["base_asof"], "2026-08-14")
+        self.assertEqual(t["status"], "ok")
+        self.assertIsNone(p["chg_21d_pp"])
+
+    def test_отказ_оценки_виден_статусом_тайла(self):
+        # Ряд стареет честно: фетчер объявил stale — тайл жёлтый, а не зелёный.
+        tile = self.build({"status": "stale", "estimated_days": ["2026-08-18"],
+                           "note": "оценка по составу не посчиталась"})
+        self.assertEqual(tile["status"], "stale")
+
+
+class TestHyWindowAndPriceIndex(TileCase):
+    """Перцентиль и изменение за 21 день — только по сплошному окну; ход цены индекса."""
+
+    def seed(self, hole=None, n=60):
+        """n торговых дней подряд (календарь — ряд КБД); hole — срез дней без точки ВДО."""
+        span = days("2026-08-14", n)
+        self.put("zcyc_y2", {d: 14.0 for d in span})
+        hy = {d: 30.0 + 0.1 * i for i, d in enumerate(span)}
+        for d in (span[hole] if hole else []):
+            hy.pop(d)
+        self.put("rucbhycp_yield", hy, {"estimated_days": [span[-1]]})
+        return span
+
+    def test_сплошное_окно_даёт_оба_числа(self):
+        # Спред растёт на 0,1 п.п. в день: за 21 торговый день +2,1 п.п. Последнее
+        # значение — наибольшее из 60: средний ранг (59 + (1 + 1)/2)/60·100 = 100.
+        self.seed()
+        p = self.tile("hy_spread")["payload"]
+        self.assertEqual(p["chg_21d_pp"], 2.1)
+        self.assertEqual(p["pct_1y"], 100.0)
+        self.assertFalse(p["window_gap"])
+
+    def test_месячная_дыра_прячет_перцентиль_и_изменение(self):
+        """После чистки ряда в окне пропуск в 20 торговых дней (21.10–19.11.2026).
+
+        мутация: считать «21 точку назад» -> изменение за 41 торговый день выдаётся
+        за изменение за 21; перцентиль сравнивает сегодня с историей без последнего
+        месяца.
+        """
+        self.seed(hole=slice(-21, -1))
+        t = self.tile("hy_spread")
+        p = t["payload"]
+        self.assertIsNone(p["chg_21d_pp"])
+        self.assertIsNone(p["pct_1y"])
+        self.assertTrue(p["window_gap"])
+        self.assertNotIn("перцентиль", t["headline"])
+        self.assertNotIn("н/д", t["headline"])
+        # То, что считается честно, остаётся: доходность, база, спред.
+        self.assertEqual(p["hy_yield"], 35.9)
+        self.assertEqual(p["spread_pp"], 21.9)
+
+    def test_один_пропущенный_день_окно_не_рвёт(self):
+        # Оценка не посчиталась в один из дней — рядовое дело, перцентиль остаётся.
+        self.seed(hole=slice(-10, -9))
+        p = self.tile("hy_spread")["payload"]
+        self.assertFalse(p["window_gap"])
+        self.assertIsNotNone(p["pct_1y"])
+        self.assertEqual(p["chg_21d_pp"], 2.1)
+
+    def test_нет_точки_ровно_21_день_назад_изменения_нет(self):
+        self.seed(hole=slice(-22, -21))
+        p = self.tile("hy_spread")["payload"]
+        self.assertIsNone(p["chg_21d_pp"])
+        self.assertIsNotNone(p["pct_1y"])
+
+    def test_ход_ценового_индекса_за_21_торговый_день(self):
+        """Настоящие закрытия RUCBHYCP 19.10–18.11.2026 (22 торговых дня).
+
+        Руками: 59,83 / 68,38 − 1 = −12,50 %. мутация: считать от первой точки ряда
+        или «за 21 календарный день» -> другое число.
+        """
+        self.seed()
+        closes = [68.38, 68.46, 68.67, 68.69, 68.9, 68.55, 68.06, 67.81, 66.74, 65.44,
+                  64.68, 63.42, 62.43, 63.06, 63.45, 63.3, 63.11, 62.9, 62.27, 61.18,
+                  60.15, 59.83]
+        span = ["2026-10-19", "2026-10-20", "2026-10-21", "2026-10-22", "2026-10-23",
+                "2026-10-26", "2026-10-27", "2026-10-28", "2026-10-29", "2026-10-30",
+                "2026-11-02", "2026-11-03", "2026-11-05", "2026-11-06", "2026-11-09",
+                "2026-11-10", "2026-11-11", "2026-11-12", "2026-11-13", "2026-11-16",
+                "2026-11-17", "2026-11-18"]
+        self.put("rucbhycp", {"2026-10-16": 68.13, **dict(zip(span, closes))})
+        t = self.tile("hy_spread")
+        p = t["payload"]
+        self.assertEqual(p["price_chg_21d_pct"], -12.5)
+        self.assertEqual(p["price_index"], 59.83)
+        self.assertEqual(p["price_index_from"], 68.38)
+        self.assertEqual(p["price_index_from_asof"], "2026-10-19")
+        self.assertIn("Ценовой индекс ВДО за 21 торговый день: −12,5%", t["note"])
+        self.assertIn("68,38 на 19.10 → 59,83 на 18.11", t["note"])
+        self.assertIn("ценовой индекс за 21 торговый день −12,5%", t["headline"])
+
+    def test_без_ряда_цены_строки_нет(self):
+        self.seed()
+        t = self.tile("hy_spread")
+        self.assertNotIn("price_text", t["payload"])
+        self.assertNotIn("Ценовой индекс", t["note"])
+
 
 if __name__ == "__main__":
     unittest.main()

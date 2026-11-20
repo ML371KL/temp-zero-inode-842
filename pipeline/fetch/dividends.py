@@ -92,6 +92,35 @@ def _date(raw):
     return "%s-%s-%s" % (m.group(3), m.group(2), m.group(1)) if m else None
 
 
+def gap_day(record_date, buy_until=None):
+    """День, с которого бумага торгуется БЕЗ дивиденда, по дате закрытия реестра.
+
+    Режим Т+1: чтобы попасть в реестр на дату R, бумагу надо купить так, чтобы
+    расчёты прошли не позже R. Расчётный день — торговый, поэтому:
+      * R — торговый день: последний день покупки — предыдущий торговый, гэп в R
+        (Сбербанк: реестр пн 20.07.2026, купить до пт 17.07, гэп 20.07);
+      * R — выходной или праздник: расчёты должны пройти в последний торговый день
+        ДО R, покупка — ещё днём раньше, и гэп приходится на этот последний
+        торговый день (ФосАгро: реестр вс 13.12.2026, купить до чт 10.12, гэп пт
+        11.12 — а не 13.12, как писала панель до 20.11.2026).
+    Последний день покупки от источника — сверка: гэп не может наступить раньше
+    следующего торгового дня после него.
+
+    Календарь — dates.is_trading_day (будни минус праздники РФ): точные переносы
+    биржи он не знает, для них и нужна сверка с днём покупки.
+    """
+    day = dates.parse_date(record_date)
+    gap = day if dates.is_trading_day(day) else dates.prev_trading_day(day)
+    if buy_until:
+        try:
+            last_buy = dates.parse_date(buy_until)
+        except ValueError:
+            last_buy = None
+        if last_buy is not None and gap <= last_buy:
+            gap = dates.next_trading_day(last_buy)
+    return dates.fmt_date(gap)
+
+
 def index_weights():
     """{тикер: вес в IMOEX, %}. Пустой словарь — если ISS не ответил."""
     try:
@@ -115,9 +144,9 @@ def index_weights():
 def parse_calendar(html):
     """HTML smart-lab -> [{ticker, ex_date, buy_until, amount_rub, yield_pct, price}].
 
-    ex_date — «Дата закрытия реестра»: на МосБирже с режимом T+1 это первый день,
-    когда бумага торгуется уже без дивиденда, то есть день гэпа. Именно так дата
-    определена в шапке inputs/dividends.yml.
+    ex_date здесь — «Дата закрытия реестра» как она напечатана в таблице. День
+    гэпа из неё делает calendar() (см. gap_day): в будний день это та же дата, а
+    реестр, закрывающийся в выходной, даёт гэп в последний торговый день до него.
     """
     rows, seen_header = [], False
     for table in _TABLE.findall(html):
@@ -201,9 +230,9 @@ def from_tinvest(weights, back_days=180, ahead_days=200):
             continue
         for rec in found:
             rows.append({"ticker": ticker,
-                         # ex_date — день, с которого бумага торгуется без дивиденда.
-                         # На МосБирже в режиме T+1 это и есть дата закрытия реестра
-                         # (SBER: последний день покупки 17.07, реестр 20.07).
+                         # Здесь — дата закрытия реестра; день гэпа из неё делает
+                         # calendar() через gap_day (в выходной реестр даёт гэп в
+                         # последний торговый день до него).
                          "ex_date": rec["record_date"],
                          "buy_until": rec["last_buy_date"],
                          "amount_rub": rec["amount_rub"],
@@ -246,6 +275,12 @@ def calendar(series_id="dividends", with_amounts=True):
         if weight is None:
             skipped.append(row["ticker"])
             continue
+        # ДЕНЬ ГЭПА, а не дата закрытия реестра: ФосАгро с реестром в воскресенье
+        # 13.12.2026 торгуется без дивиденда с пятницы 11.12 (аудит 20.11.2026).
+        # Дата реестра остаётся рядом — record_date.
+        record = row["ex_date"]
+        row = dict(row, record_date=record,
+                   ex_date=gap_day(record, row.get("buy_until")))
         items.append(dict(row, weight_pct=round(weight, 3),
                           index_drag_pct=(round(weight * row["yield_pct"] / 100.0, 4)
                                           if row["yield_pct"] is not None else None)))

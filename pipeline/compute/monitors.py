@@ -18,7 +18,7 @@ from datetime import date, datetime, timedelta, timezone
 
 from pipeline.lib import calc, registry, schedule
 from pipeline.lib.constants import (
-    CB_MEETINGS_2026,
+    CB_MEETINGS,
     MONITOR_TIERS,
     MSK_OFFSET_HOURS,
     SEP_NODE,
@@ -821,7 +821,7 @@ def _t_dividends(store, now):
 
 def _t_cb_meeting(store, now):
     today = _msk_now(now).date()
-    future = [m for m in CB_MEETINGS_2026 if _d(m) and _d(m) >= today]
+    future = [m for m in CB_MEETINGS if _d(m) and _d(m) >= today]
     nxt = future[0] if future else None
     key_pts, key_meta = _ser(store, "key_rate")
     cons_pts, cons_meta = _ser(store, "cb_consensus")
@@ -840,7 +840,7 @@ def _t_cb_meeting(store, now):
     # 24.07 → 27.07, 19.06 → 22.06). К этому моменту nxt — уже СЛЕДУЮЩЕЕ заседание,
     # поэтому сюрприз надо считать от консенсуса только что прошедшего, и только пока
     # оно свежее недели: иначе старое заседание опять начнёт подставляться.
-    past = [m for m in CB_MEETINGS_2026 if _d(m) and _d(m) <= today]
+    past = [m for m in CB_MEETINGS if _d(m) and _d(m) <= today]
     last_meeting = past[-1] if past else None
     last_fresh = bool(last_meeting and (today - _d(last_meeting)).days <= CB_DECISION_FRESH_DAYS)
     last_cons = cons_map.get(last_meeting) if last_fresh else None
@@ -882,7 +882,10 @@ def _t_cb_meeting(store, now):
         "rusfar_asof": rus_asof,
         "spread_pp": _r(spread, 2),
         "priced_text": priced,
-        "calendar": CB_MEETINGS_2026,
+        "calendar": list(CB_MEETINGS),
+        # Сколько заседаний впереди знает календарь панели: на последнем тайл
+        # напоминает дописать следующий год (constants.CB_MEETINGS).
+        "calendar_left": len(future),
     }
     # Недельный ИПЦ — вход в ожидания ставки, а не предиктор акций (тайл снят
     # аудитом 02.09.2026): одной строкой здесь, где он и читается — перед заседанием.
@@ -916,9 +919,11 @@ def _t_cb_meeting(store, now):
     # не может протухнуть по определению — индикатор свежести у тайла был мёртв.
     # Дата заседания живёт в payload.next_meeting и печатается отдельной строкой.
     data_asof = max([d for d in (key_asof, rus_asof) if d], default=None)
+    last_known = (f" После заседания {_dmy(nxt)} календарь заседаний в панели "
+                  f"заканчивается." if (nxt and len(future) == 1) else "")
     return _tile("cb_meeting", status, data_asof, headline, payload,
                  "Сюрприз ЦБ против консенсуса — качественная правда о двух великих "
-                 "разворотах (n=2), статистики за этим нет.",
+                 "разворотах (n=2), статистики за этим нет." + last_known,
                  key_meta.get("fetched_at") or rus_meta.get("fetched_at"))
 
 
@@ -1090,6 +1095,13 @@ def _t_ofz_auctions(store, now):
     status = _st("ofz_auctions", pts, meta, now)
     weeks = meta.get("weeks_since")
     ahead = meta.get("next_auction")
+    # ОТКУДА ЧИСЛО (аудит 20.11.2026). Официальный итог Минфина включает
+    # доразмещение после аукциона, биржевая доска — нет, и разница доходит до 29 %
+    # (11.11.2026: 88,9 против 62,7 млрд). Тайл называет источник прямо; оба числа —
+    # в payload. Запись старого формата (без поля source) — биржевая.
+    official = last_meta.get("source") == "minfin_tg"
+    board = last_meta.get("placed_board_bn")
+    drpa = last_meta.get("drpa_bn") if official else None
     payload = {
         "date": asof,
         "issue": last_meta.get("issue"),
@@ -1101,23 +1113,34 @@ def _t_ofz_auctions(store, now):
         "weeks_since": weeks,
         "next_auction": ahead,
         "method": meta.get("method"),
+        "placed_source": "minfin" if official else "board",
+        "placed_board_bn": _r(board, 1),
+        "placed_official_bn": _r(last_meta.get("placed_official_bn"), 1),
+        "auction_bn": _r(last_meta.get("auction_bn"), 1) if official else None,
+        "drpa_bn": _r(drpa, 1),
+        "official_url": last_meta.get("official_url") if official else None,
         "recent": [[d, _r(v, 1)] for d, v in pts[-12:]],
     }
-    # Спрос теперь бывает пустым штатно: биржа его не раскрывает, а сайт Минфина с
-    # прод-машины недоступен. Молчание про спрос — это «нет данных», и печатать
-    # «при спросе н/д млрд» нельзя: единица, приклеенная к отсутствующему числу.
-    demand_txt = f" при спросе {_n(demand, 1)} млрд" if demand is not None else ""
-    btc_txt = f", bid-to-cover {_n(btc, 2)}" if btc is not None else ""
+    # Спрос бывает пустым штатно: ни биржа, ни пост Минфина его не называют.
+    # Молчание про спрос — это «нет данных», и печатать «при спросе н/д млрд»
+    # нельзя: единица, приклеенная к отсутствующему числу.
+    demand_txt = f" при спросе {_ru(demand, 1)} млрд" if demand is not None else ""
+    btc_txt = f", bid-to-cover {_ru(btc, 2)}" if btc is not None else ""
+    if official:
+        src_txt = (f", из них доразмещение после аукциона {_ru(drpa, 1)} млрд"
+                   if drpa else "")
+    else:
+        src_txt = " по биржевой доске, без доразмещения"
     if failed and (placed is None or placed <= 0):
         # «размещено 0,0 млрд» крупным кеглем неотличимо от аукциона, где ноль реально
         # разместили. Провал по нулю называем словами.
         headline = f"Аукцион {_ddmm(asof)} не состоялся: размещения не было"
     elif failed:
-        headline = (f"Аукцион {_ddmm(asof)} провален: размещено {_n(placed, 1)} млрд"
-                    f"{demand_txt}{btc_txt}")
+        headline = (f"Аукцион {_ddmm(asof)} провален: размещено {_ru(placed, 1)} млрд"
+                    f"{src_txt}{demand_txt}{btc_txt}")
     else:
-        headline = (f"Аукцион {_ddmm(asof)}: размещено {_n(placed, 1)} млрд"
-                    f"{demand_txt}{btc_txt}")
+        headline = (f"Аукцион {_ddmm(asof)}: размещено {_ru(placed, 1)} млрд"
+                    f"{src_txt}{demand_txt}{btc_txt}")
     # Пауза в размещениях — самостоятельное состояние рынка, а не «старые данные».
     # С 20.07.2026 аукционы приостановлены, и заголовок без этой оговорки читался бы
     # как свежая новость про аукцион месячной давности.
@@ -1126,12 +1149,23 @@ def _t_ofz_auctions(store, now):
                     if headline.startswith("Аукцион ") else headline)
     if ahead:
         headline += f". Назначен следующий: {_ddmm(ahead)}"
-    return _tile("ofz_auctions", status, asof, headline, payload,
-                 "Провал аукциона читаем как индикатор фискальной премии в длинном конце, "
-                 "а не как торговый сигнал для акций. Объём — биржевой (доска PACT), без "
-                 "доразмещения после аукциона; спрос биржа не раскрывает, а сайт Минфина "
-                 "с прод-машины недоступен.",
+    note = ("Провал аукциона читаем как индикатор фискальной премии в длинном конце, "
+            "а не как торговый сигнал для акций. ")
+    if official:
+        note += ("Объём — итог Минфина по номиналу, с доразмещением после аукциона"
+                 + (f"; биржевая доска показывает {_ru(board, 1)} млрд" if board else "")
+                 + ".")
+    else:
+        note += ("Объём — по биржевой доске, без доразмещения после аукциона: итог "
+                 "Минфина за этот день не получен.")
+    return _tile("ofz_auctions", status, asof, headline, payload, note,
                  meta.get("fetched_at"))
+
+
+# Изменение «за N дней» считается от точки не старше стольких дней до нужной даты:
+# в ряду есть пропуски (биржа не каждый день отдаёт суточный срез), но точка
+# двухнедельной давности за «неделю назад» не сойдёт.
+POLY_BACK_SLACK_DAYS = 3
 
 
 def _t_polymarket(store, now):
@@ -1139,12 +1173,39 @@ def _t_polymarket(store, now):
     if not pts:
         return _empty("polymarket")
     status = _st("polymarket_ceasefire", pts, meta, now)
-    asof, p = pts[-1]
     # Ряд может приходить долей (0..1) или процентами — нормализуем к процентам.
     scale = 100.0 if max(v for _, v in pts[-60:]) <= 1.0 else 1.0
+    # СМЕНА КОНТРАКТА (аудит 20.11.2026). С meta.contract_since ряд идёт по новому
+    # контракту серии — с другим сроком и потому с другим уровнем (декабрьский
+    # 2026 ~10 %, мартовский 2027 ~28 %). Точки до этой даты — прежний контракт:
+    # на графике они остаются, но сравнивать с ними сегодняшнее число нельзя.
+    since = str(meta.get("contract_since") or "")[:10] or None
+    cur = [(d, v) for d, v in pts if not since or d >= since]
+    asof, p = (cur or pts)[-1]
+    # Крупное число — цена «сейчас» (meta.price_now), если она свежее последнего
+    # суточного среза; сам ряд — только срезы. До 20.11.2026 цена в момент прогона
+    # писалась точкой дня и назавтра переписывалась срезом: вчерашнее значение
+    # менялось задним числом на величину до 2 п.п.
+    kind = "snapshot"
+    now_p, now_day = meta.get("price_now"), str(meta.get("price_now_at") or "")[:10]
+    if (isinstance(now_p, (int, float)) and not isinstance(now_p, bool) and _d(now_day)
+            and (not cur or now_day >= cur[-1][0])):
+        asof, p, kind = now_day, float(now_p), "now"
     prob = p * scale
-    chg7 = (_chg(pts, 7) or 0.0) * scale if len(pts) > 7 else None
-    chg30 = (_chg(pts, 30) or 0.0) * scale if len(pts) > 30 else None
+
+    def change(days):
+        """Изменение за N КАЛЕНДАРНЫХ дней внутри текущего контракта или None."""
+        day = _d(asof)
+        if day is None:
+            return None
+        target = (day - timedelta(days=days)).isoformat()
+        # cur — только точки текущего контракта: через дату смены сравнивать не с чем.
+        back = [(d, v) for d, v in cur if d <= target]
+        if not back or (_d(target) - _d(back[-1][0])).days > POLY_BACK_SLACK_DAYS:
+            return None
+        return (p - back[-1][1]) * scale
+
+    chg7, chg30 = change(7), change(30)
     # Горизонт — часть самого числа, а не подробность: вероятность «до даты»
     # зависит от того, сколько до неё осталось. Без срока «перемирие 2%» и
     # «перемирие 24%» выглядят противоречием, хотя это один рынок в один день.
@@ -1157,28 +1218,41 @@ def _t_polymarket(store, now):
     if not isinstance(horizon, int):
         a, b = _d(str(meta.get("end_date") or end_date)[:10]), _d(asof)
         horizon = (a - b).days if (a and b) else None
+    prev = meta.get("contract_prev") if isinstance(meta.get("contract_prev"), dict) else {}
+    prev_end = str(prev.get("resolves_on") or prev.get("end_date") or "")[:10] or None
     payload = {
         "prob_pct": _r(prob, 1),
+        "prob_kind": kind,
         "chg_7d_pp": _r(chg7, 1),
         "chg_30d_pp": _r(chg30, 1),
         "question": meta.get("question") or meta.get("note"),
         "end_date": end_date or None,
         "horizon_days": horizon if isinstance(horizon, int) else None,
         "market_volume_usd": _r(meta.get("volume"), 0),
+        "contract": meta.get("slug"),
+        "contract_since": since,
+        "contract_prev_end_date": prev_end if since else None,
         "series": [[d, _r(v * scale, 1)] for d, v in pts[-120:]],
     }
-    tail = f" ({_n(chg7, 1, True)} п.п. за неделю)" if chg7 is not None else ""
+    tail = f" ({_ru(chg7, 1, True)} п.п. за неделю)" if chg7 is not None else ""
     # Дата, а не месяц прописью: рынок разрешается КОНКРЕТНЫМ днём, а «к декабрю»
     # ещё и требует дательного падежа, которого в MONTHS_RU_NOM нет — «к декабрь
     # 2026» уехало в прод на один такт.
     when = f" до {_dmy(end_date)}" if end_date else ""
-    headline = f"Соглашение{when}: {_n(prob, 0)}%{tail}"
+    headline = f"Соглашение{when}: {_ru(prob, 0)}%{' сейчас' if kind == 'now' else ''}{tail}"
     note = ("История с 2022 года и мало разрешившихся событий — проверить предиктивность "
             "нечем; тайл нужен для чтения новостного фона.")
     if isinstance(horizon, int):
         note += (f" Показан самый торгуемый контракт серии, до его даты {horizon} дн.: "
                  f"у контрактов на исходе срока уровень определяется календарём, "
                  f"а не переговорами.")
+    if since:
+        was = f" вместо контракта до {_dmy(prev_end)}" if prev_end else ""
+        note += (f" С {_dmy(since)} показан контракт{when}{was}: уровень до и после "
+                 f"этой даты несопоставим, изменения считаются только внутри нового "
+                 f"контракта.")
+    if kind == "now":
+        note += " Крупное число — цена сейчас; график и изменения — по суточным срезам."
     return _tile("polymarket", status, asof, headline, payload, note,
                  meta.get("fetched_at"))
 
@@ -1579,6 +1653,57 @@ def _t_mcxsm(store, now):
                  s_meta.get("fetched_at"))
 
 
+def _ru(value, digits=1, plus=False):
+    """Число для текста витрины: десятичная запятая и типографский минус.
+
+    Остальные тайлы печатают числа через _n (точка), а запятую ставит фронт
+    (ruText). Тексты, переписанные аудитом 20.11.2026, сразу идут в русской
+    записи: их читают и мимо фронта (телеграм, комментарий).
+    """
+    from pipeline.lib import wording
+    return wording.num(value, digits, plus)
+
+
+# Сколько торговых дней подряд может не быть точки, чтобы окно ещё считалось
+# сплошным. Один-два пропуска — рядовое дело (оценка не посчиталась); дыра в месяц
+# после чистки ряда 20.11.2026 — уже другое окно, и перцентиль по нему был бы
+# сравнением сегодняшнего числа с историей, в которой нет последнего месяца.
+HY_MAX_HOLE_DAYS = 5
+
+
+def _hy_window_stats(pairs, calendar, asof):
+    """(изменение спреда за 21 торговый день, перцентиль за год, есть ли дыра).
+
+    Считает по ТОРГОВОМУ КАЛЕНДАРЮ, а не «21 точку назад»: после чистки ряда в нём
+    месячный пропуск, и «21 точка назад» оказалась бы двумя месяцами. Оба числа
+    отдаются, только если в их окне нет дыры длиннее HY_MAX_HOLE_DAYS: по разные
+    стороны пропуска после чистки лежат числа разной природы (до него — биржевая
+    средневзвешенная, после — медиана состава), и разность через него была бы
+    сменой метода, а не движением рынка.
+    """
+    have = dict(pairs)
+    cal = [d for d in calendar if d <= asof]
+    if asof not in have or not cal or cal[-1] != asof:
+        return None, None, True
+
+    def hole(window):
+        """Самая длинная серия дней без точки, считая от первой точки окна."""
+        first = next((n for n, d in enumerate(window) if d in have), 0)
+        worst = run = 0
+        for d in window[first:]:
+            run = 0 if d in have else run + 1
+            worst = max(worst, run)
+        return worst
+
+    chg = None
+    if len(cal) > 21 and cal[-22] in have and hole(cal[-22:]) <= HY_MAX_HOLE_DAYS:
+        chg = have[asof] - have[cal[-22]]
+    window = cal[-252:]
+    gap = hole(window) > HY_MAX_HOLE_DAYS
+    pct = None if gap else _pct_last([have[d] for d in window if d in have], 252)
+    return chg, pct, gap
+
+
 def _t_hy_spread(store, now):
     hy_pts, hy_meta = _ser(store, "rucbhycp_yield")
     ig_pts, ig_meta = _ser(store, "rucbcpns_yield")
@@ -1595,6 +1720,19 @@ def _t_hy_spread(store, now):
         # Календари разъехались (КБД считается не каждый день) — берём последнюю базу.
         pairs = [(hy_pts[-1][0], hy_pts[-1][1] - base_pts[-1][1])]
     asof, spread = pairs[-1]
+    base_asof = asof if asof in base else base_pts[-1][0]
+    # Последняя ОБЩАЯ дата старше самого ряда больше чем на неделю: у свежей точки
+    # ВДО ещё нет базы того же дня, а предыдущая общая дата — по ту сторону
+    # пропуска (после чистки ряда 20.11.2026 это 20.10). Показывать месячной
+    # давности пару при свежих данных нельзя: берём последнюю точку ВДО и базу не
+    # старше пяти дней до неё, а день базы называем в payload.
+    last_day, last_val = hy_pts[-1]
+    if _d(last_day) and _d(asof) and (_d(last_day) - _d(asof)).days > 7:
+        prior = [d for d, _ in base_pts if d <= last_day]
+        if prior and (_d(last_day) - _d(prior[-1])).days <= 5:
+            base_asof = prior[-1]
+            pairs.append((last_day, last_val - base[base_asof]))
+            asof, spread = pairs[-1]
     # ТРИ ЧИСЛА ТАЙЛА — ИЗ ОДНОГО ДНЯ. Спред считался по последней ОБЩЕЙ дате, а
     # доходности брались хвостами своих рядов: на витрине 29,25 − 14,62 = 14,63 не
     # сходилось с напечатанным спредом 14,72, потому что база была из другого дня
@@ -1602,58 +1740,95 @@ def _t_hy_spread(store, now):
     # каждый день, а доходность индекса могла отстать из-за поломки источника.
     hy_map = dict(hy_pts)
     hy_yield = hy_map.get(asof, hy_pts[-1][1])
-    base_yield = base.get(asof, base_pts[-1][1])
-    ig_spread = None
+    base_yield = base.get(base_asof, base_pts[-1][1])
+    ig_spread, ig_asof = None, None
     if ig_pts:
         ig = dict(ig_pts)
-        # Спред IG считаем только когда обе ноги есть в ОДИН день; иначе честный
-        # None — «нет данных» лучше разности чисел из разных недель.
-        if asof in ig and asof in base:
-            ig_spread = ig[asof] - base[asof]
+        # Спред IG считаем только когда обе его ноги есть в ОДИН день; иначе честный
+        # None — «нет данных» лучше разности чисел из разных недель. День может
+        # отставать от дня ВДО: доходность IG — биржевое число, строку дня биржа
+        # отдаёт ночью, а медиана ВДО считается по котировкам того же вечера. Без
+        # этого спред IG пропадал бы с тайла каждый вечер до утра. Старше пяти
+        # дней — уже «разные недели».
+        day = next((d for d, _ in reversed(ig_pts) if d <= asof and d in base), None)
+        if day and _d(asof) and (_d(asof) - _d(day)).days <= 5:
+            ig_spread, ig_asof = ig[day] - base[day], day
     status = _worst(_st("rucbhycp_yield", hy_pts, hy_meta, now),
                     _st("rucbcpns_yield", ig_pts, ig_meta, now) if ig_pts else "ok")
-    vals = [v for _, v in pairs]
+    # Показанная пара старше самого ряда больше чем на неделю — значит, у свежих
+    # точек ВДО нет базы того же дня (или наоборот). Число на тайле при этом
+    # старое, а возраст ряда по meta свежий: без этой строки тайл был бы зелёным.
+    hy_last, shown = _d(hy_pts[-1][0]), _d(asof)
+    if hy_last and shown and (hy_last - shown).days > 7:
+        status = _worst(status, "stale")
+    # Перцентиль и изменение за 21 день — только по сплошному окну (аудит
+    # 20.11.2026): после чистки ряда в нём месячный пропуск.
+    calendar = [d for d, _ in base_pts] if base_label.startswith("ОФЗ") else [d for d, _ in pairs]
+    chg21, pct_1y, gap = _hy_window_stats(pairs, calendar, asof)
     payload = {
         "hy_yield": _r(hy_yield, 2),
         "base_label": base_label,
         "base_yield": _r(base_yield, 2),
+        "base_asof": base_asof,
         "spread_pp": _r(spread, 2),
         "ig_spread_pp": _r(ig_spread, 2),
-        "pct_1y": _r(_pct_last(vals, 252), 0),
-        "chg_21d_pp": _r((pairs[-1][1] - pairs[-22][1]) if len(pairs) > 21 else None, 2),
+        "ig_spread_asof": ig_asof,
+        "pct_1y": _r(pct_1y, 0),
+        "chg_21d_pp": _r(chg21, 2),
+        "window_gap": gap,
         "series": [[d, _r(v, 2)] for d, v in pairs[-120:]],
     }
-    headline = (f"ВДО {_n(hy_yield, 1)}% — спред к {base_label} {_n(spread, 1)} п.п. "
-                f"({_n(_pct_last(vals, 252), 0)}-й перцентиль за год)")
-    # Панель не выдаёт свои оценки за чужие числа. Когда доходность посчитана из
-    # состава индекса (биржа сломала собственный расчёт — fetch/iss.index_yield),
-    # это обязано стоять в подписи: расхождение метода с биржевым до 0,4 п.п., и
-    # читатель, сверяющий тайл с сайтом MOEX, должен понимать, почему числа разные.
+    # ЧТО ЗА ЧИСЛО. Панель не выдаёт свою оценку за число биржи и наоборот. Решает
+    # не поле meta.method (оно описывает последний прогон), а перечень оценённых
+    # дней: показанный день либо в нём, либо нет. Вечером 19.11.2026 подпись
+    # «посчитано из состава, покрытие 91 %» стояла над биржевым числом 95,99 % —
+    # поля остались в meta от дневного прогона.
+    estimated = {str(d)[:10] for d in (hy_meta.get("estimated_days") or [])}
+    is_median = asof in estimated
+    payload["hy_method"] = "median" if is_median else "exchange"
+    what = " (медиана доходности бумаг индекса)" if is_median else ""
+    headline = f"ВДО {_ru(hy_yield, 1)}%{what} — спред к {base_label} {_ru(spread, 1)} п.п."
+    if pct_1y is not None:
+        headline += f" ({_ru(pct_1y, 0)}-й перцентиль за год)"
     # До 03.10.2026 здесь стояло «широкий спред читается контрариан, сила умеренная» —
     # утверждение, которого нет в данных: на полной истории спред ВДО не значим
     # (REGIME §3, p>0,4), аудит 02.09.2026 (D2) назвал ВДО/IG-спреды нулями. Пик спреда
     # в декабре 2024 совпал с дном индекса — это совпадающий признак, а не опережающий.
     note = ("Монитор кредитного стресса: как сигнал для акций спред ВДО на истории не "
             "подтвердился; пик спреда в декабре 2024 совпал с дном индекса, а не опередил его.")
-    if hy_meta.get("method") == "constituents":
+    if is_median:
+        # Покрытие относится к оценке конкретного дня: чужое не показываем.
+        cover = (hy_meta.get("estimate_cover_pct")
+                 if str(hy_meta.get("estimate_asof") or "")[:10] == asof else None)
         payload["method"] = "constituents"
-        payload["estimate_cover_pct"] = hy_meta.get("estimate_cover_pct")
-        dropped = hy_meta.get("estimate_dropped") or {}
-        payload["estimate_dropped_n"] = dropped.get("count")
-        payload["estimate_dropped_weight_pct"] = dropped.get("weight_pct")
-        note += (" ⚠️ Доходность ВДО биржа сейчас считает неверно (в её поле приходят "
-                 "сотни и тысячи процентов), поэтому значение посчитано ПАНЕЛЬЮ из "
-                 f"состава индекса: покрытие {_n(hy_meta.get('estimate_cover_pct'), 1)}% "
-                 "веса, сверка с биржей на здоровых днях расходится не больше чем "
-                 "на 0,4 п.п. Это оценка, а не число биржи.")
-        # «Покрытие 92,8%» читается как «столько нашлось», хотя на деле столько
-        # ОСТАЛОСЬ после отсева битых бумаг. Разница важна для направления ошибки:
-        # режутся самые доходные строки, значит оценка смещена ВНИЗ, и молчать об
-        # этом нельзя — 26.08.2026 без отсева она показывала 45,9% вместо 29,7%.
-        if dropped.get("count"):
-            note += (f" Из корзины отброшено {dropped['count']} бумаг с битой "
-                     f"доходностью (вес {_n(dropped.get('weight_pct'), 1)}%): режутся "
-                     f"самые доходные строки, поэтому оценка смещена скорее вниз.")
+        payload["estimate_cover_pct"] = cover
+        payload["estimate_dropped_n"] = None
+        payload["estimate_dropped_weight_pct"] = None
+        note += (" Доходность ВДО — медиана доходности бумаг индекса с весами индекса"
+                 + (f" (котировки есть у {_ru(cover, 1)}% веса)" if cover is not None else "")
+                 + ": средневзвешенную доходность, которую публикует биржа, искажают "
+                   "бумаги на грани дефолта.")
+        ex = hy_meta.get("exchange_last")
+        if isinstance(ex, (list, tuple)) and len(ex) == 2 and isinstance(ex[1], (int, float)):
+            payload["exchange_yield"] = _r(ex[1], 2)
+            payload["exchange_yield_asof"] = str(ex[0])[:10]
+    # Ход ЦЕНОВОГО индекса ВДО: за мусором в поле доходности стоит настоящее
+    # событие, которого тайл не показывал, — индекс упал с 68,7 (21.10.2026) до
+    # 59,8 (18.11.2026). Цена индекса от поломки поля доходности не зависит.
+    px_pts, _px_meta = _ser(store, "rucbhycp")
+    if len(px_pts) > 21 and px_pts[-22][1]:
+        px_asof, px_last = px_pts[-1]
+        px_from_day, px_from = px_pts[-22]
+        px_chg = (px_last / px_from - 1.0) * 100.0
+        payload.update({"price_index": _r(px_last, 2), "price_index_asof": px_asof,
+                        "price_index_from": _r(px_from, 2),
+                        "price_index_from_asof": px_from_day,
+                        "price_chg_21d_pct": _r(px_chg, 1)})
+        payload["price_text"] = (
+            f"Ценовой индекс ВДО за 21 торговый день: {_ru(px_chg, 1, True)}% "
+            f"({_ru(px_from, 2)} на {_ddmm(px_from_day)} → {_ru(px_last, 2)} на {_ddmm(px_asof)})")
+        headline += f"; ценовой индекс за 21 торговый день {_ru(px_chg, 1, True)}%"
+        note += " " + payload["price_text"] + "."
     return _tile("hy_spread", status, asof, headline, payload, note,
                  hy_meta.get("fetched_at"))
 

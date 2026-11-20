@@ -23,7 +23,7 @@ import unittest
 from tests import ROOT, need
 
 OPS = os.path.join(str(ROOT), "ops")
-DAILY_RUNS_UTC = (16 * 60 + 5, 20 * 60 + 55)   # 19:05 и 23:55 МСК
+DAILY_RUNS_UTC = (4 * 60 + 30, 16 * 60 + 5, 20 * 60 + 55)   # 07:30, 19:05 и 23:55 МСК
 LOCK_WAIT_MIN = 4                              # flock -w 240 в ops/moex-radar.sh
 
 
@@ -76,6 +76,62 @@ class TimerCase(unittest.TestCase):
         burst = int(re.search(r"^StartLimitBurst=(\d+)",
                               unit_text("moex-radar-intraday.service"), re.M).group(1))
         self.assertGreaterEqual(burst, 3, "ограничитель снова душит плановый такт")
+
+    def test_у_суточного_режима_есть_утренний_такт_после_торгового_дня(self):
+        """Утро вторника–субботы, 04:30 UTC (07:30 МСК) — аудит 20.11.2026.
+
+        Биржа отдаёт строку дня по MCFTR, ценам TQBR, MCXSM и корпоративным индексам
+        ночью, позже прогона 20:55 UTC: без утреннего такта ширина рынка и малые
+        компании всегда были на торговый день старше, пятничные значения появлялись
+        в понедельник вечером. Он же страхует вечерний прогон, который приходит
+        меньше чем через пять минут после строки дня по IMOEX.
+        мутация: убрать строку из таймера или поставить Mon..Fri -> в субботу такта
+        нет, пятничные значения снова ждут понедельника.
+        """
+        sched = need(self, "pipeline.lib.schedule", "parse_calendar", "starts_of_day")
+        lines = calendars("moex-radar-daily.timer")
+        morning = [l for l in lines if " 04:30:00 " in l]
+        self.assertEqual(len(morning), 1, "утренний такт суточного режима пропал")
+        days, minutes = sched.parse_calendar(morning[0])
+        self.assertEqual(days, {1, 2, 3, 4, 5}, "утро после торгового дня: вт–сб")
+        self.assertEqual(minutes, {4 * 60 + 30})
+        # Вечерние такты на месте, и в субботу суточный режим ходит ровно один раз.
+        self.assertEqual(sched.starts_of_day(lines, weekday=2),
+                         [4 * 60 + 30, 16 * 60 + 5, 20 * 60 + 55])
+        self.assertEqual(sched.starts_of_day(lines, weekday=5), [4 * 60 + 30])
+        self.assertEqual(sched.starts_of_day(lines, weekday=6), [])
+        self.assertEqual(sched.starts_of_day(lines, weekday=0),
+                         [16 * 60 + 5, 20 * 60 + 55])
+
+    def test_утренний_такт_ни_с_кем_не_делит_замок_стора(self):
+        # Все прогоны держат общий замок стора, ожидание — 240 с. Утренний суточный
+        # идёт до минуты-двух: рядом с ним (±15 минут, с разбросом таймера) не должен
+        # стартовать ни один другой юнит.
+        # мутация: поставить утренний такт на 07:00 UTC -> он упирается в первый
+        # витринный такт и недельный понедельничный 07:05.
+        sched = need(self, "pipeline.lib.schedule", "starts_of_day")
+        morning = 4 * 60 + 30
+        for unit in sorted(f for f in os.listdir(OPS)
+                           if f.endswith(".timer") and "daily" not in f):
+            jitter = self._jitter(unit)
+            for start in sched.starts_of_day(calendars(unit)):
+                self.assertFalse(morning - 15 <= start + jitter and start <= morning + 15,
+                                 f"{unit}: такт {start // 60}:{start % 60:02d} UTC рядом "
+                                 f"с утренним суточным прогоном")
+
+    def test_ограничитель_суточного_юнита_вмещает_три_такта(self):
+        # Урок витринного такта: StartLimitBurst считает и плановые старты. У
+        # суточного юнита их теперь три в сутки, но в окне ограничителя (30 минут)
+        # по-прежнему один — запас на два повтора по Restart= цел.
+        sched = need(self, "pipeline.lib.schedule", "starts_of_day", "max_starts_in_window")
+        unit = unit_text("moex-radar-daily.service")
+        burst = int(re.search(r"^StartLimitBurst=(\d+)", unit, re.M).group(1))
+        interval = int(re.search(r"^StartLimitIntervalSec=(\d+)", unit, re.M).group(1))
+        starts = sched.starts_of_day(calendars("moex-radar-daily.timer"))
+        self.assertEqual(len(starts), 3)
+        planned = sched.max_starts_in_window(starts, interval / 60.0)
+        self.assertEqual(planned, 1)
+        self.assertGreaterEqual(burst - planned, 2, "на повторы после сбоя не осталось стартов")
 
     def test_витринный_такт_не_доигрывается_после_простоя(self):
         self.assertIn("Persistent=false", unit_text("moex-radar-intraday.timer"))

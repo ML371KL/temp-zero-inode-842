@@ -695,15 +695,50 @@ def latest_workbook(html):
     return best if best else (None, None)
 
 
-def parse_workbook(data, period):
+def equity_sheet(book):
+    """Имя листа с потоками АКЦИЙ по категориям участников.
+
+    В выпусках с марта 2026 это «РА По участникам». В более ранних таблицах тот же
+    лист назывался по номеру рисунка (в ORFR_2025-12_2026-01.xlsx — «рис. 21»), и
+    рядом лежат листы с теми же колонками участников про ОФЗ и корпоративные
+    облигации. Поэтому лист ищется по ЗАГОЛОВКУ: в первых строках сказано про акции
+    и участников и не сказано про облигации, а ниже есть шапка со всеми категориями.
+    Нужен разовому доливу пропусков (ops/backfill_orfr_gaps.py); фетчер по-прежнему
+    читает лист по имени.
+    """
+    if SHEET_PARTICIPANTS in book.sheets:
+        return SHEET_PARTICIPANTS
+    found = []
+    for name in sorted(book.sheets):
+        try:
+            rows = book.rows(name)
+        except xlsx.XlsxError:
+            continue
+        title = " ".join(str(c or "") for row in rows[:3] for c in row).lower()
+        if "акци" not in title or "участник" not in title:
+            continue
+        if "облигац" in title or "офз" in title:
+            continue
+        heads = [[str(c or "").strip().lower() for c in row] for row in rows[:12]]
+        if any(all(t in low for t in COLUMN_TITLES) for low in heads):
+            found.append(name)
+    if len(found) != 1:
+        raise xlsx.XlsxError("лист с потоками акций по участникам не найден однозначно "
+                             "(подходит: %s)" % (", ".join(found) or "ни один"))
+    return found[0]
+
+
+def parse_workbook(data, period, sheet=None):
     """Байты .xlsx -> ({'YYYY-MM': {категория: млрд руб}}, замечания).
 
     Берём только строки, подписанные МЕСЯЦЕМ. Год у ЦБ стоит одной ячейкой на весь
     блок (объединённая ячейка), в остальных строках он пуст — тянем последний
     увиденный. Если года нет вовсе, месяц относим к году самого выпуска.
+
+    sheet — имя листа, если он называется иначе (см. equity_sheet).
     """
     book = xlsx.open_bytes(data)
-    rows = book.rows(SHEET_PARTICIPANTS)
+    rows = book.rows(sheet or SHEET_PARTICIPANTS)
     header, head_at = None, None
     for i, row in enumerate(rows):
         low = [str(c or "").strip().lower() for c in row]

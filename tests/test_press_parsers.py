@@ -334,6 +334,58 @@ class TestMoexFeedDepth(unittest.TestCase):
         self.assertEqual(points, {"2026-07-31": 3.0})
         self.assertEqual(meta["payload"]["clients_total_mln"], 41.9)
 
+    def test_релиз_октября_2026_разбирается_полностью(self):
+        """Настоящий релиз n105753 (ответ ISS 20.11.2026): биржа сменила глаголы.
+
+        «Объем инвестиций … составил 166,7 млрд», «вложили в облигации – 145,7 млрд»,
+        «достигло 43 млн» — под прежними шаблонами три поля из восьми были пустыми.
+        мутация: вернуть шаблоны под «составили/составило» -> inflow_total_bln,
+        inflow_bonds_bln и clients_total_mln снова None при числах в тексте.
+        """
+        from tests import fixture_json
+        item = fixture_json("moex_sitenews_105753.json")
+
+        def feed(url, **_kw):
+            if "/sitenews/" in url:
+                return item
+            start = int(re.search(r"start=(\d+)", url).group(1))
+            rows = [] if start else [[105753, "", "Частные инвесторы в октябре увеличили "
+                                      "вложения в облигации на Московской бирже на 29,3%",
+                                      "2026-11-05 11:30:00", "2026-11-05 11:30:00"]]
+            return {"sitenews": {"columns": ["id", "tag", "title", "published_at",
+                                             "modified_at"], "data": rows}}
+
+        with mock.patch.object(self.press, "get_json", side_effect=feed):
+            _sid, points, meta = self.press.retail()
+        p = meta["payload"]
+        self.assertEqual(points, {"2026-10-31": 3.0})
+        self.assertEqual(p["inflow_total_bln"], 166.7)
+        self.assertEqual(p["inflow_bonds_bln"], 145.7)
+        self.assertEqual(p["inflow_funds_bln"], 30.7)
+        self.assertEqual(p["clients_total_mln"], 43.0)
+        self.assertEqual(p["clients_added_k"], 290.5)
+        self.assertEqual(p["share_equity_pct"], 67.8)
+        # Вложений в акции в этом релизе биржа не назвала: поле честно пустое, и
+        # это сказано вслух, а не выдумано из разности.
+        self.assertIsNone(p["inflow_equity_bln"])
+        self.assertEqual(meta["parse_gaps"], ["inflow_equity_bln"])
+        # Доля в торгах ОБЛИГАЦИЯМИ (11,5 %) не принята за вложения в облигации.
+        self.assertNotEqual(p["inflow_bonds_bln"], 11.5)
+
+    def test_прежние_формулировки_по_прежнему_разбираются(self):
+        # Новые шаблоны добавлены вторыми: релизы с «составили/составило» читаются
+        # как раньше. мутация: заменить шаблоны вместо добавления -> июльский
+        # релиз теряет те же поля, что октябрьский терял до правки.
+        text = ("Инвестиции физических лиц в ценные бумаги в июле составили 120,5 млрд "
+                "рублей. Вложения частных инвесторов в акции составили 12,4 млрд рублей, "
+                "в облигации составили 100,2 млрд рублей, в паевые инвестиционные фонды – "
+                "45,6 млрд рублей. Количество частных инвесторов на Московской бирже "
+                "составило 41,9 млн человек.")
+        got = need(self, "pipeline.fetch.moex_press", "parse_retail").parse_retail(text)
+        self.assertEqual((got["inflow_total_bln"], got["inflow_equity_bln"],
+                          got["inflow_bonds_bln"], got["clients_total_mln"]),
+                         (120.5, 12.4, 100.2, 41.9))
+
     def test_новые_параметры_добавляются_в_конец(self):
         # Прямая защита от повторения: первым позиционным аргументом обязана
         # оставаться глубина обхода, а не что-то новое.

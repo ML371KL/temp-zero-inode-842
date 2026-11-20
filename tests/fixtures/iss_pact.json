@@ -142,5 +142,113 @@
    "LASTTRADEDATE"
   ],
   "data": []
+ },
+ "2026-09-30": {
+  "columns": [
+   "TRADEDATE",
+   "SECID",
+   "SHORTNAME",
+   "VOLUME",
+   "VALUE",
+   "NUMTRADES",
+   "FACEVALUE",
+   "YIELDCLOSE",
+   "CLOSE",
+   "LASTTRADEDATE"
+  ],
+  "data": [
+   [
+    "2026-09-30",
+    "SU26228RMFS5",
+    "ОФЗ 26228",
+    0,
+    0,
+    0,
+    1000,
+    null,
+    null,
+    "2026-06-10"
+   ]
+  ]
+ },
+ "2026-11-11": {
+  "columns": [
+   "TRADEDATE",
+   "SECID",
+   "SHORTNAME",
+   "VOLUME",
+   "VALUE",
+   "NUMTRADES",
+   "FACEVALUE",
+   "YIELDCLOSE",
+   "CLOSE",
+   "LASTTRADEDATE"
+  ],
+  "data": [
+   [
+    "2026-11-11",
+    "SU26235RMFS0",
+    "ОФЗ 26235",
+    34059778,
+    24251987533.41,
+    162,
+    1000,
+    15.79,
+    71.2042,
+    "2026-11-11"
+   ],
+   [
+    "2026-11-11",
+    "SU26250RMFS9",
+    "ОФЗ 26250",
+    28642355,
+    22716453360.84,
+    157,
+    1000,
+    16.78,
+    79.3107,
+    "2026-11-11"
+   ]
+  ]
+ },
+ "2026-11-18": {
+  "columns": [
+   "TRADEDATE",
+   "SECID",
+   "SHORTNAME",
+   "VOLUME",
+   "VALUE",
+   "NUMTRADES",
+   "FACEVALUE",
+   "YIELDCLOSE",
+   "CLOSE",
+   "LASTTRADEDATE"
+  ],
+  "data": [
+   [
+    "2026-11-18",
+    "SU26233RMFS5",
+    "ОФЗ 26233",
+    27697363,
+    15172303997.25,
+    206,
+    1000,
+    16.51,
+    54.7789,
+    "2026-11-18"
+   ],
+   [
+    "2026-11-18",
+    "SU26253RMFS3",
+    "ОФЗ 26253",
+    42946854,
+    35714382039.79,
+    322,
+    1000,
+    16.89,
+    83.1595,
+    "2026-11-18"
+   ]
+  ]
  }
 }
