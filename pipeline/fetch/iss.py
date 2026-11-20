@@ -220,6 +220,26 @@ YIELD_XCHECK_PP = 3.0          # расхождение с составом, п.
 # Индексы, чьё поле доходности биржа считает неверно и чей последний день поэтому
 # сверяется с составом на КАЖДОМ прогоне, а не только при явной поломке.
 YIELD_XCHECK_SECS = frozenset({"RUCBHYCP"})
+# С какого дня биржевое значение такого индекса идёт в ряд ТОЛЬКО с подтверждением
+# оценкой по составу. Аудит 20.11.2026: с 21.10.2026 поле YIELD у RUCBHYCP лежит
+# ВНУТРИ коридора (35 -> 41 -> 48 -> 55 -> 70 -> 96), и ни коридор, ни правило
+# соседей его не ловят — соседи тот же мусор. До этой даты действуют прежние
+# фильтры: история до неё оценками не покрыта, и требовать подтверждения там
+# значило бы потерять ряд при пересборке с нуля.
+YIELD_GUARD_SINCE = {"RUCBHYCP": "2026-10-21"}
+# «Соседний день» для подтверждения биржевого числа: ближайшая записанная оценка
+# не дальше стольких КАЛЕНДАРНЫХ дней. Пять — пятница и вторник после длинных
+# выходных ещё соседи, а оценка месячной давности ничего не подтверждает.
+YIELD_NEIGHBOR_DAYS = 5
+# Поля meta, описывающие оценку по составу. Стор доливает meta поверх прежней
+# (store.upsert_points), поэтому каждое поле обязано ставиться на КАЖДОМ прогоне —
+# хотя бы в None: вечером 19.11.2026 оценка не посчиталась, а «посчитано из
+# состава, покрытие 91 %» осталось в meta от дневного прогона, и подпись тайла
+# утверждала обратное тому, что лежало в ряду.
+_ESTIMATE_META = ("method", "estimate_method", "estimate_asof", "estimate_cover_pct",
+                  "estimate_count", "estimate_dropped", "estimate_error",
+                  "xcheck_constituents", "xcheck_diff_pp", "dropped_outliers",
+                  "exchange_last", "exchange_skipped")
 
 
 def _index_series(sec, field, series_id, unit, default_start, drop_zero=False,
@@ -270,7 +290,8 @@ def _index_series(sec, field, series_id, unit, default_start, drop_zero=False,
                 f"{sane[0]}..{sane[1]}: {len(insane)} знач. "
                 f"(последнее {insane[-1][0]}={insane[-1][1]}) — точки не записаны")
     meta = make_meta("iss", url, points, unit=unit, rows=len(rows), secid=sec, field=field,
-                     status=status, note=note, dropped_insane=len(insane) or None)
+                     status=status, note=note, dropped_insane=len(insane) or None,
+                     insane_last=list(max(insane)) if insane else None)
     return sid, points, meta
 
 
@@ -334,29 +355,62 @@ def index_weights(sec):
     return out, day
 
 
-def live_bond_yields():
-    """{SECID: доходность, %} по всем облигациям — ОДИН запрос на весь рынок.
+def live_bond_snapshot():
+    """({SECID: доходность, %}, торговый день котировок) — ОДИН запрос на весь рынок.
 
     Кэш на время прогона: оба индекса считаются из одной и той же выборки, а
     запрос отдаёт ~3,5 тыс. строк.
+
+    Торговый день берётся из блока dataversion ТОГО ЖЕ ответа: это день, которым
+    биржа датирует сами котировки. Состав индекса (index_weights) датирован
+    ПРЕДЫДУЩИМ торговым днём — биржа публикует его вместе со строкой истории, то
+    есть ночью, — и оценка, подписанная датой состава, на деле считалась по
+    котировкам следующего дня (журнал 19.11.2026: «2026-11-18 = 37,65 %» записано
+    в 19:05 МСК 19.11 по котировкам 19.11).
+
+    Одна бумага бывает на нескольких досках. Берём основной режим торгов (доски
+    TQ*): у ОФЗ первой строкой идёт SPOB с доходностью 54,79 % при 14,18 % на TQOB
+    (замер 20.11.2026) — «первая попавшаяся» строка здесь не годится.
     """
     now = time.time()
     hit = _bond_yield_cache.get("rows")
     if hit and now - hit[0] < _BOND_YIELD_TTL:
-        return hit[1]
+        return hit[1], hit[2]
     payload = http.get_json(_url(BONDS_MARKET, {
-        "iss.only": "marketdata", "marketdata.columns": "SECID,YIELD"}))
+        "iss.only": "marketdata,dataversion",
+        "marketdata.columns": "SECID,BOARDID,YIELD"}))
     block = payload.get("marketdata") or {}
     idx = {name: n for n, name in enumerate(block.get("columns") or [])}
-    out = {}
+    out, main = {}, set()
     for row in block.get("data") or []:
         value = row[idx["YIELD"]] if "YIELD" in idx else None
         # Ноль здесь — «сделок не было», а не нулевая доходность.
-        if value in (None, 0):
+        if value in (None, 0) or isinstance(value, bool) \
+                or not isinstance(value, (int, float)):
             continue
-        out.setdefault(str(row[idx["SECID"]]), float(value))
-    _bond_yield_cache["rows"] = (now, out)
-    return out
+        secid = str(row[idx["SECID"]])
+        board = str(row[idx["BOARDID"]]) if "BOARDID" in idx else ""
+        if secid in main:
+            continue                     # основной режим уже взят
+        if board.startswith("TQ"):
+            out[secid] = float(value)
+            main.add(secid)
+        else:
+            out.setdefault(secid, float(value))
+    day = None
+    ver = payload.get("dataversion") or {}
+    try:
+        vidx = {name: n for n, name in enumerate(ver.get("columns") or [])}
+        day = dates.fmt_date(str(ver["data"][0][vidx["trade_date"]])[:10])
+    except (KeyError, IndexError, TypeError, ValueError):
+        day = None                       # блока нет — день назовёт состав индекса
+    _bond_yield_cache["rows"] = (now, out, day)
+    return out, day
+
+
+def live_bond_yields():
+    """{SECID: доходность, %} по всем облигациям (см. live_bond_snapshot)."""
+    return live_bond_snapshot()[0]
 
 
 def _tukey_upper(values, k=3.0):
@@ -378,8 +432,80 @@ def _tukey_upper(values, k=3.0):
     return q3 + k * iqr
 
 
+def _weighted_median(pairs):
+    """Взвешенная медиана по [(вес, значение)] или None.
+
+    Значение, на котором накопленный вес впервые переходит половину; если половина
+    веса приходится ровно на границу двух бумаг — середина между ними (как у
+    обычной медианы при чётном числе наблюдений).
+    """
+    rows = sorted(((float(w), float(v)) for w, v in pairs if w and w > 0),
+                  key=lambda r: r[1])
+    total = sum(w for w, _ in rows)
+    if not rows or total <= 0:
+        return None
+    half, acc = total / 2.0, 0.0
+    for n, (w, v) in enumerate(rows):
+        acc += w
+        if abs(acc - half) <= 1e-9 * total and n + 1 < len(rows):
+            return (v + rows[n + 1][1]) / 2.0
+        if acc > half:
+            return v
+    return rows[-1][1]
+
+
+def index_yield_median(sec, min_weight=90.0):
+    """Взвешенная медиана доходностей бумаг индекса -> dict оценки.
+
+    ЗАЧЕМ МЕДИАНА (аудит 20.11.2026). Биржевая доходность индекса ВДО —
+    средневзвешенная, и её ломают бумаги на грани дефолта: 19.11.2026 в индексе
+    144 бумаги, десять из них с доходностью 106–5329 % при весе 4,3 %;
+    средневзвешенная по всем — 56 %, биржа публикует 85,65 %. Прежняя оценка
+    панели была той же средневзвешенной с отсечкой Тьюки (~93 %) и ползла вместе с
+    проблемными бумагами: 35,5 -> 40,4 % за 11–17.11, потому что бумаги с
+    доходностью 60–90 % в неё входили. Медиане всё равно, 90 % у бумаги или
+    5000 %: она отвечает на вопрос «какая доходность у середины индекса по весу».
+
+    Отсечек нет вовсе. Бумага с четырёхзначной доходностью — настоящий участник
+    индекса и стоит в верхнем хвосте распределения, где ей и место; выбросить её
+    значило бы сдвинуть медиану вниз. Не участвуют только бумаги без котировки
+    (нет строки, ноль или минус в поле — «сделок не было»).
+
+    Покрытие считается ДО любых отсечений: доля веса индекса, у которой есть живая
+    котировка. Вечером 19.11.2026 прежнее «покрытие после отсева» дало 89,0 % при
+    норме 90 %, оценка не посчиталась, и в ряд ушло биржевое 95,99 %.
+
+    День оценки — торговый день котировок (live_bond_snapshot), а не дата состава.
+    """
+    weights, comp_day = index_weights(sec)
+    if not weights:
+        raise FetchError(f"ISS: состав индекса {sec} не отдан — оценка невозможна")
+    yields, quotes_day = live_bond_snapshot()
+    hit = [(w, yields[s]) for s, w in weights.items() if yields.get(s, 0) > 0]
+    covered = sum(w for w, _ in hit)
+    if covered < min_weight:
+        raise FetchError(f"ISS: живые котировки покрывают лишь {covered:.1f}% веса "
+                         f"{sec} (нужно {min_weight}%) — оценка была бы кривой")
+    value = _weighted_median(hit)
+    if value is None:
+        raise FetchError(f"ISS: в корзине {sec} нет ни одной котировки — "
+                         f"оценка невозможна")
+    day = quotes_day or comp_day or dates.fmt_date(dates.today_msk())
+    # Дата котировок раньше даты состава или далеко впереди неё — битый блок
+    # dataversion: день называет состав (прежнее поведение).
+    if comp_day and not (comp_day <= day <= dates.fmt_date(dates.add_days(comp_day, 14))):
+        day = comp_day
+    return {"day": day, "value": round(value, 2), "cover_pct": round(covered, 1),
+            "count": len(hit), "no_quote": len(weights) - len(hit),
+            "composition_day": comp_day}
+
+
 def index_yield_estimate(sec, min_weight=90.0):
-    """(день, доходность, покрытие, отброшено) по составу индекса.
+    """(день, доходность, покрытие, отброшено) по составу индекса — СРЕДНЕВЗВЕШЕННАЯ.
+
+    Резерв для индексов, чьё поле доходности у биржи обычно исправно (RUCBCPNS):
+    метод повторяет биржевой, и оценка встаёт в ряд биржевых чисел без ступеньки.
+    Для ВДО (YIELD_XCHECK_SECS) считается медиана — см. index_yield_median.
 
     min_weight: считать только при покрытии состава живыми котировками не ниже
     этой доли. Огрызок корзины даёт число, похожее на правду, и потому опасное:
@@ -465,12 +591,17 @@ def _drop_local_outliers(series_id, points, tol=YIELD_JUMP_TOL, span=5):
 def index_yield(sec="RUCBHYCP", series_id=None, start=None, end=None, bootstrap=False):
     """Доходность облигационного индекса, % годовых (registry: *_yield).
 
-    Основной путь — поле YIELD из истории индекса. Когда биржа отдаёт по нему
-    мусор (см. YIELD_SANE), последнее значение досчитывается из состава индекса:
-    иначе ряд замирает на последнем здоровом дне и тайл мертвеет на всё время
-    поломки источника — а поломка эта уже длится неделю.
+    Два пути.
+      * Индекс с исправным полем (RUCBCPNS): основной источник — поле YIELD из
+        истории индекса; когда биржа отдаёт по нему мусор (см. YIELD_SANE),
+        последнее значение досчитывается из состава средневзвешенной.
+      * Индекс из YIELD_XCHECK_SECS (ВДО): значение дня — взвешенная медиана
+        доходностей бумаг состава, биржевое число идёт в ряд только с
+        подтверждением (см. _index_yield_guarded).
     """
     sid = series_id or f"{sec.lower()}_yield"
+    if sec.upper() in YIELD_XCHECK_SECS:
+        return _index_yield_guarded(sec, sid, start, end, bootstrap)
     broken = None
     try:
         sid, points, meta = _index_series(sec, "YIELD", sid, "pct", "2003-01-01",
@@ -491,14 +622,10 @@ def index_yield(sec="RUCBHYCP", series_id=None, start=None, end=None, bootstrap=
             http.LOG(f"{sid}: {len(outliers)} точек спорят с соседями и отброшены "
                      f"(первая {outliers[0][0]}={outliers[0][1]} при медиане {outliers[0][2]})")
 
-    # Последний день сверяем с составом: соседей справа у него нет. Для индексов с
-    # заведомо сломанным полем — на каждом прогоне, для остальных — только когда
-    # основной путь уже дал сбой.
-    last_day = max(points) if points else None
-    need_xcheck = bool(broken) or bool(meta.get("dropped_insane")) or bool(outliers) \
-        or (sec.upper() in YIELD_XCHECK_SECS and last_day is not None)
+    # Последний день сверяем с составом, только когда основной путь уже дал сбой.
+    need_xcheck = bool(broken) or bool(meta.get("dropped_insane")) or bool(outliers)
     if not need_xcheck:
-        return sid, points, meta        # источник здоров — резерв не трогаем
+        return sid, points, _with_estimate_meta(meta)   # источник здоров
 
     try:
         day, value, covered, dropped = index_yield_estimate(sec)
@@ -506,36 +633,12 @@ def index_yield(sec="RUCBHYCP", series_id=None, start=None, end=None, bootstrap=
         http.LOG(f"{sid}: оценка по составу не вышла — {exc}")
         if broken is not None:
             raise broken                # нечем заменить: отказ остаётся отказом
-        return sid, points, meta
+        return sid, points, _with_estimate_meta(meta, estimate_error=str(exc)[:200])
 
-    # Сверяем ПОСЛЕДНЕЕ биржевое значение, а не значение за дату состава: состав
-    # индекса биржа публикует на день вперёд относительно истории котировок
-    # (11.09.2026 состав был на 10.09, а последняя точка истории — на 09.09), и
-    # сравнение «по одинаковой дате» почти всегда не находило бы пары.
-    exchange_day = max(points) if points else None
-    exchange = points.get(exchange_day)
-    # Сверять можно только ЧИСТОЕ окно. Если коридор или соседи уже что-то
-    # выбросили, последнее уцелевшее биржевое значение — это СТАРЫЙ день, и
-    # «согласуется с сегодняшней оценкой» означало бы заморозить ряд на нём.
-    contaminated = bool(broken) or bool(meta.get("dropped_insane")) or bool(outliers)
-    if (exchange is not None and not contaminated
-            and abs(exchange - value) <= YIELD_XCHECK_PP):
-        # Согласуется — оставляем биржевое: оно и есть ОФИЦИАЛЬНОЕ значение
-        # индекса, а оценка нужна там, где официального нет или оно опровергнуто.
-        meta = dict(meta or {}, xcheck_constituents=round(value, 2),
-                    xcheck_diff_pp=round(exchange - value, 2))
-        return sid, points, meta
-
+    # Окно ЗАГРЯЗНЕНО (коридор или соседи что-то выбросили): последнее уцелевшее
+    # биржевое значение — старый здоровый день, сверять с ним сегодняшнюю оценку
+    # незачем. Оценка встаёт в ряд своим днём.
     points = dict(points)
-    if exchange is not None and not contaminated:
-        # Сравнение состоялось и разошлось: опровергнутое биржевое значение в ряду
-        # не оставляем — иначе оно останется последним «официальным» днём и уедет
-        # в перцентиль тайла. При ЗАГРЯЗНЁННОМ окне так делать нельзя: там
-        # уцелевшая точка — старый ЗДОРОВЫЙ день, прошедший оба фильтра.
-        http.LOG(f"{sid}: биржевое {exchange}% за {exchange_day} расходится с составом "
-                 f"{value}% на {abs(exchange - value):.1f} п.п. — беру состав")
-        if exchange_day != day:
-            points.pop(exchange_day, None)
     points[day] = value
     note = (f"доходность биржи не подтверждается составом — значение за {day} "
             f"посчитано ИЗ СОСТАВА индекса (покрытие {covered}% веса); это оценка, "
@@ -543,13 +646,183 @@ def index_yield(sec="RUCBHYCP", series_id=None, start=None, end=None, bootstrap=
     if dropped.get("count"):
         note += (f"; отброшено {dropped['count']} бумаг с битой доходностью "
                  f"(вес {dropped['weight_pct']}%, порог {dropped['fence_pct']}%)")
-    meta = dict(meta or {}, status="ok", method="constituents", estimate_asof=day,
-                estimate_cover_pct=covered, estimate_dropped=dropped,
-                unit="pct", asof=max(points))
+    meta = _with_estimate_meta(meta, status="ok", method="constituents",
+                               estimate_method="weighted_mean", estimate_asof=day,
+                               estimate_cover_pct=covered, estimate_dropped=dropped,
+                               unit="pct", asof=max(points))
     meta["note"] = note if not meta.get("note") else f"{meta['note']}; {note}"
     meta.setdefault("source", "iss")
     meta["fetched_at"] = dates.iso_utc()
     http.LOG(f"{sid}: {day} = {value}% посчитано из состава ({covered}% веса)")
+    return sid, points, meta
+
+
+def _with_estimate_meta(meta, **fields):
+    """meta, в которой КАЖДОЕ поле оценки названо явно (нет значения — None).
+
+    Стор доливает meta поверх прежней: поле, не названное в этом прогоне, остаётся
+    от прошлого и врёт (см. _ESTIMATE_META).
+    """
+    out = dict(meta or {})
+    for key in _ESTIMATE_META:
+        out.setdefault(key, None)
+    out.update(fields)
+    return out
+
+
+def _ru_num(value, digits=2):
+    """Число для записки: десятичная запятая (записка уходит в блок источников)."""
+    return f"{value:.{digits}f}".replace(".", ",")
+
+
+def _index_yield_guarded(sec, sid, start, end, bootstrap):
+    """Ряд доходности индекса, чьё биржевое поле систематически искажено (ВДО).
+
+    ЧЕТЫРЕ ОШИБКИ прежней конструкции (аудит 20.11.2026) и что здесь вместо них.
+
+    (а) Оценка жила один день: её писали за последний день, а назавтра окно
+        догрузки записывало биржевое число поверх (журнал 12.11: «беру состав,
+        35,46 %», в сторе за 11.11 — 59,65). Теперь оценённые дни перечислены в
+        meta.estimated_days, и окно догрузки их пропускает.
+    (б) Правило соседей слепо к плавному уходу: соседи — тот же мусор. Теперь
+        биржевое значение с YIELD_GUARD_SINCE идёт в ряд, только если рядом (не
+        дальше YIELD_NEIGHBOR_DAYS) есть записанная оценка и расхождение с ней не
+        больше YIELD_XCHECK_PP. Нет оценки рядом — нет и подтверждения.
+    (в) При отказе оценки в ряд уходило опровергнутое биржевое число, а поля
+        прошлой оценки оставались в meta. Теперь без оценки биржевое значение не
+        пишется, ряд стареет со статусом stale и внятной запиской, а поля оценки
+        ставятся на каждом прогоне (см. _ESTIMATE_META).
+    (г) Оценка была средневзвешенной с отсечкой и ползла вместе с проблемными
+        бумагами. Теперь это взвешенная медиана (index_yield_median).
+
+    Значение дня — ВСЕГДА оценка, когда она посчиталась: ряд, в котором медиана
+    и биржевая средневзвешенная чередуются по воле допуска в 3 п.п., прыгал бы
+    на эти 3 п.п. от смены метода, а не от рынка. Биржевое число закрывает только
+    дни без оценки (прогон не состоялся, покрытие не набралось).
+    """
+    try:
+        stored = store.load_series(sid) or {}
+    except (OSError, ValueError):
+        stored = {}
+    old_points = {d: v for d, v in (stored.get("points") or {}).items() if v is not None}
+    old_meta = stored.get("meta") or {}
+    estimated = {str(d)[:10] for d in (old_meta.get("estimated_days") or [])
+                 if str(d)[:10] in old_points}
+
+    hist_error = None
+    try:
+        _sid, exchange, meta = _index_series(sec, "YIELD", sid, "pct", "2003-01-01",
+                                             drop_zero=True, sane=YIELD_SANE,
+                                             start=start, end=end, bootstrap=bootstrap)
+    except FetchError as exc:
+        hist_error, exchange, meta = exc, {}, {}
+
+    est, est_error = None, None
+    try:
+        est = index_yield_median(sec)
+        if dates.is_weekend(est["day"]):
+            # Облигации индекса в выходные не торгуются: котировки — пятничные, а
+            # дата чужая. Точка выходного дня в ряду — фантом, не пишем.
+            est_error, est = f"котировки датированы выходным днём {est['day']}", None
+    except (FetchError, ValueError, KeyError, TypeError) as exc:
+        est_error = exc
+        http.LOG(f"{sid}: оценка по составу не вышла — {exc}")
+    if est is None and hist_error is not None:
+        raise hist_error                # ни истории, ни оценки: отказ остаётся отказом
+
+    known = {d: old_points[d] for d in estimated}       # оценки: день -> значение
+    if est:
+        known[est["day"]] = est["value"]
+
+    def neighbor(day):
+        """Ближайший оценённый день не дальше YIELD_NEIGHBOR_DAYS или None."""
+        best, gap = None, None
+        for cand in known:
+            dist = abs(dates.days_between(cand, day))
+            if dist <= YIELD_NEIGHBOR_DAYS and (gap is None or dist < gap
+                                                or (dist == gap and cand < best)):
+                best, gap = cand, dist
+        return best
+
+    guard_since = YIELD_GUARD_SINCE.get(sec.upper(), "0000-00-00")
+    legacy = {d: v for d, v in exchange.items() if d < guard_since}
+    outliers = []
+    if legacy:
+        # До даты охраны оценок нет — действует прежнее правило соседей (нужно
+        # только пересборке ряда с нуля: обычное окно туда не достаёт).
+        legacy, outliers = _drop_local_outliers(sid, legacy)
+    points = dict(legacy)
+    protected, unverified, refuted = [], [], []
+    for day in sorted(d for d in exchange if d >= guard_since):
+        value = exchange[day]
+        if day in known:
+            protected.append(day)        # (а): оценённый день биржа не переписывает
+            continue
+        near = neighbor(day)
+        if near is None:
+            unverified.append([day, value])
+        elif abs(value - known[near]) > YIELD_XCHECK_PP:
+            refuted.append([day, value, near, known[near]])
+        else:
+            points[day] = value
+    if est:
+        points[est["day"]] = est["value"]
+    if refuted:
+        d, v, nd, nv = refuted[-1]
+        http.LOG(f"{sid}: биржевое {v}% за {d} расходится с оценкой {nv}% за {nd} — "
+                 f"в ряд не идёт (всего таких дней {len(refuted)})")
+
+    days_est = sorted(set(known))
+    merged = dict(old_points)
+    merged.update(points)
+    last = max(merged) if merged else None
+    last_is_estimate = last is not None and last in known
+    ex_last = max(exchange) if exchange else None
+    # Что биржа уже отдала, а в ряд не попало: дни новее последней точки ряда.
+    # Значение вне коридора — тоже «биржа отдала, а в ряд не попало».
+    insane_last = meta.get("insane_last") if isinstance(meta, dict) else None
+    pending = [row for row in (unverified + [r[:2] for r in refuted]
+                               + ([list(insane_last)] if insane_last else []))
+               if last is None or row[0] > last]
+
+    status, note = "ok", None
+    if est:
+        note = (f"значение за {est['day']} — взвешенная медиана доходностей бумаг "
+                f"индекса (котировки есть у {_ru_num(est['cover_pct'], 1)} % веса, "
+                f"{est['count']} бумаг)")
+    elif pending:
+        d, v = max(pending)
+        status = "stale"
+        note = (f"оценка по составу не посчиталась ({str(est_error)[:120]}); биржевое "
+                f"значение за {d} ({_ru_num(v)} %) оценкой не подтверждено и в ряд не "
+                f"записано — последняя точка ряда {last or 'отсутствует'}")
+    elif est_error is not None:
+        note = f"оценка по составу в этот прогон не посчиталась ({str(est_error)[:120]})"
+    if hist_error is not None:
+        note = "; ".join(p for p in (
+            note, f"история индекса не получена ({str(hist_error)[:120]})") if p)
+        meta = make_meta("iss", getattr(hist_error, "url", None), points, unit="pct",
+                         secid=sec, field="YIELD")
+    meta = _with_estimate_meta(
+        meta, status=status, note=note, unit="pct", asof=last,
+        method="constituents" if last_is_estimate else None,
+        estimate_method="weighted_median" if last_is_estimate else None,
+        estimate_asof=(est["day"] if est else (last if last_is_estimate else None)),
+        estimate_cover_pct=est["cover_pct"] if est else None,
+        estimate_count=est["count"] if est else None,
+        estimate_error=None if est else (str(est_error)[:200] if est_error else None),
+        dropped_outliers=[list(o) for o in outliers] or None,
+        exchange_last=[ex_last, exchange[ex_last]] if ex_last else None,
+        xcheck_diff_pp=(round(exchange[ex_last] - est["value"], 2)
+                        if (est and ex_last) else None),
+        exchange_skipped=({"protected": len(protected), "unverified": len(unverified),
+                           "refuted": refuted[-5:]}
+                          if (protected or unverified or refuted) else None),
+        estimated_days=days_est)
+    meta["fetched_at"] = dates.iso_utc()
+    if est:
+        http.LOG(f"{sid}: {est['day']} = {est['value']}% — медиана состава "
+                 f"({est['cover_pct']}% веса)")
     return sid, points, meta
 
 

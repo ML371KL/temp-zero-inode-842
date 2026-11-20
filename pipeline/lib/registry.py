@@ -109,7 +109,20 @@ SERIES = {
                      label="RUSFAR 3M"),
     "rucbhycp_yield": dict(fetcher="iss.index_yield", args={"sec": "RUCBHYCP"}, cadence="daily",
                            pub_lag_days=0, sla="iss_daily", required=False, role="monitor",
-                           label="Доходность ВДО"),
+                           label="Доходность ВДО",
+                           note="значение дня — взвешенная медиана доходностей бумаг "
+                                "состава (веса индекса, живые котировки): биржевую "
+                                "средневзвешенную искажают бумаги на грани дефолта. "
+                                "Оценённые дни перечислены в meta.estimated_days, окно "
+                                "догрузки их не переписывает; биржевое число идёт в ряд "
+                                "только с подтверждением соседней оценкой "
+                                "(fetch/iss._index_yield_guarded, аудит 20.11.2026)"),
+    # Закрытие ценового индекса ВДО. Цену индекса бумаги на грани дефолта не
+    # искажают (в отличие от поля доходности), и ход цены за месяц — то событие,
+    # которого тайл спреда не показывал: 68,67 (21.10.2026) -> 59,83 (18.11.2026).
+    "rucbhycp": dict(fetcher="iss.index", args={"sec": "RUCBHYCP"}, cadence="daily",
+                     pub_lag_days=0, sla="iss_daily", required=False, role="monitor",
+                     label="Ценовой индекс ВДО"),
     "rucbcpns_yield": dict(fetcher="iss.index_yield", args={"sec": "RUCBCPNS"}, cadence="daily",
                            pub_lag_days=0, sla="iss_daily", required=False, role="monitor",
                            label="Доходность корпоблигаций"),
