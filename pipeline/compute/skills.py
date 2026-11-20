@@ -29,7 +29,7 @@ try:
 except ImportError:
     from lib import calc, constants
 
-__all__ = ["WAVE_THRESHOLD", "WAVES_SINCE", "zigzag", "capture", "waves",
+__all__ = ["WAVE_THRESHOLD", "WAVES_SINCE", "zigzag", "capture", "waves", "waves_said",
            "div_gap_table", "div_gap", "against_episodes", "against"]
 
 WAVE_THRESHOLD = 0.20          # разворот волны — 20 % от экстремума
@@ -102,8 +102,24 @@ def capture(tr, held, a, b):
     return (0.0 if abs(share) < 1e-12 else share), (None if first is None else first - a)
 
 
-def waves(dates, tr_raw, pos):
-    """verdict.waves: волны MCFTR от 20 % с WAVES_SINCE и что из них взяло правило."""
+def _missed(tr, a, wait):
+    """Сколько волна прошла от дна до дня перед входом, % (None — входа не было)."""
+    return round((tr[a + wait - 1] / tr[a] - 1) * 100, 1) if wait is not None else None
+
+
+def waves(dates, tr_raw, pos, through=None):
+    """verdict.waves: волны MCFTR от 20 % с WAVES_SINCE и что из них взяло правило.
+
+    through — последний день с СОБСТВЕННОЙ точкой индекса (track.own_last): разметка
+    идёт по него, и asof называет его; без него — по последний день панели. До
+    20.11.2026 открытая волна подписывалась последним днём панели, хотя индекс за этот
+    день ещё не пришёл и был протянут вчерашним значением.
+    """
+    if through:
+        k = len(dates)
+        while k > 0 and dates[k - 1] > through:
+            k -= 1
+        dates, tr_raw, pos = dates[:k], (tr_raw or [])[:k], pos[:k]
     n = len(dates)
     tr = calc.ffill(tr_raw or [])
     i0 = next((i for i, d in enumerate(dates) if d >= WAVES_SINCE and i < len(tr)
@@ -119,8 +135,7 @@ def waves(dates, tr_raw, pos):
                "taken_pct": round(share * 100), "open": b == n - 1}
         if kind == "up":
             row["entry_days"] = wait
-            row["missed_pct"] = (round((tr[a + wait - 1] / tr[a] - 1) * 100, 1)
-                                 if wait is not None else None)
+            row["missed_pct"] = _missed(tr, a, wait)
         rows.append(row)
     ups = [r for r in rows if r["kind"] == "up"]
     downs = [r for r in rows if r["kind"] == "down"]
@@ -129,7 +144,7 @@ def waves(dates, tr_raw, pos):
     entered = [r for r in ups if r["entry_days"] is not None]
     waits = sorted(r["entry_days"] for r in entered)
     return {
-        "since": dates[i0], "threshold_pct": round(WAVE_THRESHOLD * 100),
+        "since": dates[i0], "asof": dates[n - 1], "threshold_pct": round(WAVE_THRESHOLD * 100),
         "basis": "индекс полной доходности MCFTR, волна — разворот от 20 %; правило "
                  "нынешней версии на пересчитанной истории, исполнение на следующем закрытии",
         "falls": {"n": len(downs),
@@ -143,6 +158,41 @@ def waves(dates, tr_raw, pos):
         "last_rises": ups[-LAST_RISES:],
         "rows": rows,
     }
+
+
+def waves_said(block, dates, tr_raw, said_pos, launch):
+    """Дописать в волны, пересекающиеся с жизнью панели, что из них взято ВЖИВУЮ.
+
+    said_pos — ряд track.said_positions («до запуска панели — пересчёт, с запуска —
+    сказанное»), launch — первый день живого журнала. В строки волн, закончившихся не
+    раньше launch, добавляются said_taken_pct, а у волн роста — said_entry_days и
+    said_missed_pct: та же мера, что у taken_pct / entry_days / missed_pct пересчёта
+    (аудит 20.11.2026, §4.1: открытая волна с 17.07.2026 — пересчёт «взято 30 %, вход
+    через 44 дня», вживую «7 %, через 66 дней»). Блок меняется на месте; строки
+    last_rises — те же объекты, что в rows. -> число дополненных волн.
+    """
+    if not block or not said_pos or not launch:
+        return 0
+    asof = block.get("asof")
+    idx = {d: i for i, d in enumerate(dates)}
+    n = (idx[asof] + 1) if asof in idx else len(dates)
+    tr = calc.ffill((tr_raw or [])[:n])
+    if len(tr) < n:
+        return 0
+    held = _held(said_pos[:n], n)
+    done = 0
+    for row in block.get("rows") or []:
+        a, b = idx.get(row.get("from")), idx.get(row.get("to"))
+        if a is None or b is None or b >= n or row["to"] < launch:
+            continue
+        share, wait = capture(tr, held, a, b)
+        row["said_taken_pct"] = round(share * 100)
+        if row.get("kind") == "up":
+            row["said_entry_days"] = wait
+            row["said_missed_pct"] = _missed(tr, a, wait)
+        done += 1
+    block["said_since"] = launch
+    return done
 
 
 # ------------------------------------------------------- дивиденды минус вклад

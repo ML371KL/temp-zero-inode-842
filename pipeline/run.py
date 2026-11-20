@@ -552,7 +552,8 @@ def _live_journal(panel, decision, journal):
         curve = track.curve_positions(dates, cols.get("slope_10_2"),
                                       daily.get("is_decision_day") or [False] * len(dates))
         live = track.live_journal(dates, said, cols.get("mcftr"), cols.get("deposit"),
-                                  curve=curve, pos_now=daily["pos"])
+                                  curve=curve, pos_now=daily["pos"],
+                                  tr_last=daily.get("tr_last"))
         if live and isinstance(pos_block.get("journal"), dict):
             pos_block["journal"]["live"] = live
     except Exception as exc:  # noqa: BLE001 — граница изоляции
@@ -573,6 +574,41 @@ def _priced(panel, decision, journal):
         journal.warn("compute", f"«что в цене» упало: {type(exc).__name__}: {exc}")
 
 
+# Блоки справки вокруг решения, которые едут в verdict рядом с позицией (compute/
+# evidence.py, аудит 20.11.2026): контроль в деньгах, сила сигнала, голосование настроек.
+EVIDENCE_KEYS = ("control", "strength", "vote")
+
+
+def _evidence(panel, mf, decision, journal):
+    """Справка вокруг решения (compute/evidence.py): дописывает поля живого следа, дату
+    ставки и оценку по текущей нефти в блок позиции, а блоки EVIDENCE_KEYS складывает в
+    decision["evidence"]. Изолировано: справка не имеет права ронять публикацию позиции.
+    Считается только при полном пересчёте; внутридневной такт берёт всё это из прошлого
+    вердикта, как ядро и позицию."""
+    evidence = _optional("pipeline.compute.evidence")
+    if evidence is None or not isinstance(decision, dict):
+        return
+    try:
+        extras, errors = evidence.attach(store, panel, mf, decision)
+    except Exception as exc:  # noqa: BLE001 — граница изоляции
+        journal.warn("compute", f"справка вокруг решения упала: {type(exc).__name__}: {exc}")
+        return
+    for err in errors:
+        journal.warn("compute", f"справка вокруг решения — {err}")
+    decision["evidence"] = extras
+
+
+def _attach_evidence(payload, decision):
+    """Блоки справки — в verdict (publish.build_verdict их не знает и не трогает)."""
+    verdict = (payload or {}).get("verdict")
+    extras = (decision or {}).get("evidence") if isinstance(decision, dict) else None
+    if isinstance(verdict, dict) and isinstance(extras, dict):
+        for key in EVIDENCE_KEYS:
+            if extras.get(key):
+                verdict[key] = extras[key]
+    return payload
+
+
 def build_full(now, journal):
     """Полный пересчёт: панель → ядро → состояния → решение → тень.
 
@@ -588,6 +624,7 @@ def build_full(now, journal):
         decision = decision_mod.compute_decision(panel, mf, states)
         _live_journal(panel, decision, journal)
         _priced(panel, decision, journal)
+        _evidence(panel, mf, decision, journal)
     shadow = _shadow(panel, states, decision, now, journal)
     dates = (panel or {}).get("dates") or []
     pos = ((decision or {}).get("position") or {})
@@ -626,9 +663,10 @@ def build_payload_for_mode(mode, now, journal):
     if not all((panel_mod, core_mod, states_mod, store)):
         raise RuntimeError("нет модулей расчёта: " + ", ".join(sorted(MISSING_MODULES)))
     core, states, decision, shadow = build_full(now, journal)
-    return publish_mod.build_payload(core=core, states=states, monitors=monitors,
-                                     sources=sources, mode=mode, asof=asof, quotes=quotes,
-                                     decision=decision, shadow=shadow)
+    return _attach_evidence(
+        publish_mod.build_payload(core=core, states=states, monitors=monitors,
+                                  sources=sources, mode=mode, asof=asof, quotes=quotes,
+                                  decision=decision, shadow=shadow), decision)
 
 
 def _seed_payload(journal):

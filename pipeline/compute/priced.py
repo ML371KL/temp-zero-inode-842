@@ -42,9 +42,9 @@ import math
 import random
 
 try:
-    from ..lib import calc
+    from ..lib import calc, constants
 except ImportError:
-    from lib import calc
+    from lib import calc, constants
 
 __all__ = ["WINDOW", "MIN_OBS", "DET_MIN_OBS", "MIN_EVENTS", "GEO_TYPES", "HORIZONS",
            "log_returns", "event_days", "sensitivities", "basket", "rolling_ols",
@@ -58,6 +58,14 @@ QUANTILE = 5          # пятые части по чувствительнос�
 GEO_TYPES = ("sanction_us", "sanction_eu", "peace_pos", "peace_neg")
 HORIZONS = (5, 21, 63)
 DETENTE = False       # см. докстринг: приёмка (в) и (г) 10.11.2026 не пройдена
+# Окно короче этого витрине не показывать (windows[].show = false): доля «объяснено» на
+# пяти точках — число без смысла (аудит 20.11.2026, §4.6). Расчёт окна не меняется.
+MIN_SHOW_SESSIONS = constants.PRICED_MIN_SHOW_SESSIONS
+# Что такое остаток (other_lp) — словами для витрины. До 20.11.2026 страница подписывала
+# его «новости о переговорах и санкциях, потоки, дивиденды»: это остаток, выданный за
+# знание (он почти равен самому ходу индекса, связь 0,83).
+OTHER_NOTE = ("остаток — всё, что не описали ставки и нефть, включая сдвиг самих "
+              "коэффициентов")
 
 
 def log_returns(xs):
@@ -349,13 +357,16 @@ def block(store, panel):
     if not DETENTE:
         for w in wins:
             w.pop("detente_lp", None)
+    for w in wins:
+        w["show"] = w["sessions"] >= MIN_SHOW_SESSIONS
     beta = next((b for b in reversed(res["beta_macro"]) if b is not None), None)
     oil_last = max((t for t, v in enumerate(inp["oil"]) if calc.is_num(v)), default=None)
     return {"asof": dates[-1], "windows": wins, "detente": DETENTE,
             "rates_pct_per_pp": round(beta[1] * 100, 2) if beta else None,
             "oil_pct_per_pct": round(beta[2], 3) if beta else None,
             "oil_through": dates[oil_last] if oil_last is not None else None,
-            "window": WINDOW,
+            "window": WINDOW, "min_show_sessions": MIN_SHOW_SESSIONS,
+            "other_note": OTHER_NOTE,
             "basis": "дневные лог-доходности IMOEX; ставки — изменение доходности 10-летних ОФЗ, "
                      "нефть — Brent × юань/рубль; коэффициенты — скользящая регрессия за 252 дня "
                      "до вчерашнего дня; вклады в лог-пунктах"}
