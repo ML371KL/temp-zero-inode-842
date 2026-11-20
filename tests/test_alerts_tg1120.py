@@ -237,5 +237,39 @@ class TestSupersedeTruth(AuditCase):
         self.assertIn("до канала не дошло", last[0])
 
 
+class TestCoreFlipJournalOnly(AuditCase):
+    """Дневной разворот оценки — запись журнала страницы, а не сообщение (хвост аудита)."""
+
+    def test_разворот_оценки_не_спорит_со_сменой_позиции(self):
+        """День решения: оценка +0,15 → −0,31, позиция сменилась.
+
+        мутация: убрать core_flip из JOURNAL_KINDS -> тем же прогоном в канал уходят
+        «Оценка рынка развернулась вниз… Позицию это само не меняет» и «Позиция:
+        переход в деньги — оценка рынка ушла ниже −0,2».
+        """
+        nexus = need(self, "pipeline.lib.nexus", "deliver", "SENT")
+        mirrored = []
+        with mock.patch.object(nexus, "deliver",
+                               lambda ev: mirrored.append(ev["kind"]) or nexus.SENT):
+            self.seed(payload(core=0.15, position=score("long", comp=0.15)))
+            evs = self.run_at(payload(core=-0.31, position=score(
+                "flat", comp=-0.31, is_decision_day=True)))
+        self.assertEqual(sorted(e["kind"] for e in evs), ["core_flip", "position_change"])
+        self.assertEqual(len(self.market()), 1, self.market())
+        self.assertIn("Позиция: переход в деньги", self.market()[0])
+        self.assertEqual(mirrored, ["position_change"], "разворот ушёл в хаб")
+        journal = " | ".join(e["text"] for e in self.alerts.payload_events())
+        self.assertIn("Оценка рынка развернулась вниз", journal)
+
+    def test_разбор_развороту_не_заказывается(self):
+        commentary = need(self, "pipeline.lib.commentary", "annotate", "comments")
+        asked = []
+        with mock.patch.object(commentary, "comments",
+                               lambda evs, pl, log=None: asked.append([e["kind"] for e in evs])):
+            commentary.annotate([{"key": "core_flip:-1:x", "kind": "core_flip",
+                                  "title": "Оценка рынка развернулась вниз"}], payload())
+        self.assertEqual(asked, [])
+
+
 if __name__ == "__main__":
     unittest.main()
