@@ -1401,8 +1401,8 @@ def _unit_events(units, old, down, payload, now, core=False):
                                    "info", now, fact=data_from + lasted,
                                    meaning="Решение о позиции снова считается по свежим "
                                            "числам этого ряда.",
-                                   where="Смотреть: плашка об источнике вверху страницы "
-                                         "панели должна исчезнуть."))
+                                   where="Смотреть: страницу панели — плашка об источнике "
+                                         "вверху должна исчезнуть."))
                 else:
                     out.append(_ev(f"source_ok:{name}:{payload.get('asof_trading_day')}",
                                    "source_ok", f"источник {who} снова отвечает",
