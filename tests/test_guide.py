@@ -180,14 +180,25 @@ class TestPanelLinksGuide(unittest.TestCase):
                       "на панели нет ссылки на руководство")
         self.assertTrue(GUIDE.exists(), "ссылка есть, а файла руководства нет")
 
-    def test_panel_howto_mentions_position(self):
-        """Блок «Как читать» на панели обязан называть позицию и ворота с гистерезисом."""
-        block = re.search(r'<section class="section howto".*?</section>', self.html, re.S)
-        self.assertIsNotNone(block, "на панели нет блока «Как читать»")
-        text = strip_tags(block.group(0)).lower()
-        self.assertIn("позиция", text)
-        self.assertIn("гистерезис", text)
-        self.assertIn("пятниц", text)
+    def test_panel_howto_is_one_line_above_monitors(self):
+        """«Как читать» на главной — строка-ссылка на руководство над мониторами
+        (аудит 20.11.2026), а не четыре колонки пересказа после журнала.
+
+        Мутации: вернуть блок из колонок в index.html; убрать строку из потока
+        главной; поставить её после «Контекста рынка» — тест падает."""
+        self.assertNotIn("howto__grid", self.html,
+                         "на главной снова стоит блок «Как читать» из колонок")
+        app = read(ROOT / "web" / "app.js")
+        fn = re.search(r"function renderHowto\(\) \{(.*?)\n  \}\n", app, re.S)
+        self.assertIsNotNone(fn, "в app.js нет renderHowto")
+        self.assertIn("guide.html#quick", fn.group(1))
+        self.assertIn("href: 'guide.html'", fn.group(1))
+        body = re.search(r"function render\(d, force\) \{(.*?)\n  \}\n", app, re.S).group(1)
+        main_branch = re.search(r"if \(PAGE === 'lab'\) \{.*?\} else \{(.*?)\}", body, re.S).group(1)
+        order = [m.group(1) for m in re.finditer(r"(render(?:Priced|Howto|Context|Events))\(", main_branch)]
+        self.assertEqual(order, ["renderPriced", "renderHowto", "renderContext", "renderEvents"])
+        # Якорь, на который ведёт строка, существует в руководстве.
+        self.assertIn('id="quick"', read(GUIDE))
 
 
 class TestLabPage(unittest.TestCase):
@@ -211,27 +222,33 @@ class TestLabPage(unittest.TestCase):
         self.assertIn("PAGE === 'lab'", app)
 
     def test_context_on_main(self):
-        """Мониторы и расстояние до переключения — на главной, в «Контексте рынка»
+        """Мониторы и пороги флагов ворот — на главной, в «Контексте рынка»
         (10.11.2026, по слову владельца), между «Что в цене» и журналом событий, и только
         там. Ссылки между страницами — в шапке обеих. Мутация: вернуть renderContext в
-        ветку lab или убрать из главной — тест падает."""
+        ветку lab или убрать из главной — тест падает.
+
+        С 20.11.2026 мониторы стоят строками (monitorRows), развёрнутыми карточками —
+        только в режиме «Таблица» (monitorCards), а блок порогов называется тем, что
+        он есть: пороги флагов ворот, а не «расстояние до переключения» позиции."""
         app = read(ROOT / "web" / "app.js")
         body = re.search(r"function render\(d, force\) \{(.*?)\n  \}\n", app, re.S)
         self.assertIsNotNone(body, "в app.js не нашлась функция render")
         lab_branch, main_branch = re.search(r"if \(PAGE === 'lab'\) \{(.*?)\} else \{(.*?)\}", body.group(1), re.S).groups()
         self.assertNotIn("renderContext", lab_branch)
         self.assertNotIn("renderDistances", lab_branch)
-        order = [m.group(1) for m in re.finditer(r"(render(?:Priced|Context|Events))\(d\)", main_branch)]
+        order = [m.group(1) for m in re.finditer(r"(render(?:Priced|Context|Events))\(d", main_branch)]
         self.assertEqual(order, ["renderPriced", "renderContext", "renderEvents"])
-        ctx = re.search(r"function renderContext\(d\) \{(.*?)\n  \}\n", app, re.S).group(1)
+        ctx = re.search(r"function renderContext\(d, full\) \{(.*?)\n  \}\n", app, re.S).group(1)
         self.assertIn("'Контекст рынка'", ctx)
         self.assertIn("'в решение не входит'", ctx)
         self.assertIn("renderDistances(d)", ctx)
-        self.assertIn("monitorTiles(d)", ctx)
+        self.assertIn("monitorRows(d)", ctx)
+        self.assertIn("monitorCards(d)", ctx)
         states = re.search(r"function renderStates\(d\) \{(.*?)\n  \}\n", app, re.S).group(1)
-        self.assertNotIn("text: 'Расстояние до переключения'", states)
+        self.assertNotIn("расстояние до порога", states)
         self.assertIn("text: 'Сигналы второго ряда'", states)
-        self.assertIn("text: 'Расстояние до переключения'", app)
+        self.assertIn("text: 'Флаги ворот: расстояние до порога'", app)
+        self.assertNotIn("text: 'Расстояние до переключения'", app)
         tools = lambda html: re.search(r'<div class="top__tools">(.*?)</header>', html, re.S).group(1)
         self.assertIn('href="lab.html"', tools(read(INDEX)))
         self.assertIn('href="./"', tools(read(ROOT / "web" / "lab.html")))
