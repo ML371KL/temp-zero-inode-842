@@ -552,7 +552,8 @@ def _live_journal(panel, decision, journal):
         curve = track.curve_positions(dates, cols.get("slope_10_2"),
                                       daily.get("is_decision_day") or [False] * len(dates))
         live = track.live_journal(dates, said, cols.get("mcftr"), cols.get("deposit"),
-                                  curve=curve, pos_now=daily["pos"])
+                                  curve=curve, pos_now=daily["pos"],
+                                  tr_last=daily.get("tr_last"))
         if live and isinstance(pos_block.get("journal"), dict):
             pos_block["journal"]["live"] = live
     except Exception as exc:  # noqa: BLE001 — граница изоляции

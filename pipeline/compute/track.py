@@ -30,7 +30,8 @@ except ImportError:
 __all__ = ["FREEZE", "RULE_SINCE", "SWITCH_COST", "LAG", "BASIS", "daily_rows", "summarize",
            "monthly_hits", "wilson", "months_back", "last_switch", "journal",
            "curve_positions", "CURVE_LABEL", "SAID_POS", "SAID_RULE", "said_load",
-           "said_record", "version_on", "live_journal"]
+           "said_record", "version_on", "live_journal", "own_last", "counted_rows",
+           "said_positions", "said_windows", "said_history"]
 
 # С этого дня слой решения (правило P2) ведёт позицию в проде (аудит 02.09.2026); до
 # него позицию вело прежнее правило — так и подписана его карточка на витрине.
@@ -81,6 +82,31 @@ def daily_rows(dates, pos, tr, cash, lag=1, cost=SWITCH_COST):
         prev = held
         rows.append((dates[i], held, r_rule, r_tr, r_cash))
     return rows
+
+
+def own_last(panel):
+    """Последний день, за который у индекса полной доходности есть СОБСТВЕННАЯ точка.
+
+    Биржа отдаёт MCFTR на день позже вечернего прогона, а колонка панели протянута
+    вперёд (panel.FFILL_LIMITS): последний день панели в счёте был нулевым, но журнал
+    подписывался им (19.11.2026: журнал датирован 19.11, падение −2,1% в числа не
+    вошло; аудит 20.11.2026, §4.5). Дата берётся из сводки покрытия панели
+    (panel["coverage"]["mcftr"]["last"] — последняя точка ряда в сторе). -> дата | None
+    (сводки нет — счёт идёт по последний день панели, как раньше).
+    """
+    last = (((panel or {}).get("coverage") or {}).get("mcftr") or {}).get("last")
+    return last if isinstance(last, str) and last else None
+
+
+def counted_rows(rows, through=None):
+    """Строки счёта по день through включительно (own_last): хвост, где индекс только
+    протянут, в счёт не идёт — это не нулевой день рынка, а день без данных."""
+    if not through:
+        return rows
+    k = len(rows)
+    while k > 0 and rows[k - 1][0] > through:
+        k -= 1
+    return rows[:k]
 
 
 def _pct(x, nd=2):
@@ -209,7 +235,7 @@ def _curve_cols(curve_rows, win):
 
 
 def journal(dates, pos, reasons, tr, cash, freeze=FREEZE, rule_since=RULE_SINCE,
-            lag=LAG, cost=SWITCH_COST, curve=None):
+            lag=LAG, cost=SWITCH_COST, curve=None, tr_last=None):
     """Блок verdict.position.journal: правило против удержания индекса и вкладов.
 
     Окна: с последней смены позиции — накопленные проценты; с начала года — ещё и
@@ -217,14 +243,18 @@ def journal(dates, pos, reasons, tr, cash, freeze=FREEZE, rule_since=RULE_SINCE,
     годовые. Сделки — с даты действующей редакции правила. Это ПЕРЕСЧЁТ истории
     нынешней версией; что панель говорила вживую — live_journal ниже.
     curve — позиции простой кривой (curve_positions): столбец сравнения в каждом окне.
+    tr_last — последний день с собственной точкой индекса (own_last): счёт идёт по
+    него, и asof называет именно его; сделки (trades) перечислены по последний день
+    панели — решение принято, даже если индекс за этот день ещё не пришёл.
     -> None, если считать не по чему (нет индекса полной доходности или ставки).
     """
     if not dates:
         return None
-    rows = daily_rows(dates, pos, tr, cash, lag, cost)
+    rows = counted_rows(daily_rows(dates, pos, tr, cash, lag, cost), tr_last)
     if not rows:
         return None
-    curve_rows = daily_rows(dates, curve, tr, cash, lag, cost) if curve else None
+    curve_rows = (counted_rows(daily_rows(dates, curve, tr, cash, lag, cost), tr_last)
+                  if curve else None)
     asof = rows[-1][0]
     windows = []
     sw = last_switch(dates, pos, reasons, asof)
@@ -406,11 +436,13 @@ def _said_series(dates, said):
     return out, gaps
 
 
-def live_journal(dates, said, tr, cash, curve=None, pos_now=None, lag=LAG, cost=SWITCH_COST):
+def live_journal(dates, said, tr, cash, curve=None, pos_now=None, lag=LAG, cost=SWITCH_COST,
+                 tr_last=None):
     """verdict.position.journal.live: что дало то, что панель ГОВОРИЛА вживую.
 
     Окна «с запуска панели» и «при нынешней версии правила» (до последнего дня с
-    индексом); в каждом — правило по журналу, простая кривая, акции (MCFTR) и вклады.
+    СОБСТВЕННОЙ точкой индекса: tr_last — own_last); в каждом — правило по журналу,
+    простая кривая, акции (MCFTR) и вклады.
     spells — отрезки сказанной позиции: акции и вклады от исполнения смены до
     исполнения следующей (или до последнего дня). differs_days — дни нынешней версии,
     где сегодняшний пересчёт расходится со сказанным (данные пересмотрены задним
@@ -420,10 +452,11 @@ def live_journal(dates, said, tr, cash, curve=None, pos_now=None, lag=LAG, cost=
         return None
     ser, gaps = _said_series(dates, said)
     held = [1 if v else 0 for v in ser]
-    rows = daily_rows(dates, held, tr, cash, lag, cost)
+    rows = counted_rows(daily_rows(dates, held, tr, cash, lag, cost), tr_last)
     if not rows:
         return None
-    curve_rows = daily_rows(dates, curve, tr, cash, lag, cost) if curve else None
+    curve_rows = (counted_rows(daily_rows(dates, curve, tr, cash, lag, cost), tr_last)
+                  if curve else None)
     asof = rows[-1][0]
     windows = []
     for wid, label, lo in (("launch", "с запуска панели", constants.PANEL_LAUNCH),
@@ -486,3 +519,76 @@ def live_journal(dates, said, tr, cash, curve=None, pos_now=None, lag=LAG, cost=
             "said_days": sum(1 for d in said if d <= asof), "gap_days": gaps,
             "differs_days": differs, "windows": windows, "spells": spells,
             "curve": CURVE_LABEL, "basis": BASIS}
+
+
+# ------------------------------------- живой след в окнах пересчёта (аудит 20.11.2026)
+# Таблица «на истории» и лента позиций посчитаны нынешней версией правила задним числом,
+# а вживую панель с запуска говорила другое (§4.1 аудита: за 12 месяцев пересчёт +14,2%,
+# с учётом сказанного +8,6%). Здесь — тот же счёт по ряду «до запуска панели — пересчёт,
+# с запуска — то, что панель говорила»: поля рядом с пересчётом, прежние не меняются.
+
+def said_positions(dates, pos, said):
+    """[0|1] — позиция по закрытию дня: до первой записи живого журнала — пересчёт (pos),
+    с неё — сказанное (дни без записи читаются прежней сказанной позицией)."""
+    ser, _gaps = _said_series(dates, said or {})
+    return [(1 if pos[t] else 0) if v is None else (1 if v else 0)
+            for t, v in enumerate(ser)]
+
+
+# Поля окна, которые считаются и по сказанному: те же имена, что у пересчёта.
+_SAID_KEYS = ("rule_pct", "rule_ann_pct", "excess_pp", "mdd_pct", "in_market_pct",
+              "switches", "ex_sharpe")
+SAID_BASIS = ("до запуска панели — пересчёт нынешней версией правила, с запуска — "
+              "позиция, которую панель публиковала")
+
+
+def said_windows(journal_block, dates, pos, said, tr, cash, tr_last=None,
+                 lag=LAG, cost=SWITCH_COST):
+    """Дописать в каждое окно journal.windows поле `said` — итог окна по ряду «до запуска
+    панели — пересчёт, с запуска — сказанное» (said_positions), в той же мере.
+
+    said: {rule_pct, excess_pp, mdd_pct, in_market_pct, switches, ex_sharpe?,
+    rule_ann_pct?, vs_recalc_pp, live_from, live_days}; vs_recalc_pp — сказанное минус
+    пересчёт за окно, п.п.; live_from — с какого дня окна идёт сказанное (первая запись
+    журнала или начало окна), live_days — сколько дней окна посчитано по сказанному.
+    Окно, в которое сказанное не попало, получает said = null. Блок меняется на месте.
+    -> ряд позиций said_positions (для волн и контроля) | None (журнала нет).
+    """
+    if not journal_block or not dates or not said:
+        return None
+    hyb = said_positions(dates, pos, said)
+    rows = counted_rows(daily_rows(dates, hyb, tr, cash, lag, cost), tr_last)
+    first = min(said)
+    for win in journal_block.get("windows") or []:
+        ann_min = 0.0 if "rule_ann_pct" in win else 99.0
+        # from окна — его нижняя граница (не включительно); если история начинается
+        # внутри окна, summarize ставит в from первый день счёта, и он в окно ВХОДИТ.
+        lo = win["from"] if rows and rows[0][0] < win["from"] else None
+        s = summarize(rows, lo, win.get("to"), ann_min) if rows else None
+        live_days = sum(1 for r in rows
+                        if (lo is None or lo < r[0]) and r[0] <= win["to"] and r[0] > first)
+        if s is None or not live_days:
+            win["said"] = None
+            continue
+        out = {k: s[k] for k in _SAID_KEYS if k in s}
+        out["vs_recalc_pp"] = round(s["rule_pct"] - win["rule_pct"], 2)
+        out["live_from"] = max(first, win["from"])
+        out["live_days"] = live_days
+        win["said"] = out
+    journal_block["said_basis"] = SAID_BASIS
+    return hyb
+
+
+def said_history(dates, said):
+    """Отрезки живого следа с запуска: [[день решения, 0|1]] — только смены, как
+    verdict.position.history. Лента с 2004 года — пересчёт; эти отрезки витрина
+    накладывает на неё, чтобы было видно, где панель говорила другое."""
+    out, prev = [], None
+    for d in dates:
+        if d not in (said or {}):
+            continue
+        v = 1 if said[d][0] else 0
+        if v != prev:
+            out.append([d, v])
+            prev = v
+    return out
