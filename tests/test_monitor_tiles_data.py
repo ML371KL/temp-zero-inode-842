@@ -337,8 +337,10 @@ class TestТайлыНаЖивыхДанных(TileCase):
         self.assertIn("SBER 10.09", t["headline"])
         self.assertIn("(9.3%)", t["headline"])
         self.assertIn("≈1.92%", t["headline"])
-        self.assertIn(f"выплат 1{NBSP}132 млрд", t["headline"])
-        self.assertIn("реинвест ≈566 млрд", t["headline"])
+        self.assertIn(f"выплат всего 1{NBSP}132 млрд", t["headline"])
+        # Мутация: вернуть «реинвест ≈» без «не больше» → половина ВСЕХ выплат снова читается
+        # как оценка, хотя в сумме пакеты государства и контролирующих акционеров.
+        self.assertIn("реинвест не больше ≈566 млрд", t["headline"])
 
     def test_cb_meeting_ключ_консенсус_и_дни(self):
         """Ключ и консенсус в процентах, дельта в б.п., дни до заседания — руками.
