@@ -854,6 +854,7 @@ body { overflow-x: hidden; }
 }
 .guide__sec h3 { font-size: 15px; font-weight: 600; margin: 26px 0 8px; }
 .guide__sec p { font-size: 15px; line-height: 1.65; margin-bottom: 12px; max-width: 74ch; text-wrap: pretty; }
+.guide__sec a, .guide__lead a { color: var(--s1); }
 .guide__sec code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: .9em; background: var(--inset); padding: 1px 6px; border-radius: 5px;
@@ -890,6 +891,11 @@ body { overflow-x: hidden; }
 
 .guide__table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin: 16px 0 20px; }
 .guide__table { min-width: 560px; }
+/* Короткие таблицы (версии правила, зоны спреда) помещаются в экран телефона без
+ * прокрутки; у таблицы из слов колонки выровнены влево, дата не рвётся. */
+.guide__table.guide__table--fit { min-width: 0; }
+table.data.guide__table--left th, table.data.guide__table--left td { text-align: left; }
+table.data.guide__table--left td:nth-child(2) { white-space: nowrap; }
 /* Специфичность выше, чем у table.data td (0,1,2): иначе nowrap общей таблицы
  * побеждал, и длинные ячейки руководства уезжали за край на любом экране шире
  * телефона — таблица состава ядра прокручивалась вбок, а не переносилась. */

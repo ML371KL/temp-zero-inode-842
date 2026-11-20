@@ -420,13 +420,111 @@ class TestGuideMatchesConstants(unittest.TestCase):
         self.assertEqual(said_off, not priced.DETENTE)
 
     def test_health_review_months_in_guide(self):
-        """Порог ревалидации (×12) — словами в разделе о здоровье модели."""
+        """Порог ревалидации (×12) — словами там, где руководство говорит о ранговой связи.
+
+        С 20.11.2026 это раздел «Насколько верить»: ранговая связь больше не прибор
+        контроля, но конвейер по-прежнему считает её и объявляет проверку состава по
+        тому же порогу — число в тексте обязано совпадать с константой."""
         words = {6: "шесть", 12: "двенадцать"}
         word = words.get(self.K.HEALTH_REVIEW_MONTHS)
         self.assertIsNotNone(word, f"числительное для {self.K.HEALTH_REVIEW_MONTHS} не описано — допишите")
-        core = strip_tags(section(self.html, "core")).lower()
-        self.assertIn(word, core, "порог ревалидации в руководстве не совпадает с HEALTH_REVIEW_MONTHS")
-        self.assertIn("не видно", core, "руководство обязано отличать «связи не видно» от «сломана»")
+        sec = section(self.html, "evidence")
+        health = strip_tags(sec[sec.index('id="health"'):]).lower()
+        self.assertIn(word, health, "порог ревалидации в руководстве не совпадает с HEALTH_REVIEW_MONTHS")
+        self.assertIn("не видно", health, "руководство обязано отличать «связи не видно» от «сломана»")
+        # Аудит 20.11.2026: прибор не отличает работающую модель от сломанной — сказано прямо,
+        # и читатель отослан к контролю в деньгах.
+        self.assertIn("не способен отличить работающую модель от сломанной", health)
+        self.assertIn('href="#control"', sec[sec.index('id="health"'):])
+
+    def test_evidence_numbers_match_constants(self):
+        """Числа раздела «Насколько верить» и оценки по текущей нефти — из констант.
+
+        Мутация: сдвинуть порог «сильного» сигнала, окна голосования или возраст нефти в
+        constants и не тронуть руководство — текст расскажет про блоки, которых нет."""
+        K = self.K
+        ru = lambda x: f"{x:.1f}".replace(".", ",")
+        ev = strip_tags(section(self.html, "evidence"))
+        strength = ev[ev.index("Сила сигнала"):ev.index("Твёрдость")]
+        self.assertIn(f"от {ru(K.STRENGTH_STRONG)} по модулю", strength)
+        self.assertIn(f"от {ru(K.DECISION['comp_threshold'])} до {ru(K.STRENGTH_STRONG)}", strength)
+        self.assertIn(f"следующие {K.STRENGTH_FWD_SESSIONS} сессий", strength)
+        self.assertIn(f"по {'семи' if len(K.STRENGTH_ZONES) == 7 else len(K.STRENGTH_ZONES)} зонам", strength)
+        vote = ev[ev.index("Твёрдость"):ev.index("Контроль в деньгах")]
+        n = len(K.VOTE_OIL) * len(K.VOTE_WINDOWS) * len(K.VOTE_THRESHOLDS)
+        self.assertIn(f"{n} вариантов", vote)
+        w = sorted(K.VOTE_WINDOWS)
+        self.assertIn(f"{w[0]}, {w[1]} или {w[2]} месяца", vote)
+        t = sorted(K.VOTE_THRESHOLDS)
+        self.assertIn(f"±{ru(t[0])}, ±{ru(t[1])} или ±{ru(t[2])}", vote)
+        # боевая настройка — первый элемент каждого измерения
+        self.assertIn(f"{K.VOTE_WINDOWS[0]} месяцев, ±{ru(K.VOTE_THRESHOLDS[0])}", vote)
+        control = ev[ev.index("Контроль в деньгах"):]
+        m = K.CONTROL_MONTHS
+        self.assertIn(f"{m[0]}, {m[1]} и {m[2]} месяцев", control)
+        oil = strip_tags(section(self.html, "plaques"))
+        self.assertIn(f"больше {K.OIL_NOW_MIN_AGE_DAYS} дней назад", oil)
+        self.assertIn(f"не меньше {K.OIL_NOW_MIN_SESSIONS} сессий", oil)
+        priced = strip_tags(section(self.html, "priced"))
+        self.assertIn(f"месяц ({K.PRICED_MIN_SHOW_SESSIONS} сессия)", priced)
+
+    def test_late_entry_is_described_once(self):
+        """О позднем входе — одно описание и одни числа (аудит 20.11.2026).
+
+        Главная говорила «вход через 19 торговых дней», руководство — «через 67 (медиана
+        38), пропущено 84%» и «первые 15–25% отскока», а виновником называло то ворота,
+        то ядро. Мутация: вернуть любое из прежних чисел или вторую версию причины."""
+        text = strip_tags(self.html)
+        for stale in ("67 торговых дней", "медиана 38", "пропущено 84%", "15–25% отскока",
+                      "создают ворота, а не оценка", "Опаздывают не ворота", "отсюда поздний вход"):
+            self.assertNotIn(stale, text, f"в руководстве осталось прежнее описание позднего входа: «{stale}»")
+        late = strip_tags(re.search(r'<p id="late">(.*?)</p>', self.html, re.S).group(1))
+        self.assertIn("через 19 торговых дней после дна (медиана 18)", late)
+        # Остальные упоминания ссылаются на это место, а не дают свои числа.
+        for sec_id in ("workflow", "limits"):
+            sec = section(self.html, sec_id)
+            self.assertIn('href="#late"', sec)
+            self.assertIn("через 19 торговых дней", strip_tags(sec))
+
+    def test_bond_threshold_said_once_and_same(self):
+        """Порог облигаций один: −4% в логарифмах = −3,9% простыми процентами (как на
+        странице). Мутация: оставить в тексте «глубже −4%» рядом с «−3,9%» на панели."""
+        text = strip_tags(self.html)
+        self.assertNotIn("глубже −4%", text)
+        self.assertNotIn("мельче −3%", text)
+        bond_on = (2.718281828459045 ** self.K.DECISION["bond_on"] - 1) * 100
+        bond_off = (2.718281828459045 ** self.K.DECISION["bond_off"] - 1) * 100
+        on, off = (f"{abs(v):.1f}".replace(".", ",") for v in (bond_on, bond_off))
+        self.assertIn(f"глубже −{on}%", text)
+        self.assertIn(f"мельче −{off}%", text)
+        self.assertIn(f"простыми процентами это −{on}% и −{off}%", text)
+
+    def test_no_disclaimers_and_no_stale_layout(self):
+        """Руководство описывает нынешнюю страницу и не несёт оговорок-дисклеймеров."""
+        text = strip_tags(self.html)
+        for stale in ("ворота слева", "наклон справа", "Правило дня", "Красный крест", "жёлтый треугольник",
+                      "Цикл ставки", "Тормоз", "по состоянию на сентябрь 2026", "отстаёт примерно на две",
+                      "инвестиционная рекомендация", "Жёлтая точка"):
+            self.assertNotIn(stale, text, f"в руководстве осталось описание прежней страницы: «{stale}»")
+        quick = strip_tags(section(self.html, "quick"))
+        for word in ("Сила сигнала", "Твёрдость", "Вживую с запуска", "Оценка рынка", "Что изменит позицию"):
+            self.assertIn(word, quick, f"«За 30 секунд» не называет «{word}»")
+
+    def test_wide_tables_are_wrapped(self):
+        """Каждая таблица руководства стоит в прокручиваемой обёртке: на телефоне таблицы
+        версий правила и зон спреда были шире экрана и растягивали страницу."""
+        tables = re.findall(r'(<div class="guide__table-wrap">\s*)?<table class="data guide__table[^"]*"', self.html)
+        self.assertEqual(len(tables), self.html.count("<table"))
+        self.assertGreater(len(tables), 5)
+        self.assertTrue(all(tables), f"таблиц без обёртки: {tables.count('')}")
+
+    def test_glossary_has_page_terms(self):
+        """Слова, которые стоят на странице, есть в словаре."""
+        terms = [strip_tags(t) for t in re.findall(r"<dt>(.*?)</dt>", section(self.html, "glossary"), re.S)]
+        for term in ("Оценка рынка", "Ворота", "Флаг", "Простая кривая", "Волна", "Сила сигнала",
+                     "Твёрдость", "Контроль в деньгах", "Лог-пункт"):
+            self.assertIn(term, terms)
+        self.assertNotIn("Наклон", terms)
 
     def test_monitor_tiles_counted_correctly(self):
         """Сколько тайлов собирает конвейер, столько же обещано словами и описано в списке.
