@@ -225,7 +225,7 @@
       });
       if (!isNum(value)) {
         kids.push(el('text', { x: padX, y: padTop - 10, 'class': 'tick' },
-          [document.createTextNode('композит не рассчитан')]));
+          [document.createTextNode('оценка не рассчитана')]));
       }
       if (isNum(value)) {
         var mx = x(value);
@@ -241,7 +241,7 @@
       return el('svg', {
         'class': 'fig', width: W, height: H, viewBox: '0 0 ' + W + ' ' + H,
         role: 'img',
-        'aria-label': 'Шкала композита от минус трёх до плюс трёх, текущее значение ' +
+        'aria-label': 'Шкала оценки рынка от минус трёх до плюс трёх, текущее значение ' +
           (isNum(value) ? fmtNum(value, 2, true) : 'не рассчитано')
       }, kids);
     });

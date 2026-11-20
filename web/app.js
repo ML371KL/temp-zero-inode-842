@@ -8,11 +8,21 @@
  * вердикта сигнала рядом с цветом всегда стоят иконка и словесная подпись — это
  * требование доступности и заодно защита от чтения панели в оттенках серого.
  *
- * Первая строка панели — ПОЗИЦИЯ (акции / деньги), итог ворот и наклона; её
+ * Первая строка панели — ПОЗИЦИЯ (акции / деньги), итог ворот и оценки рынка; её
  * считает конвейер (compute/decision.py), фронт не выводит решение сам. Поля
  * аудита 02.09.2026 (verdict.position, states.gate, states.regime_stats, shadow,
  * тайл expectations) необязательны: витрина без них рисуется как прежде, новые
  * блоки просто не появляются — старый data.json остаётся законным входом.
+ *
+ * То же правило — для полей аудита 20.11.2026 («Справка вокруг решения», CONTRACT §3:
+ * verdict.strength, vote, control, held_by.oil_now, windows[].said, said_history,
+ * sources.*.core_affected, compute_error и ряды графиков тайлов). Любого может не
+ * быть — на старом data.json, на внутридневном такте до первого суточного прогона,
+ * при отказе одного блока: его часть страницы тогда не рисуется, остальное на месте.
+ * Что именно показывается в каждом случае, закреплено в tests/test_web_evidence.py.
+ *
+ * Имя у главного числа одно — «оценка рынка». Слова расчёта («композит», «ядро»,
+ * «ячейка») остались только на странице лаборатории, рядом с этим именем.
  */
 (function () {
   'use strict';
@@ -225,6 +235,10 @@
       hint ? h('div', { 'class': 'stat__hint', text: hint }) : null
     ]);
   }
+
+  // Пометка текущей строки таблицы зон. Отдельным узлом: на телефоне она уходит второй
+  // строкой ячейки, иначе таблица из четырёх колонок шире экрана.
+  function nowMark() { return h('span', { 'class': 'row-mark', text: ' ◂ сейчас' }); }
 
   function toneOf(v) { return !isNum(v) ? 'tone-mut' : (v > 0 ? 'tone-pos' : (v < 0 ? 'tone-neg' : 'tone-mut')); }
 
@@ -755,12 +769,12 @@
             (s.through ? ' по ' + fmtDay(s.through) : '') + '.' }),
           h('thead', null, [h('tr', null, [
             h('th', { scope: 'col', text: 'Оценка рынка' }), h('th', { scope: 'col', text: 'В среднем' }),
-            h('th', { scope: 'col', text: 'Недель в плюс' }), h('th', { scope: 'col', text: 'Недель' })
+            h('th', { scope: 'col', text: 'В плюс' }), h('th', { scope: 'col', text: 'Недель' })
           ])]),
           h('tbody', null, zones.map(function (z) {
             var cur = z.id === s.zone;
             return h('tr', { 'class': cur ? 'is-current' : null }, [
-              h('th', { scope: 'row', text: ruText(z.range_text || z.id) + (cur ? ' ◂ сейчас' : '') }),
+              h('th', { scope: 'row' }, [h('span', { text: ruText(z.range_text || z.id) }), cur ? nowMark() : null]),
               h('td', { 'class': toneOf(z.mean_pct), text: isNum(z.mean_pct) ? fmtNum(z.mean_pct, 1, true) + '%' : '—' }),
               h('td', { text: share(z.hit) }),
               h('td', { text: isNum(z.weeks) ? String(z.weeks) : '—' })
@@ -1044,7 +1058,7 @@
             ])]),
             h('tbody', null, g.zones.map(function (z) {
               return h('tr', { 'class': z.id === g.zone ? 'is-current' : null }, [
-                h('th', { scope: 'row', text: range[z.id] + (z.id === g.zone ? ' ◂ сейчас' : '') }),
+                h('th', { scope: 'row' }, [h('span', { text: range[z.id] }), z.id === g.zone ? nowMark() : null]),
                 h('td', { 'class': toneOf(z.excess_pct), text: fmtNum(z.excess_pct, 1, true) + '%' }),
                 h('td', { text: share(z.hit) }), h('td', { text: String(z.months) })
               ]);
