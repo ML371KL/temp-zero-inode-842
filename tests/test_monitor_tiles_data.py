@@ -649,7 +649,7 @@ class TestТайлыНаЖивыхДанных(TileCase):
         t = self.tile("polymarket")
         self.assertIn("31.12.2026", t["headline"])
         self.assertNotIn("01.01.2027", t["headline"])
-        self.assertIn("+6.0 п.п. за неделю", t["headline"])
+        self.assertIn("+6,0 п.п. за неделю", t["headline"])
 
     def test_futoi_нетто_z_и_держатели_не_путаются(self):
         """Нетто-позиция, z-скор и ЧИСЛО ЛИЦ — три разные величины в одном заголовке.

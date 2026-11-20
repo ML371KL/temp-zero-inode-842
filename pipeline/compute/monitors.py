@@ -1129,17 +1129,51 @@ def _t_ofz_auctions(store, now):
                  meta.get("fetched_at"))
 
 
+# Изменение «за N дней» считается от точки не старше стольких дней до нужной даты:
+# в ряду есть пропуски (биржа не каждый день отдаёт суточный срез), но точка
+# двухнедельной давности за «неделю назад» не сойдёт.
+POLY_BACK_SLACK_DAYS = 3
+
+
 def _t_polymarket(store, now):
     pts, meta = _ser(store, "polymarket_ceasefire")
     if not pts:
         return _empty("polymarket")
     status = _st("polymarket_ceasefire", pts, meta, now)
-    asof, p = pts[-1]
     # Ряд может приходить долей (0..1) или процентами — нормализуем к процентам.
     scale = 100.0 if max(v for _, v in pts[-60:]) <= 1.0 else 1.0
+    # СМЕНА КОНТРАКТА (аудит 20.11.2026). С meta.contract_since ряд идёт по новому
+    # контракту серии — с другим сроком и потому с другим уровнем (декабрьский
+    # 2026 ~10 %, мартовский 2027 ~28 %). Точки до этой даты — прежний контракт:
+    # на графике они остаются, но сравнивать с ними сегодняшнее число нельзя.
+    since = str(meta.get("contract_since") or "")[:10] or None
+    cur = [(d, v) for d, v in pts if not since or d >= since]
+    asof, p = (cur or pts)[-1]
+    # Крупное число — цена «сейчас» (meta.price_now), если она свежее последнего
+    # суточного среза; сам ряд — только срезы. До 20.11.2026 цена в момент прогона
+    # писалась точкой дня и назавтра переписывалась срезом: вчерашнее значение
+    # менялось задним числом на величину до 2 п.п.
+    kind = "snapshot"
+    now_p, now_day = meta.get("price_now"), str(meta.get("price_now_at") or "")[:10]
+    if (isinstance(now_p, (int, float)) and not isinstance(now_p, bool) and _d(now_day)
+            and (not cur or now_day >= cur[-1][0])):
+        asof, p, kind = now_day, float(now_p), "now"
     prob = p * scale
-    chg7 = (_chg(pts, 7) or 0.0) * scale if len(pts) > 7 else None
-    chg30 = (_chg(pts, 30) or 0.0) * scale if len(pts) > 30 else None
+
+    def change(days):
+        """Изменение за N КАЛЕНДАРНЫХ дней внутри текущего контракта или None."""
+        day = _d(asof)
+        if day is None:
+            return None
+        target = (day - timedelta(days=days)).isoformat()
+        if since and target < since:
+            return None                     # через смену контракта не считаем
+        back = [(d, v) for d, v in cur if d <= target]
+        if not back or (_d(target) - _d(back[-1][0])).days > POLY_BACK_SLACK_DAYS:
+            return None
+        return (p - back[-1][1]) * scale
+
+    chg7, chg30 = change(7), change(30)
     # Горизонт — часть самого числа, а не подробность: вероятность «до даты»
     # зависит от того, сколько до неё осталось. Без срока «перемирие 2%» и
     # «перемирие 24%» выглядят противоречием, хотя это один рынок в один день.
@@ -1152,28 +1186,41 @@ def _t_polymarket(store, now):
     if not isinstance(horizon, int):
         a, b = _d(str(meta.get("end_date") or end_date)[:10]), _d(asof)
         horizon = (a - b).days if (a and b) else None
+    prev = meta.get("contract_prev") if isinstance(meta.get("contract_prev"), dict) else {}
+    prev_end = str(prev.get("resolves_on") or prev.get("end_date") or "")[:10] or None
     payload = {
         "prob_pct": _r(prob, 1),
+        "prob_kind": kind,
         "chg_7d_pp": _r(chg7, 1),
         "chg_30d_pp": _r(chg30, 1),
         "question": meta.get("question") or meta.get("note"),
         "end_date": end_date or None,
         "horizon_days": horizon if isinstance(horizon, int) else None,
         "market_volume_usd": _r(meta.get("volume"), 0),
+        "contract": meta.get("slug"),
+        "contract_since": since,
+        "contract_prev_end_date": prev_end if since else None,
         "series": [[d, _r(v * scale, 1)] for d, v in pts[-120:]],
     }
-    tail = f" ({_n(chg7, 1, True)} п.п. за неделю)" if chg7 is not None else ""
+    tail = f" ({_ru(chg7, 1, True)} п.п. за неделю)" if chg7 is not None else ""
     # Дата, а не месяц прописью: рынок разрешается КОНКРЕТНЫМ днём, а «к декабрю»
     # ещё и требует дательного падежа, которого в MONTHS_RU_NOM нет — «к декабрь
     # 2026» уехало в прод на один такт.
     when = f" до {_dmy(end_date)}" if end_date else ""
-    headline = f"Соглашение{when}: {_n(prob, 0)}%{tail}"
+    headline = f"Соглашение{when}: {_ru(prob, 0)}%{' сейчас' if kind == 'now' else ''}{tail}"
     note = ("История с 2022 года и мало разрешившихся событий — проверить предиктивность "
             "нечем; тайл нужен для чтения новостного фона.")
     if isinstance(horizon, int):
         note += (f" Показан самый торгуемый контракт серии, до его даты {horizon} дн.: "
                  f"у контрактов на исходе срока уровень определяется календарём, "
                  f"а не переговорами.")
+    if since:
+        was = f" вместо контракта до {_dmy(prev_end)}" if prev_end else ""
+        note += (f" С {_dmy(since)} показан контракт{when}{was}: уровень до и после "
+                 f"этой даты несопоставим, изменения считаются только внутри нового "
+                 f"контракта.")
+    if kind == "now":
+        note += " Крупное число — цена сейчас; график и изменения — по суточным срезам."
     return _tile("polymarket", status, asof, headline, payload, note,
                  meta.get("fetched_at"))
 

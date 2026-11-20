@@ -219,31 +219,85 @@ def _pick_primary(markets, now=None):
     return max(far, key=lambda x: (_volume(x[0]), str(x[0].get("endDate") or "")))
 
 
+DAY_SECONDS = 86400
+GRID_SLACK_SECONDS = 300
+
+
 def _history(token, limit_days=400):
-    """Дневная история цены YES -> {дата: вероятность}."""
+    """Суточные срезы цены YES -> ({дата: вероятность}, живая точка | None).
+
+    API отдаёт цену на суточной сетке (у декабрьского контракта 2026 — в 00:00
+    UTC каждого дня) и ПОСЛЕДНЕЙ строкой — цену «прямо сейчас», вне сетки:
+
+        … (19.11 00:00, 0,115) (20.11 00:00, 0,095) (20.11 05:28, 0,095)
+
+    До 20.11.2026 всё это шло в ряд подряд, и последняя точка дня оказывалась ценой
+    в момент прогона, а назавтра переписывалась срезом того же дня: значение
+    прошедшего дня менялось задним числом на величину до 2 п.п. (19.11: записано
+    0,095, срез дня — 0,115). Теперь ряд — только срезы сетки; живая точка
+    возвращается отдельно и в ряд не идёт.
+    """
     url = "%s/prices-history?market=%s&interval=max&fidelity=1440" % (CLOB, token)
     data = get_json(url)
-    points = {}
+    rows = []
     for row in (data or {}).get("history", [])[-limit_days:]:
         try:
-            day = datetime.fromtimestamp(int(row["t"]), timezone.utc).date().isoformat()
-            points[day] = round(float(row["p"]), 4)
+            rows.append((int(row["t"]), round(float(row["p"]), 4)))
         except (KeyError, TypeError, ValueError):
             continue
-    return points
+    rows.sort()
+    live = None
+    if len(rows) >= 2:
+        step = (rows[-1][0] - rows[-2][0]) % DAY_SECONDS
+        if GRID_SLACK_SECONDS < step < DAY_SECONDS - GRID_SLACK_SECONDS:
+            live = rows.pop()               # вне суточной сетки — это «сейчас»
+    points = {}
+    for stamp, price in rows:
+        day = datetime.fromtimestamp(stamp, timezone.utc).date().isoformat()
+        points.setdefault(day, price)       # первый срез дня; сетка даёт один на день
+    if live is not None:
+        live = {"at": datetime.fromtimestamp(live[0], timezone.utc)
+                .strftime("%Y-%m-%dT%H:%M:%SZ"), "price": live[1]}
+    return points, live
 
 
-def ceasefire():
+def _stored():
+    """(точки, meta) ряда из стора; пусто, если стора нет (автономный запуск)."""
+    try:
+        try:
+            from lib import store
+        except ImportError:
+            from pipeline.lib import store
+        series = store.load_series(SERIES_ID) or {}
+    except Exception:  # noqa: BLE001 — стор не обязателен для разбора API
+        return {}, {}
+    return (series.get("points") or {}), (series.get("meta") or {})
+
+
+def ceasefire(now=None):
     """-> ("polymarket_ceasefire", {дата: вероятность YES}, meta).
 
     В meta: slug и вопрос выбранного рынка (без них число нечитаемо), список всех
     живых рынков серии с ценами и признак contaminated для «старого» критерия.
+
+    СМЕНА КОНТРАКТА (аудит 20.11.2026). Выбор контракта сам переезжает на
+    следующий, когда до расчёта текущего остаётся меньше 30 суток: около 2–3
+    декабря 2026 — с декабрьского (цена ~0,095) на мартовский 2027 (~0,285).
+    Прежний код при этом доливал в ряд ВСЮ историю нового контракта и переписывал
+    прошлое с 19.08: уровень прыгал задним числом, изменения «за неделю» и «за
+    месяц» у стыка становились ложными. Теперь:
+      * история прежнего контракта не переписывается — новый пишется только с
+        даты смены (meta.contract_since);
+      * идентификатор выбранного контракта и его срок лежат в meta (slug,
+        end_date, resolves_on), прежний — в meta.contract_prev;
+      * цена в момент прогона — в meta.price_now, а не точкой ряда.
     """
+    moment = now or datetime.now(timezone.utc)
     markets, errors = _collect_markets()
     if not markets:
         return SERIES_ID, {}, _meta("error", GAMMA,
                                     "; ".join(errors) or "серии не найдены")
-    primary = _pick_primary(markets)
+    primary = _pick_primary(markets, moment)
     if primary is None:
         return SERIES_ID, {}, _meta("stale", GAMMA,
                                     "все рынки серий закрыты — нужен новый slug",
@@ -257,31 +311,53 @@ def ceasefire():
     board.sort(key=lambda r: str(r["end_date"] or "9999"))
     price = _yes_price(market)
     token = _yes_token(market)
-    points, note = {}, None
+    history, live, note = {}, None, None
     if token:
         try:
-            points = _history(token)
+            history, live = _history(token)
         except FetchError as exc:
             note = "история цен не отдалась (%s), взята текущая котировка" % exc
-    today = datetime.now(timezone.utc).date().isoformat()
-    if price is not None:
-        points[today] = round(price, 4)     # свежая котировка поверх истории
-    if not points:
+    if price is None and live:
+        price = live["price"]
+    if not history and price is None:
         return SERIES_ID, {}, _meta("error", GAMMA, "нет ни истории, ни цены",
                                     {"errors": errors})
+
+    # Тот же контракт, что в ряду, или новый?
+    slug = market.get("slug")
+    today = moment.date().isoformat()
+    old_points, old_meta = _stored()
+    prev_slug = old_meta.get("slug")
+    since = old_meta.get("contract_since")
+    prev = old_meta.get("contract_prev")
+    if old_points and prev_slug and slug and prev_slug != slug:
+        since = today
+        prev = {"slug": prev_slug, "question": old_meta.get("question"),
+                "resolves_on": old_meta.get("resolves_on"),
+                "end_date": old_meta.get("end_date"),
+                "until": max((d for d in old_points if d < today), default=None)}
+    points = {d: v for d, v in history.items() if not since or d >= str(since)[:10]}
+    stamp = moment.strftime("%Y-%m-%dT%H:%M:%SZ")
     return SERIES_ID, points, _meta(
         "ok", "https://polymarket.com/event/%s" % (event_slug or ""),
         note or market.get("question"),
-        {"slug": market.get("slug"), "event_slug": event_slug,
+        {"slug": slug, "event_slug": event_slug,
          "question": market.get("question"), "end_date": market.get("endDate"),
-         "horizon_days": _horizon_days(market), "volume": _volume(market) or None,
+         "horizon_days": _horizon_days(market, moment), "volume": _volume(market) or None,
          "resolves_on": _question_date(market.get("question")),
+         "contract_since": since, "contract_prev": prev,
+         "price_now": round(price, 4) if price is not None else None,
+         "price_now_at": stamp if price is not None else None,
+         # asof ряда — день последнего СРЕЗА; в день смены контракта срезов нового
+         # ещё может не быть, и asof честно остаётся прежним (store считает сам).
          "contaminated": contaminated, "markets": board, "errors": errors,
          "criteria_note": "серии без слова agreement разрешались YES по краткому "
                           "перемирию — сравнивать их с «соглашением» нельзя",
          "splice": "до 20.08.2026 ряд шёл по БЛИЖАЙШЕМУ контракту серии и в конце "
                    "его жизни съезжал к нулю по календарю, а не по новостям; с "
-                   "20.08.2026 берётся самый торгуемый с горизонтом ≥30 суток"})
+                   "20.08.2026 берётся самый торгуемый с горизонтом ≥30 суток. "
+                   "Точки ряда — суточные срезы цены; при смене контракта прошлое "
+                   "не переписывается (meta.contract_since)"})
 
 
 def search_events(query="russia ukraine ceasefire"):
