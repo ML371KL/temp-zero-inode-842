@@ -92,6 +92,19 @@ class TestDailySnapshots(PolyCase):
         self.assertEqual(points["2026-11-19"], 0.115)
         self.assertNotIn(0.14, points.values())
 
+    def test_день_без_среза_живой_ценой_не_заполняется(self):
+        # Суточного среза за сегодня ещё нет (в истории бывают пропуски), есть
+        # только живая строка. Точки дня из неё не получается: завтра её пришлось
+        # бы переписывать срезом — либо она осталась бы в ряду навсегда.
+        # мутация: оставлять живую строку среди срезов -> за 20.11 ляжет 0,14.
+        rows = self.fx["history"]["december-31-2026"]["history"]
+        del rows[-2]                                  # срез 20.11 00:00
+        rows[-1]["p"] = 0.14                          # живая строка 20.11 05:28
+        points, meta, _ = self.run_at(datetime(2026, 11, 20, 5, 31, tzinfo=UTC))
+        self.assertNotIn("2026-11-20", points)
+        self.assertEqual(max(points), "2026-11-19")
+        self.assertEqual(meta["price_now"], 0.095)    # цена рынка из ответа серии
+
     def test_цена_сейчас_лежит_в_meta(self):
         _points, meta, saved = self.run_at(datetime(2026, 11, 20, 5, 31, tzinfo=UTC))
         self.assertEqual(meta["price_now"], 0.095)

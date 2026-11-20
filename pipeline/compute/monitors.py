@@ -1166,8 +1166,7 @@ def _t_polymarket(store, now):
         if day is None:
             return None
         target = (day - timedelta(days=days)).isoformat()
-        if since and target < since:
-            return None                     # через смену контракта не считаем
+        # cur — только точки текущего контракта: через дату смены сравнивать не с чем.
         back = [(d, v) for d, v in cur if d <= target]
         if not back or (_d(target) - _d(back[-1][0])).days > POLY_BACK_SLACK_DAYS:
             return None
