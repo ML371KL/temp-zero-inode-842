@@ -27,7 +27,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from pipeline.lib import commentary, constants, nexus, telegram, wording
+from pipeline.lib import commentary, constants, nexus, registry, telegram, wording
 from pipeline.lib import dates as datelib
 
 STATE_NAME = "alerts_state.json"
@@ -658,6 +658,16 @@ def _month_word(month, now):
     return name[:-len(year)].strip() if name.endswith(" " + year) else name
 
 
+def _urals_visible_from(month):
+    """С какого дня расчёта панель видит месяц налоговой цены: конец месяца + лаг
+    доступности ряда из реестра (pub_lag_days). None — посчитать не удалось."""
+    try:
+        lag = (registry.SERIES.get("urals_tax") or {}).get("pub_lag_days") or 0
+        return datelib.apply_pub_lag(month, lag).isoformat()
+    except (TypeError, ValueError):
+        return None
+
+
 def _urals_month(payload, prev, state, now):
     pl = (_mons(payload).get("rub_barrel") or {}).get("payload") or {}
     month, usd = pl.get("tax_month"), pl.get("urals_usd")
@@ -676,11 +686,20 @@ def _urals_month(payload, prev, state, now):
     # память при этом не двигаем, событие родится в нём.
     if payload.get("run_mode") == "intraday" or payload.get("compute_error"):
         return []
+    pos = (payload.get("verdict") or {}).get("position") or {}
+    # И полный прогон видит новый месяц не сразу: панель берёт значение месяца с даты
+    # ДОСТУПНОСТИ (конец месяца + лаг ряда), а день расчёта — последний день с
+    # закрытием. 05.11.2026 цена легла в хранилище днём, месячный прогон в 18:07 МСК
+    # считал по закрытию 03.11 и октябрьской цены в оценке ещё не имел; сдвиг на 0,06
+    # показал только вечерний расчёт за 05.11. Событие ждёт именно его.
+    visible = _urals_visible_from(month)
+    asof = str(pos.get("decision_day") or payload.get("asof_trading_day") or "")[:10]
+    if visible and asof and asof < visible:
+        return []
     state["urals_alerted"] = {"month": month, "usd": usd}
     age = _age_days(month, now)
     if age is None or age > URALS_FRESH_DAYS:
         return []
-    pos = (payload.get("verdict") or {}).get("position") or {}
     comp, was = pos.get("comp_daily"), prev.get("comp_daily")
     oil, legs_n = _oil_contrib(pos)
     oil_was = prev.get("oil_contrib")

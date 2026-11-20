@@ -512,6 +512,25 @@ class TestUralsMonth(AuditCase):
         # Память при этом сдвинулась: следующий настоящий месяц меряется от него.
         self.assertEqual(self.state()["urals_alerted"]["month"], "2026-04-30")
 
+    def test_расчёт_за_день_до_доступности_месяца_ждёт(self):
+        """05.11.2026: цена легла в хранилище днём, а месячный прогон в 18:07 МСК
+        считал по закрытию 03.11 и октябрьской цены в оценке ещё не имел.
+
+        мутация: не сверять день расчёта с датой доступности месяца -> событие
+        уходит с «оценка −0,27 → −0,27», а настоящий сдвиг вечером проходит молча.
+        """
+        self.seed(payload())
+        self.tick("2026-06-30", 63.52, comp=-0.25, oil=-1.42)
+        early = dict(decision_day="2026-08-04")            # июль виден с 05.08
+        legs = [dict(r, contrib=-1.42) if r["id"] == "urals_rub_gap" else r for r in LEGS]
+        block = score("long", comp=-0.25, held_by={"by": "open", "legs": legs}, **early)
+        evs = self.run_at(payload(position=block, run_mode="monthly", asof="2026-08-04",
+                                  monitors=[tile_cb(), barrel("2026-07-31", 59.02)]), 1)
+        self.assertEqual(evs, [])
+        self.assertEqual(self.state()["urals_alerted"]["month"], "2026-06-30")
+        evs = self.tick("2026-07-31", 59.02, 6, mode="daily", comp=-0.31, oil=-1.60)
+        self.assertIn("urals_month", [e["kind"] for e in evs])
+
     def test_интрадей_такт_ждёт_полного_расчёта(self):
         """Интрадей несёт вердикт прошлого расчёта: «оценка после» была бы оценкой ДО.
 
