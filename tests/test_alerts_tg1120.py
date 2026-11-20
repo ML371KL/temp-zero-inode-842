@@ -94,6 +94,37 @@ class TestWatchOffGate(AuditCase):
                       evs[0]["detail"])
 
 
+class TestWatchExpiry(AuditCase):
+    """Предупреждение не досылается после своего дня решения."""
+
+    def setUp(self):
+        super().setUp()
+        self.seed(payload(position=score("long", comp=0.05)))
+        self.down = {"alerts", "ops"}
+        # Пт 14.08, 19:05 МСК: расчёт ещё за чт 13.08, оценка за порогом, день решения —
+        # сегодня; канал лежит.
+        self.run_at(payload(position=score("long", comp=-0.24, decision_day="2026-08-13"),
+                            run_mode="daily", asof="2026-08-13"), 72)
+        self.down = set()
+
+    def test_после_дня_решения_предупреждение_не_досылается(self):
+        """мутация: общие сутки очереди -> «в пт 14.08 возможен переход» приходит в
+        субботу 07:30 досылкой, когда решение уже принято.
+        """
+        self.run_at(payload(position=score("long", comp=-0.1, decision_day="2026-08-14",
+                                           is_decision_day=True, next_decision="2026-08-21"),
+                            run_mode="daily", asof="2026-08-14"), 84.4)   # сб 07:30 МСК
+        self.assertEqual(self.market(), [])
+        self.assertEqual([k for k in self.pending_keys() if k.startswith("position_watch")], [])
+
+    def test_до_конца_дня_решения_досылается(self):
+        self.run_at(payload(position=score("long", comp=-0.24, decision_day="2026-08-13"),
+                            run_mode="intraday", asof="2026-08-13"), 73)  # пт 20:05 МСК
+        got = [t for t in self.market() if "В день решения возможен переход" in t]
+        self.assertEqual(len(got), 1)
+        self.assertIn("⏳", got[0])
+
+
 class TestUralsMonthWording(AuditCase):
 
     def tick(self, month, usd, hours=0.0, **pos):

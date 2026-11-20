@@ -1838,6 +1838,14 @@ def _fresh(ev, now):
         return False
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
+    if ev.get("kind") == "position_watch":
+        # Предупреждение о дне решения, прошедшем по Москве, — уже не предупреждение:
+        # ответ на него (смена позиции или отбой) пришёл или придёт сам. Общие сутки
+        # очереди пропускали «в пт возможен переход…» досылкой в субботу (проверка
+        # уведомлений 20.11.2026). День решения — в ключе: position_watch:<день>:<куда>.
+        parts = str(ev.get("key") or "").split(":")
+        if len(parts) > 2 and now.astimezone(wording.MSK).strftime("%Y-%m-%d") > parts[1]:
+            return False
     limit = (timedelta(days=MUST_DELIVER_MAX_DAYS) if must_deliver(ev)
              else timedelta(hours=PENDING_MAX_HOURS))
     return now - ts < limit
