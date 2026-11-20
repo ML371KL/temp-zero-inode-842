@@ -176,6 +176,49 @@ class CalendarCase(unittest.TestCase):
         self.assertAlmostEqual(sber["index_drag_pct"], 13.9 * 13.49 / 100, places=3)
         self.assertLess(sber["index_drag_pct"], sber["yield_pct"])
 
+    def test_день_гэпа_по_торговому_календарю(self):
+        """Реестр в выходной — гэп в последний торговый день до него (режим Т+1).
+
+        ФосАгро, декабрь 2026 (данные брокера из боевого стора): реестр вс 13.12,
+        последний день покупки чт 10.12 — без дивиденда бумага торгуется с пт 11.12.
+        мутация: считать днём гэпа дату реестра -> 13.12, воскресенье: гэп индекса
+        приписан дню, когда торгов нет, и на два дня позже настоящего.
+        """
+        gap = self.d.gap_day
+        self.assertEqual(gap("2026-12-13", "2026-12-10"), "2026-12-11")
+        self.assertEqual(gap("2026-12-13"), "2026-12-11")          # и без подсказки брокера
+        self.assertEqual(gap("2026-12-12"), "2026-12-11")          # суббота
+        # Будни: гэп в день реестра (Сбербанк: реестр пн 20.07, купить до пт 17.07;
+        # X5: реестр пт 11.12, купить до чт 10.12).
+        self.assertEqual(gap("2026-07-20", "2026-07-17"), "2026-07-20")
+        self.assertEqual(gap("2026-12-11", "2026-12-10"), "2026-12-11")
+        # Праздник: реестр ср 04.11.2026 — гэп во вторник 03.11.
+        self.assertEqual(gap("2026-11-04"), "2026-11-03")
+        # Сверка с днём покупки: гэп не раньше следующего торгового дня после него.
+        self.assertEqual(gap("2026-12-13", "2026-12-11"), "2026-12-14")
+
+    def test_в_календаре_день_гэпа_а_дата_реестра_рядом(self):
+        # Отсечка Яндекса из фикстуры (пн 21.09.2026) перенесена на воскресенье 20.09.
+        # мутация: не применять gap_day в calendar() -> точка ряда и строка тайла
+        # датированы воскресеньем.
+        self.serve(tinvest_ok=True)
+        real = self.tv.dividends
+
+        def shifted(uid, frm, till):
+            rows = real(uid, frm, till)
+            for r in rows:
+                if r["record_date"] == "2026-09-21":
+                    r["record_date"], r["last_buy_date"] = "2026-09-20", "2026-09-17"
+            return rows
+        with mock.patch.object(self.tv, "dividends", side_effect=shifted):
+            _sid, pts, meta = self.d.calendar(with_amounts=False)
+        ydex = next(i for i in meta["items"] if i["ticker"] == "YDEX")
+        self.assertEqual(ydex["record_date"], "2026-09-20")
+        self.assertEqual(ydex["ex_date"], "2026-09-18")
+        self.assertIn("2026-09-18", pts)
+        self.assertNotIn("2026-09-20", pts)
+        self.assertIn("2026-09-18", meta["index_drag_pct"])
+
     def test_бумаги_вне_индекса_отбрасываются(self):
         self.serve(tinvest_ok=False)
         _sid, _pts, meta = self.d.calendar(with_amounts=False)
