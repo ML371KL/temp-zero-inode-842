@@ -745,10 +745,13 @@ def _index_yield_guarded(sec, sid, start, end, bootstrap):
         return best
 
     guard_since = YIELD_GUARD_SINCE.get(sec.upper(), "0000-00-00")
-    legacy = {d: v for d, v in exchange.items() if d < guard_since}
+    # Оценённые дни биржа не переписывает и до даты охраны: с 21.11.2026 там лежит
+    # медиана, досчитанная по истории (ops/backfill_hy_median.py), и пересборка ряда
+    # с нуля иначе вернула бы поверх неё биржевую средневзвешенную.
+    legacy = {d: v for d, v in exchange.items() if d < guard_since and d not in known}
     outliers = []
     if legacy:
-        # До даты охраны оценок нет — действует прежнее правило соседей (нужно
+        # До даты охраны нет живых оценок — действует прежнее правило соседей (нужно
         # только пересборке ряда с нуля: обычное окно туда не достаёт).
         legacy, outliers = _drop_local_outliers(sid, legacy)
     points = dict(legacy)
