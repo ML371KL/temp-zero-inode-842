@@ -17,8 +17,8 @@
 * главное (MUST_DELIVER_KINDS — смена позиции) — живёт в очереди до доставки, но не
   дольше MUST_DELIVER_MAX_DAYS и не дольше следующей смены; о недоставке дольше часа
   уходит тревога в канал отказов обвязки;
-* журнальное (JOURNAL_KINDS — флаги ворот) — только журнал страницы: ни телеграма,
-  ни хаба, ни разбора моделью.
+* журнальное (JOURNAL_KINDS — флаги ворот и дневной разворот оценки) — только
+  журнал страницы: ни телеграма, ни хаба, ни разбора моделью.
 """
 
 import json
@@ -103,8 +103,21 @@ def is_ops(event):
 # будет смена позиции. Всё, что из состояния рынка требует действия, приходит
 # событием position_change (ворота закрылись при позиции «акции» — это оно и есть);
 # остальное — справка, и её место в журнале страницы.
+#
+# ДНЕВНОЙ РАЗВОРОТ ОЦЕНКИ (core_flip) — туда же (проверка уведомлений 20.11.2026, хвост
+# аудита). Он стоит на дневной оценке с порогом ±0,1, а решение — на знаке в день
+# решения с порогом ±0,2, и сам о себе пишет «позицию это само не меняет». Три довода:
+# 1) с 20.11 то, что в нём было полезного — «оценка ушла за порог против позиции до дня
+#    решения», — точнее говорит position_watch, с порогом и днём решения;
+# 2) в день решения он противоречил соседнему сообщению: «развернулась вниз… позицию это
+#    само не меняет» и тем же прогоном «Позиция: переход в деньги — оценка ушла ниже
+#    −0,2»;
+# 3) разворот 19.10.2026 «+0,10 (нейтрально) → −0,10 (нейтрально)» ушёл со звуком и 📉,
+#    хотя страница оба числа называет нейтральным сигналом (сила сигнала, ±0,2).
+# На истории он срабатывал около трёх раз в год — не шум по счёту, но ни одного раза не
+# требовал действия. Запись в журнале страницы остаётся.
 JOURNAL_KINDS = frozenset({"buy_window_open", "bond_flag_on", "bond_flag_off",
-                           "state_cell_change"})
+                           "state_cell_change", "core_flip"})
 JOURNAL = "journal"      # исход доставки журнального события: в сеть не ходили
 
 
@@ -315,6 +328,8 @@ def _core_flip(payload, prev, state, now):
 
     Без гистерезиса композит, болтающийся около нуля, шлёт по алерту в день —
     ровно это и заставило зафиксировать CORE_FLIP_HYSTERESIS в валидации.
+
+    С 20.11.2026 — только запись журнала страницы (JOURNAL_KINDS, там же доводы).
     """
     core = payload.get("core") or {}
     val = core.get("value")
@@ -438,7 +453,28 @@ def _holder_line(pos):
             f"{_num(holder[1], 2, True)}.")
 
 
-def held_lines(pos):
+def _sign_agrees(pos):
+    """Знак дневной оценки совпадает со знаком решения (или знак решения не известен).
+
+    Знак решения (comp_state) ставится только в день решения и между порогами ±0,2
+    держится прежним, а дневная оценка ходит каждый день. Вход в акции 15.10.2026
+    случился по воротам при знаке решения «за акции» и дневной оценке −0,06: строка
+    «знак оценки держит нефть, без неё было бы +0,30» объясняла бы МИНУС, тогда как
+    позицию держит плюс знака решения, — два разных знака в одной фразе (проверка
+    уведомлений 20.11.2026).
+    """
+    comp, sign = pos.get("comp_daily"), pos.get("comp_state")
+    if sign not in (1, -1) or not isinstance(comp, (int, float)) or comp == 0:
+        return True
+    return (comp > 0) == (sign > 0)
+
+
+# Ориентир «до входа/выхода по оценке рынка хватило бы одного из …» — три строки сдвигов;
+# он есть на странице и во входе разбора, в факт сообщения не идёт.
+_LEGS_HINT = "хватило бы одного из"
+
+
+def held_lines(pos, now=None):
     """Что держит позицию и что её сменит — ФАКТ, из held_by и conditions (аудит 20.11.2026).
 
     Разбор модели к выходу 06.11 назвал причиной стресс облигаций и индекс ниже
@@ -451,34 +487,46 @@ def held_lines(pos):
     comp = pos.get("comp_daily")
     score = _num(comp, 2, True) if isinstance(comp, (int, float)) else ""
     thr = _num(_thr(pos), 1, False)
+    agrees = _sign_agrees(pos)
+    # Знак решения «за акции» при дневной оценке другого знака: называем день, с
+    # которого он стоит, а число — словом «сейчас». Иначе «знак — за акции (оценка
+    # −0,07)» читается как опечатка (_sign_agrees).
+    since = pos.get("comp_state_since")
+    sign_since = f" с {_wd(since, now)}" if since and not agrees else ""
+    value = "сейчас оценка" if not agrees else "оценка"
     by = held.get("by")
     if by == "comp":
         head = ("оценка рынка" + (f" — {score} при пороге входа +{thr}" if score else "")
                 + f"; {wording.GATE_WORD} открыты")
     elif by == "gate":
-        head = (f"закрытые {wording.GATE_WORD}; знак оценки рынка — за акции"
-                + (f" (оценка {score})" if score else ""))
+        head = (f"закрытые {wording.GATE_WORD}; знак оценки рынка — за акции{sign_since}"
+                + (f" ({value} {score})" if score else ""))
     elif by == "both":
         head = (f"и закрытые {wording.GATE_WORD}, и оценка рынка"
                 + (f" ({score} при пороге входа +{thr})" if score else ""))
     elif by == "open":
-        head = (f"{wording.GATE_WORD} открыты, знак оценки рынка — за акции"
-                + (f" (оценка {score}, порог выхода −{thr})" if score else ""))
+        head = (f"{wording.GATE_WORD} открыты, знак оценки рынка — за акции{sign_since}"
+                + (f" ({value} {score}, порог выхода −{thr})" if score else ""))
     else:
         head = ""
     lines = []
     if head:
-        lines.append(" ".join(x for x in (f"Что держит позицию: {head}.", _holder_line(pos))
-                              if x))
+        holder = _holder_line(pos) if agrees else ""
+        lines.append(" ".join(x for x in (f"Что держит позицию: {head}.", holder) if x))
     legs = _legs_line(pos)
     if legs:
         lines.append(legs)
-    conditions = [c for c in pos.get("conditions") or [] if isinstance(c, str) and c.strip()]
+    conditions = [c.strip() for c in pos.get("conditions") or []
+                  if isinstance(c, str) and c.strip() and _LEGS_HINT not in c]
     if conditions:
-        # Только первое условие: второе — ориентир «хватило бы одного из …» на три
-        # строки, он есть на странице и во входе разбора.
-        cond = wording.sentence(wording.ru_decimals(conditions[0].strip()))
-        lines.append("Что сменит позицию: " + cond[:1].lower() + cond[1:])
+        cond = wording.sentence(wording.ru_decimals(conditions[0]))
+        line = "Что сменит позицию: " + cond[:1].lower() + cond[1:]
+        # При закрытых воротах и знаке решения «за деньги» условий два, и нужны оба:
+        # одно первое («ворота откроются…») обещало бы вход без оценки рынка.
+        for extra in conditions[1:2]:
+            second = wording.sentence(wording.ru_decimals(extra))
+            line += " Нужно и второе: " + second[:1].lower() + second[1:]
+        lines.append(line)
     return lines
 
 
@@ -531,7 +579,7 @@ def _position_change(payload, prev, now):
     if exec_missed:
         when.append(f"Закрытие исполнения ({_wd(exec_day, now)}) уже прошло.")
     detail = "\n".join(x for x in ([reason] if reason else []) + [" ".join(when)]
-                       + held_lines(pos) if x)
+                       + held_lines(pos, now) if x)
     # Заголовок называет ДЕЙСТВИЕ, а строка ниже — движение со ставкой. Прежний
     # заголовок «Позиция: деньги → акции» дословно повторял эту строку, и лента
     # читала «Позиция: деньги → акции деньги (ставка 13,1%) → акции» (аудит B5).
@@ -601,12 +649,17 @@ def _position_watch(payload, prev, state, now, changed):
                         else f"пороге входа +{_num(thr, 1, False)}")
                 when = (f"В день решения, {_wd(day, now)}," if asof == day
                         else f"День решения был {_wd(day, now)}; на {_wd(asof, now)}")
+                # Оценка прошла порог входа, а позиция осталась «деньги»: за неделю
+                # закрылись ворота. Без этой оговорки отбой читается как сбой правила.
+                why = (f", её держат закрытые {wording.GATE_WORD}"
+                       if memo.get("to") == "long" and pos.get("state") == "flat"
+                       and pos.get("gate_open") is False else "")
                 out.append(_ev(f"position_watch_off:{day}:{memo.get('to')}",
                                "position_watch_off",
                                "День решения прошёл без смены позиции", "info", now,
                                detail=f"{when} оценка рынка {_num(comp, 2, True)} при "
                                       f"{side}. Позиция осталась прежней — "
-                                      f"{POSITION_WORD[pos['state']]}."))
+                                      f"{POSITION_WORD[pos['state']]}{why}."))
             memo = None
     if payload.get("run_mode") != "daily" or pos.get("is_decision_day") or changed:
         return out
@@ -722,15 +775,24 @@ def _urals_month(payload, prev, state, now):
         elif state_now == "flat" and pos.get("comp_state") != 1:
             gap = thr - comp
             lines.append(f"Порог входа в акции +{_num(thr, 1, False)}: "
-                         + (f"оценка выше его на {_num(-gap, 2, False)}." if gap < 0
-                            else f"до него {_num(gap, 2, False)}."))
+                         + (f"оценка выше его на {_num(-gap, 2, False)}" if gap < 0
+                            else f"до него {_num(gap, 2, False)}")
+                         # При закрытых воротах одной оценки для входа мало.
+                         + (f"; нужны и открытые {wording.GATE_WORD}"
+                            if pos.get("gate_open") is False else "") + ".")
         elif state_now == "flat":
             lines.append(f"Знак оценки — за акции; позицию держат закрытые {wording.GATE_WORD}.")
-    day = pos.get("decision_day") if pos.get("is_decision_day") else pos.get("next_decision")
+    decision_today = bool(pos.get("is_decision_day"))
+    day = pos.get("decision_day") if decision_today else pos.get("next_decision")
     if day:
-        lines.append(("День решения — сегодняшний расчёт, " if pos.get("is_decision_day")
+        lines.append(("День решения — сегодняшний расчёт, " if decision_today
                       else "День решения — ") + f"{_wd(day, now)}.")
     was_usd = memo.get("usd")
+    # В день решения «позицию это само не меняет» было бы неправдой: знак читается
+    # этим же расчётом, уже с новой ценой, и смена позиции может прийти тем же прогоном.
+    tail = ("Сегодня день решения: знак оценки прочитан этим же расчётом — уже с новой "
+            "ценой нефти." if decision_today else
+            "Позицию это само не меняет: знак оценки читается в день решения.")
     return [_ev(f"urals_month:{month}", "urals_month",
                 f"Вышла налоговая цена нефти за {_month_word(month, now)}", "info", now,
                 before=(f"${_num(was_usd, 2)} ({_month_word(last, now)})"
@@ -738,8 +800,7 @@ def _urals_month(payload, prev, state, now):
                 after=f"${_num(usd, 2)} за баррель Urals ({_month_word(month, now)})",
                 detail="\n".join(lines) or None,
                 meaning="Цена нефти входит в оценку рынка раз в месяц, поэтому сдвиг "
-                        "приходит разом. Позицию это само не меняет: знак оценки "
-                        "читается в день решения.")]
+                        "приходит разом. " + tail)]
 
 
 # ------------------------------------------------------------ флаги ворот (журнал)
@@ -769,9 +830,20 @@ def _gate_code(flags):
 
 
 def _dist_text(payload, flag):
+    """Где признак сейчас и где его снимают ВОРОТА — подробность записи журнала.
+
+    Строка distances[].text — о сыром признаке: у облигаций «флаг снимется при −3,9%»
+    — это порог включения, а ворота снимают флаг выше −3,0% (text_off). Семейство
+    стоит на флагах ворот (с 20.11.2026), поэтому там, где пороги разные, к значению
+    приклеивается порог ворот, а хвост о сыром пороге отрезается.
+    """
     for row in (payload.get("states") or {}).get("distances") or []:
         if isinstance(row, dict) and row.get("id") == flag and row.get("text"):
-            return wording.sentence(wording.ru_decimals(row["text"]))
+            text = str(row["text"])
+            off = row.get("text_off")
+            if off and row.get("off_threshold") != row.get("threshold"):
+                text = text.split(";")[0].strip() + "; " + str(off)
+            return wording.sentence(wording.ru_decimals(text))
     return ""
 
 
@@ -1287,7 +1359,10 @@ def _unit_events(units, old, down, payload, now, core=False):
             # «Индекс гособлигаций» (ряд rgbi, источник iss): данные от 17.11.
             head = ((f"«{label}» " if label else "")
                     + f"(ряд {who}" + (f", источник {family}" if family else "") + "): ")
-            data_from = head + f"данные от {day}."
+            # У пустого ряда своей даты нет: день вердикта на её месте спорил бы с
+            # заголовком «в хранилище нет ни одной точки».
+            data_from = head + (f"данные от {day}." if meta.get("asof")
+                                else "своих точек в хранилище нет.")
         else:
             data_from = ((f"Ряд {series}: данные от " if series and series != name
                           else "Данные в панели от ") + f"{day}.")
@@ -1312,23 +1387,29 @@ def _unit_events(units, old, down, payload, now, core=False):
             # ключ quotes-agent, август 2026): ключ без ветки выздоровления
             # превращает канал в источник тревоги без разрядки.
             if was_bad:
-                lasted = (f" Сбой длился {wording.hours_minutes((now - since).total_seconds() / 60)}"
+                # Сутки и больше — в сутках: «187 ч» никто не считает в уме (у месячного
+                # ряда налоговой цены нефти сбой меряется днями).
+                lasted = (f" Сбой длился {wording.days_hours((now - since).total_seconds() / 60)}"
                           f" (с {wording.msk_when(since, now)})."
                           if since and now > since else "")
+                # «Смотреть» — туда, что на странице есть. Раздела «Источники» на ней
+                # нет с переделки витрины (fa614dc): о ряде решения говорит плашка
+                # вверху страницы, о мониторе — точка статуса на его карточке.
                 if core:
                     out.append(_ev(f"core_series_ok:{name}:{_stamp(since or now)}",
                                    "core_series_ok", f"ряд решения {name} снова обновляется",
                                    "info", now, fact=data_from + lasted,
                                    meaning="Решение о позиции снова считается по свежим "
                                            "числам этого ряда.",
-                                   where="Смотреть: раздел «Источники» на панели."))
+                                   where="Смотреть: страницу панели — плашка об источнике "
+                                         "вверху должна исчезнуть."))
                 else:
                     out.append(_ev(f"source_ok:{name}:{payload.get('asof_trading_day')}",
                                    "source_ok", f"источник {who} снова отвечает",
                                    "info", now, fact=data_from + lasted,
                                    meaning="Жёлтая точка с карточек этого источника снята — "
                                            "панель снова считает по свежим числам.",
-                                   where="Смотреть: раздел «Источники» на панели."))
+                                   where="Смотреть: карточки этого источника на панели."))
             continue
         if was_bad:
             continue  # уже сообщали, повторять каждый прогон нельзя
@@ -1345,12 +1426,12 @@ def _unit_events(units, old, down, payload, now, core=False):
         # ошибке fetched_at свежий (make_meta пишет его и при отказе), и «0 мин назад»
         # про неудачный опрос читалось как «всё хорошо».
         age = meta.get("lag_min")
-        age_txt = (f" Последний удачный опрос {wording.hours_minutes(age)} назад."
+        age_txt = (f" Последний удачный опрос {wording.days_hours(age)} назад."
                    if isinstance(age, (int, float)) and st == "stale" else "")
         waited = now - since
         if waited >= timedelta(minutes=1):
             age_txt = (f" Сбой с {wording.msk_when(since, now)}, длится "
-                       f"{wording.hours_minutes(waited.total_seconds() / 60)}.") + age_txt
+                       f"{wording.days_hours(waited.total_seconds() / 60)}.") + age_txt
         # Две разные протухшести чинятся в разных местах: «не опрашивался» — это
         # конвейер или расписание, «отдаёт старое» — сам источник. Одно слово на
         # обе посылало владельца искать не там.
@@ -1371,8 +1452,11 @@ def _unit_events(units, old, down, payload, now, core=False):
         # индекс был свежий).
         # Время события — НАЧАЛО сбоя, а не конец выдержки: тревога, дождавшаяся
         # четвёртого такта, говорит о том, что сломалось пятнадцать минут назад.
-        where = (f"Смотреть: journalctl -u {unit} -n 50 "
-                 f"и раздел «Источники» на панели.")
+        # Раздела «Источники» на странице нет (см. отбивку выше): у ряда решения на
+        # ней горит плашка вверху, у монитора — точка статуса на карточке.
+        where = (f"Смотреть: journalctl -u {unit} -n 50"
+                 + ("; на странице — плашка об источнике вверху." if core
+                    else " и точку статуса на карточках этого источника."))
         if core:
             # Ключ — по НАЧАЛУ сбоя, а не по дню вердикта: второй отказ того же ряда
             # в тот же день — новая тревога, а не «уже отправляли».
@@ -1397,6 +1481,56 @@ def _stamp(moment):
     return moment.astimezone(timezone.utc).strftime("%Y%m%dT%H%M")
 
 
+# Сказуемое тревоги ряда решения во множественном числе — для общей тревоги рядов
+# одного источника (_group_core).
+_CORE_WORD_PLURAL = {
+    "не отвечает": "не отвечают",
+    "пуст: в хранилище нет ни одной точки": "пусты: в хранилище нет ни одной точки",
+    "отвечает, но отдаёт старые данные": "отвечают, но отдают старые данные",
+    "не опрашивался вовремя": "не опрашивались вовремя",
+}
+
+
+def _group_core(events, units):
+    """Тревоги и отбивки рядов решения одного источника за прогон — одним сообщением.
+
+    С 20.11.2026 у каждого ряда решения своя тревога, и полный отказ ISS давал пять
+    сообщений (семья и четыре ряда) и пять отбивок. Состояние по-прежнему у каждого
+    ряда своё (core_down, last.core_series): сливается только сообщение. Ключ несёт
+    все ряды через «+» — защёлка недоставленной тревоги разбирает его обратно.
+    """
+    groups = {}
+    for ev in events:
+        name = str(ev.get("key") or "").split(":")[1]
+        family = (units.get(name) or {}).get("family") or name
+        groups.setdefault((ev["kind"], family), []).append((name, ev))
+    out = []
+    for (kind, family), group in groups.items():
+        if len(group) == 1:
+            out.append(group[0][1])
+            continue
+        names = [name for name, _ in group]
+        evs = [ev for _, ev in group]
+        stamp = min(str(ev["key"]).split(":")[2] for ev in evs)
+        listed = ", ".join(names)
+        if kind == "core_series_stale":
+            words = {ev["title"][len(f"ряд решения {name} "):] for name, ev in group}
+            word = _CORE_WORD_PLURAL.get(words.pop()) if len(words) == 1 else None
+            title = f"ряды решения {listed} (источник {family}) " + (word or "не обновляются")
+            meaning = ("От этих рядов зависит решение о позиции: пока они не обновятся, "
+                       "панель считает позицию по их последним удачным числам.")
+        else:
+            title = f"ряды решения {listed} (источник {family}) снова обновляются"
+            meaning = "Решение о позиции снова считается по свежим числам этих рядов."
+        first = min(evs, key=lambda ev: ev.get("ts") or "")
+        merged = dict(first, key=f"{kind}:{'+'.join(names)}:{stamp}", title=title,
+                      fact="\n".join(ev.get("fact") or "" for ev in evs).strip(),
+                      meaning=meaning)
+        merged["text"] = wording.plain_text(merged)
+        out.append(merged)
+    return out
+
+
 def _sources(payload, prev, state, now):
     """Семьи источников (без рядов решения) и ряды решения — каждый своим правилом."""
     families = _family_units(payload)
@@ -1405,8 +1539,8 @@ def _sources(payload, prev, state, now):
     state["source_down"] = down
     series = _core_units(payload)
     core_down = _down_records(state, "core_down", series)
-    out += _unit_events(series, prev.get("core_series") or {}, core_down, payload, now,
-                        core=True)
+    out += _group_core(_unit_events(series, prev.get("core_series") or {}, core_down,
+                                    payload, now, core=True), series)
     state["core_down"] = core_down
     return out
 
@@ -1434,12 +1568,19 @@ def held_core_series(state):
 # даёт тревогу в канал отказов — с защёлкой до доставки (LATCH_FIELDS) и отбивкой,
 # когда расчёт снова прошёл.
 
-def _compute_failed(payload, prev, now, crash=None):
+def _compute_failed(payload, prev, now, crash=None, state=None):
     err, was = payload.get("compute_error"), prev.get("compute_error")
     mode = payload.get("run_mode") if payload.get("run_mode") in (
         "intraday", "daily", "weekly", "monthly", "manual") else "daily"
     asof = payload.get("asof_trading_day")
     day = now.astimezone(wording.MSK).strftime("%Y-%m-%d")
+    state = state if state is not None else {}
+    # НАЧАЛО сбоя. Каждый упавший полный прогон пишет в compute_error СВОЁ время, и
+    # снимок к отбивке помнит последнее: «не проходил с 07:30 МСК» о расчёте, который
+    # лежал полтора дня (суточный такт теперь и утром). Первое время держим отдельно.
+    if err and not state.get("compute_down_since"):
+        first = _parse_ts(str(err).split(" @ ")[-1].strip()) or now
+        state["compute_down_since"] = _iso(min(first, now))
     if err and not was:
         kind = str(err).split(" @ ")[0].strip() or "ошибка"
         note = str(crash or "").strip()
@@ -1454,8 +1595,12 @@ def _compute_failed(payload, prev, now, crash=None):
                             "хотя время обновления свежее. Сообщения о смене позиции не "
                             "будет, пока расчёт не пройдёт.",
                     where=f"Смотреть: journalctl -u moex-radar-{mode} -n 80.")]
+    if not err and payload.get("run_mode") != "intraday":
+        first = state.pop("compute_down_since", None)
+    else:
+        first = None
     if was and not err and payload.get("run_mode") != "intraday":
-        since = str(was).split(" @ ")[-1].strip()
+        since = first or str(was).split(" @ ")[-1].strip()
         return [_ev(f"compute_ok:{_stamp(now)}", "compute_ok",
                     "расчёт снова проходит", "info", now,
                     fact=f"Вердикт пересчитан, расчёт за {_day(asof, now)}."
@@ -1558,7 +1703,9 @@ def _core_missing(payload, prev, now):
 # ИТОГ ворот и наклона, и смена режима без смены позиции (или наоборот) — две разные
 # новости.
 REGIME_FAMILY = ("buy_window_open", "bond_flag_on", "bond_flag_off", "state_cell_change")
-assert JOURNAL_KINDS == frozenset(REGIME_FAMILY), "семейство режима живёт только в журнале"
+# Семейство режима живёт только в журнале; core_flip — тоже, но в семейство не сливается.
+assert frozenset(REGIME_FAMILY) | {"core_flip"} == JOURNAL_KINDS, \
+    "журнальные виды: семейство режима и дневной разворот оценки"
 
 SEVERITY_RANK = {"info": 0, "warn": 1}
 CAUSES_MAX = 4          # пять строк подряд читаются как шум (тот же предел у 837)
@@ -1660,7 +1807,7 @@ def detect(payload, state, now=None, merge=True, crash=None):
     events += _sources(payload, prev, state, now)
     events += _health(payload, prev, now)
     events += _core_missing(payload, prev, now)
-    events += _compute_failed(payload, prev, now, crash)
+    events += _compute_failed(payload, prev, now, crash, state)
     return merge_regime(events) if merge else events
 
 
@@ -1741,6 +1888,14 @@ def _fresh(ev, now):
         return False
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
+    if ev.get("kind") == "position_watch":
+        # Предупреждение о дне решения, прошедшем по Москве, — уже не предупреждение:
+        # ответ на него (смена позиции или отбой) пришёл или придёт сам. Общие сутки
+        # очереди пропускали «в пт возможен переход…» досылкой в субботу (проверка
+        # уведомлений 20.11.2026). День решения — в ключе: position_watch:<день>:<куда>.
+        parts = str(ev.get("key") or "").split(":")
+        if len(parts) > 2 and now.astimezone(wording.MSK).strftime("%Y-%m-%d") > parts[1]:
+            return False
     limit = (timedelta(days=MUST_DELIVER_MAX_DAYS) if must_deliver(ev)
              else timedelta(hours=PENDING_MAX_HOURS))
     return now - ts < limit
@@ -1758,11 +1913,24 @@ def _supersede(pending, events, now):
     if not fresh or not lost:
         return pending
     newest = fresh[-1]
+    # В очереди событие лежит и тогда, когда телеграм его ПРИНЯЛ, а не принял только
+    # хаб (доставлено = оба канала). Маркер телеграма есть — сообщение до канала
+    # дошло, и «не дошло» в новом сообщении было бы неправдой.
     notes = [f"Сообщение о предыдущей смене ({str(e.get('title') or '').split(': ')[-1]}, "
-             f"{wording.msk_when(e.get('ts'), now)}) до канала не дошло." for e in lost]
-    newest["detail"] = "\n".join([newest.get("detail") or ""] + notes).strip()
-    newest["text"] = wording.plain_text(newest)
+             f"{wording.msk_when(e.get('ts'), now)}) до канала не дошло." for e in lost
+             if not _telegram_got(e)]
+    if notes:
+        newest["detail"] = "\n".join([newest.get("detail") or ""] + notes).strip()
+        newest["text"] = wording.plain_text(newest)
     return [e for e in pending if not must_deliver(e)]
+
+
+def _telegram_got(event):
+    """Уходило ли событие в канал рынка (маркер дедупа телеграма). Не бросает."""
+    try:
+        return telegram.already_sent(event.get("key"))
+    except Exception:  # noqa: BLE001 — сомнение трактуем как «не дошло»: так было раньше
+        return False
 
 
 def payload_events(new_events=None, state=None):
@@ -1920,10 +2088,11 @@ def _snapshot_keeping_undelivered(payload, prev_last, batch, now, held=(), held_
             if name:
                 _keep_prev_source(snap, prev_last, name)
         if kind == "core_series_stale":
+            # Общая тревога рядов одного источника несёт их все через «+» (_group_core).
             parts = str(event.get("key") or "").split(":")
             name = parts[1] if len(parts) > 2 else None
-            if name:
-                _keep_prev_source(snap, prev_last, name, "core_series")
+            for one in (name.split("+") if name else ()):
+                _keep_prev_source(snap, prev_last, one, "core_series")
     return snap
 
 

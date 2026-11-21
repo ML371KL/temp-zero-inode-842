@@ -419,8 +419,10 @@ class TestBadAnswers(CommentaryCase):
 class TestAnnotate(CommentaryCase):
     def test_ops_events_never_get_a_comment(self):
         # Санитарные уходят в ops-канал: разбор рынка там не к месту и стоит денег.
+        # Рыночное событие здесь — решение ЦБ: дневной разворот оценки (core_flip) с
+        # 20.11.2026 живёт только в журнале страницы и разбора не получает вовсе.
         evs = [{"kind": "source_stale", "text": "Источник iss: error."},
-               {"kind": "core_flip", "text": "Ядро развернулось: +0.66."}]
+               {"kind": "cb_decision", "text": "Банк России снизил ключевую ставку: 14,00%."}]
         with self._urlopen(message("===0===\nРазбор одного события про разворот оценки сюда.\n")):
             filled = self.mod.annotate(evs, self.panel())
         self.assertEqual(filled, 1)
@@ -432,7 +434,7 @@ class TestAnnotate(CommentaryCase):
     def test_already_commented_event_is_not_asked_again(self):
         # Событие из очереди повторов уже несёт свой разбор — второй вызов был бы
         # лишними деньгами и лишним риском получить другой текст.
-        evs = [{"kind": "core_flip", "text": "Ядро развернулось.", "comment": "уже есть"}]
+        evs = [{"kind": "cb_decision", "text": "Банк России снизил ставку.", "comment": "уже есть"}]
         with self._urlopen(message(ANSWER)):
             self.assertEqual(self.mod.annotate(evs, self.panel()), 0)
         self.assertEqual(self.calls, [])
