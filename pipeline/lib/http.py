@@ -80,6 +80,9 @@ HOST_CA_BUNDLE = {
     # -> Russian Trusted Sub CA -> Root CA, код проверки 19. Без якоря imoex, rgbi,
     # mcftr и вся лента ISS встали, а решение о позиции считалось по числам 20.11.
     "iss.moex.com": "russian_trusted.pem",
+    # Сайт биржи на той же цепочке (замер 24.11.2026): без якоря счётчик СЧА рынка
+    # фондов денежного рынка (investfunds.moex_total_bln) падает с кодом 19.
+    "www.moex.com": "russian_trusted.pem",
 }
 CA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ca")
 

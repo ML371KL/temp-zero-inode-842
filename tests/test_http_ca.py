@@ -103,6 +103,8 @@ class CaBundleCase(unittest.TestCase):
         ISS падают CERTIFICATE_VERIFY_FAILED, позиция считается по старым числам.
         """
         self.assertIsNotNone(self.http.ssl_context("iss.moex.com"))
+        # сайт биржи (счётчик СЧА рынка фондов) — та же цепочка с 24.11.2026
+        self.assertIsNotNone(self.http.ssl_context("www.moex.com"))
 
     def test_системные_корни_не_потеряны(self):
         ctx = self.http.ssl_context("rosstat.gov.ru")
