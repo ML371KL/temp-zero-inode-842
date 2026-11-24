@@ -76,6 +76,10 @@ HOST_CA_BUNDLE = {
     # а meta винила подписку («ключ есть, но окна отданы бесплатным ISS») — то есть
     # выглядело как проблема оплаты, а было проблемой доверия к сертификату.
     "apim.moex.com": "russian_trusted.pem",
+    # Бесплатный ISS ушёл туда же 23.11.2026 (~21:20 МСК): та же цепочка *.moex.com
+    # -> Russian Trusted Sub CA -> Root CA, код проверки 19. Без якоря imoex, rgbi,
+    # mcftr и вся лента ISS встали, а решение о позиции считалось по числам 20.11.
+    "iss.moex.com": "russian_trusted.pem",
 }
 CA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ca")
 

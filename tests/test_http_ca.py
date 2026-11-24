@@ -76,8 +76,8 @@ class CaBundleCase(unittest.TestCase):
 
     def test_контекст_даётся_только_своим_хостам(self):
         self.assertIsNotNone(self.http.ssl_context("rosstat.gov.ru"))
-        for host in ("iss.moex.com", "www.cbr.ru", "minfin.gov.ru", "t.me",
-                     "rosstat.gov.ru.evil.example"):
+        for host in ("www.cbr.ru", "minfin.gov.ru", "t.me",
+                     "rosstat.gov.ru.evil.example", "iss.moex.com.evil.example"):
             self.assertIsNone(self.http.ssl_context(host),
                               f"чужой корень утёк на {host}")
 
@@ -95,8 +95,14 @@ class CaBundleCase(unittest.TestCase):
         деградирует до бесплатного.
         """
         self.assertIsNotNone(self.http.ssl_context("apim.moex.com"))
-        self.assertIsNone(self.http.ssl_context("iss.moex.com"),
-                          "бесплатный ISS в чужом якоре не нуждается")
+
+    def test_бесплатный_iss_закреплён(self):
+        """iss.moex.com с 23.11.2026 (~21:20 МСК) на той же цепочке Минцифры.
+
+        мутация: убрать хост из HOST_CA_BUNDLE -> imoex, rgbi, mcftr и вся лента
+        ISS падают CERTIFICATE_VERIFY_FAILED, позиция считается по старым числам.
+        """
+        self.assertIsNotNone(self.http.ssl_context("iss.moex.com"))
 
     def test_системные_корни_не_потеряны(self):
         ctx = self.http.ssl_context("rosstat.gov.ru")
